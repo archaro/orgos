@@ -1,0 +1,7 @@
+OrgOS
+
+A little operating system for the Raspberry Pi 4B that drivesa touchscreen,
+processes a config file, and spits out MIDI messages based on which buttons
+are pressed on the screen.
+
+It will be of absolutely no use to anyone else.

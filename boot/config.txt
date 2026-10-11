@@ -1,0 +1,12 @@
+# Force AArch64 execution
+arm_64bit=1
+
+# Load OrgOS
+kernel=kernel8.img
+
+# Enable the primary serial UART
+enable_uart=1
+
+# Disable Bluetooth and assign PL011 UART0 to GPIO14/15
+dtoverlay=disable-bt
+
