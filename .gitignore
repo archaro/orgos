@@ -1,4 +1,3 @@
-*.o
-kernel8.elf
+obj/
 kernel8.img
 
