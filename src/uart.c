@@ -17,6 +17,7 @@
 #define UART0_CR        (UART0_BASE + 0x30)
 #define UART0_ICR       (UART0_BASE + 0x44)
 
+#define UART_FR_RXFE	(1U << 4)
 #define UART_FR_TXFF    (1U << 5)
 
 #define UART_CR_UARTEN  (1U << 0)
@@ -96,3 +97,13 @@ void uart_putu32(uint32_t value) {
     uart_putc(buffer[--length]);
 }
 
+bool uart_has_data(void) {
+  return !(mmio_read(UART0_FR) & UART_FR_RXFE);
+}
+
+char uart_getc(void) {
+  while (!uart_has_data())
+    ;
+
+  return (char)(mmio_read(UART0_DR) & 0xffU);
+}

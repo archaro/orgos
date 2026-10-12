@@ -4,6 +4,7 @@
 #include "mailbox.h"
 #include "timer.h"
 #include "uart.h"
+#include "console.h"
 
 #define UART_BAUD 115200U
 
@@ -62,7 +63,7 @@ void main(void) {
 
   uart_puts("\nTimer test complete.\n");
 
-  for (;;)
-    __asm__ volatile("wfe");
+  uart_puts("\nOrgOS interactive console\nThis should echo back your input.\nEnsure local echo is ON.\n");
+  console_run();
 }
 
