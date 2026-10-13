@@ -75,41 +75,6 @@ void uart_putc(char c) {
   mmio_write(UART0_DR, (uint32_t)c);
 }
 
-void uart_puts(const char *s) {
-  while (*s) {
-    if (*s == '\n')
-      uart_putc('\r');
-
-    uart_putc(*s++);
-  }
-}
-
-void uart_putu32(uint32_t value) {
-  char buffer[10];
-  unsigned int length = 0;
-
-  do {
-    buffer[length++] = '0' + (value % 10U);
-    value /= 10U;
-  } while (value);
-
-  while (length)
-    uart_putc(buffer[--length]);
-}
-
-void uart_putu64(uint64_t value) {
-  char buffer[20];
-  unsigned int length = 0;
-
-  do {
-    buffer[length++] = '0' + (value % 10U);
-    value /= 10U;
-  } while (value);
-
-  while (length)
-    uart_putc(buffer[--length]);
-}
-
 bool uart_has_data(void) {
   return !(mmio_read(UART0_FR) & UART_FR_RXFE);
 }

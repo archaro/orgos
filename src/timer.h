@@ -4,6 +4,10 @@
 
 // Microseconds since the hardware counter started
 uint64_t timer_now_us(void);
+// Establish the OrgOS startup time
+void timer_init(void);
+// Microseconds since timer_start()
+uint64_t timer_uptime_us(void);
 
 // Busy-wait for the specified duration
 void timer_delay_us(uint64_t us);

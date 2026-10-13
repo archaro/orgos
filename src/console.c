@@ -11,42 +11,98 @@ typedef void (*console_command_fn)(const char *args);
 
 #include "timer.h"
 
-static void cmd_clock(const char *args) {
+static void cmd_timer(const char *args) {
   (void)args;
 
   // This function tells us some interesting information about the timer.
   uint64_t tick = timer_now_us();
 
-  uart_puts("System clock:\n");
-  uart_puts("  Counter    : ");
-  uart_putu64(tick);
-  uart_puts(" ticks\n");
-  uart_puts("  Frequency  : 1000000 Hz\n");
-  uart_puts("  Resolution : 1 us\n");
-  uart_puts("  Elapsed    : ");
-  uart_putu64(tick / 1000000U);
-  uart_putc('.');
+  console_puts("System timer:\n");
+  console_puts("  Counter    : ");
+  console_putu64(tick);
+  console_puts(" ticks\n");
+  console_puts("  Frequency  : 1000000 Hz\n");
+  console_puts("  Resolution : 1 us\n");
+  console_puts("  Elapsed    : ");
+  console_putu64(tick / 1000000U);
+  console_putc('.');
 
   uint32_t fraction = (uint32_t)(tick % 1000000U);
   uint32_t divisor = 100000U;
   while (divisor) {
-    uart_putc('0' + (fraction / divisor) % 10U);
+    console_putc('0' + (fraction / divisor) % 10U);
     divisor /= 10U;
   }
-  uart_puts(" seconds since time began.\n");
+  console_puts(" seconds since time began.\n");
 }
+
+static void cmd_uptime(const char *args) {
+  (void)args;
+
+  uint64_t seconds = timer_uptime_us() / 1000000U;
+  uint64_t days = seconds / 86400U;
+  seconds %= 86400U;
+  uint32_t hours = (uint32_t)(seconds / 3600U);
+  seconds %= 3600U;
+  uint32_t minutes = (uint32_t)(seconds / 60U);
+  seconds %= 60U;
+
+  console_puts("OrgOS uptime: ");
+  if (days) {
+    console_putu64(days);
+    console_puts(days == 1 ? " day, " : " days, ");
+  }
+  console_putu32(hours);
+  console_puts("h ");
+  console_putu32(minutes);
+  console_puts("m ");
+  console_putu32((uint32_t)seconds);
+  console_puts("s\n");
+}
+
+static void cmd_help(const char *args);
 
 typedef struct {
   const char *name;
   console_command_fn handler;
+  const char *description;
 } console_command_t;
 
 // Commands will be added here as they are implemented.
 // The NULL entry terminates the table.
 static const console_command_t commands[] = {
-  { "clock", cmd_clock },
-  { NULL, NULL }
+  { "timer",  cmd_timer,  "Display system timer information" },
+  { "uptime", cmd_uptime, "Show time since OrgOS started" },
+  { "help",   cmd_help,   "List available commands" },
+  { NULL, NULL, NULL }
 };
+
+static void cmd_help(const char *args) {
+  (void)args;
+
+  console_puts("Available commands:\n\n");
+
+  for (size_t i = 0; commands[i].name != NULL; i++) {
+    console_puts("  ");
+    console_puts(commands[i].name);
+
+    // Align descriptions at column 12
+    size_t length = 0;
+    const char *p = commands[i].name;
+
+    while (*p++) {
+      length++;
+    }
+
+    do {
+      console_putc(' ');
+      length++;
+    } while (length < 10);
+
+    console_puts(commands[i].description);
+    console_putc('\n');
+  }
+}
 
 static bool is_space(char c) {
   return c == ' '  ||
@@ -70,7 +126,7 @@ static bool string_equal(const char *a, const char *b) {
 }
 
 static void console_prompt(void) {
-  uart_puts("OrgOS> ");
+  console_puts("OrgOS> ");
 }
 
 // Dispatch a completed, NUL-terminated input line.
@@ -112,7 +168,7 @@ static void console_dispatch(char *line) {
     }
   }
 
-  uart_puts("No such command.\n");
+  console_puts("No such command.\n");
 }
 
 void console_run(void) {
@@ -120,7 +176,7 @@ void console_run(void) {
   size_t length = 0;
   bool last_was_cr = false;
 
-  uart_puts("Console ready.\n");
+  console_puts("Console ready.\n");
   console_prompt();
 
   for (;;) {
@@ -136,7 +192,7 @@ void console_run(void) {
 
     // A completed input line.
     if (c == '\r' || c == '\n') {
-      uart_puts("\n");
+      console_puts("\n");
 
       line[length] = '\0';
       console_dispatch(line);
@@ -152,7 +208,7 @@ void console_run(void) {
     if (c == '\b' || c == 0x7f) {
       if (length > 0) {
         length--;
-        uart_puts("\b \b");
+        console_puts("\b \b");
       }
 
       continue;
@@ -173,13 +229,51 @@ void console_run(void) {
     // bell and refuse the additional character.
     // The user can still use backspace.
     if (length >= sizeof(line) - 1) {
-      uart_putc('\a');
+      console_putc('\a');
       continue;
     }
 
     // Append and echo the character.
     line[length++] = (char)c;
-    uart_putc((char)c);
+    console_putc((char)c);
   }
+}
+
+void console_putc(char c) {
+  if (c == '\n')
+    uart_putc('\r');
+
+  uart_putc(c);
+}
+
+void console_puts(const char *s) {
+  while (*s)
+    console_putc(*s++);
+}
+
+void console_putu32(uint32_t value) {
+  char buffer[10];
+  unsigned int length = 0;
+
+  do {
+    buffer[length++] = '0' + (value % 10U);
+    value /= 10U;
+  } while (value);
+
+  while (length)
+    uart_putc(buffer[--length]);
+}
+
+void console_putu64(uint64_t value) {
+  char buffer[20];
+  unsigned int length = 0;
+
+  do {
+    buffer[length++] = '0' + (value % 10U);
+    value /= 10U;
+  } while (value);
+
+  while (length)
+    uart_putc(buffer[--length]);
 }
 
