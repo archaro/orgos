@@ -63,7 +63,7 @@ void main(void) {
 
   uart_puts("\nTimer test complete.\n");
 
-  uart_puts("\nOrgOS interactive console\nThis should echo back your input.\nEnsure local echo is ON.\n");
+  uart_puts("\nOrgOS interactive console\nThe OS handles echo.  Make sure local echo is off.\n");
   console_run();
 }
 
