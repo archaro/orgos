@@ -45,8 +45,8 @@ void main(void) {
 
   uint64_t start = timer_now_us();
 
-  uart_puts("Initial counter, lower 32 bits: ");
-  uart_putu32((uint32_t)start);
+  uart_puts("Initial counter: ");
+  uart_putu64((uint64_t)start);
   uart_puts(" us\n\n");
 
   for (unsigned int i = 1; i <= 5; i++) {

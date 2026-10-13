@@ -9,6 +9,33 @@
 
 typedef void (*console_command_fn)(const char *args);
 
+#include "timer.h"
+
+static void cmd_clock(const char *args) {
+  (void)args;
+
+  // This function tells us some interesting information about the timer.
+  uint64_t tick = timer_now_us();
+
+  uart_puts("System clock:\n");
+  uart_puts("  Counter    : ");
+  uart_putu64(tick);
+  uart_puts(" ticks\n");
+  uart_puts("  Frequency  : 1000000 Hz\n");
+  uart_puts("  Resolution : 1 us\n");
+  uart_puts("  Elapsed    : ");
+  uart_putu64(tick / 1000000U);
+  uart_putc('.');
+
+  uint32_t fraction = (uint32_t)(tick % 1000000U);
+  uint32_t divisor = 100000U;
+  while (divisor) {
+    uart_putc('0' + (fraction / divisor) % 10U);
+    divisor /= 10U;
+  }
+  uart_puts(" seconds since time began.\n");
+}
+
 typedef struct {
   const char *name;
   console_command_fn handler;
@@ -17,6 +44,7 @@ typedef struct {
 // Commands will be added here as they are implemented.
 // The NULL entry terminates the table.
 static const console_command_t commands[] = {
+  { "clock", cmd_clock },
   { NULL, NULL }
 };
 

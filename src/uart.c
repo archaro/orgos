@@ -97,6 +97,19 @@ void uart_putu32(uint32_t value) {
     uart_putc(buffer[--length]);
 }
 
+void uart_putu64(uint64_t value) {
+  char buffer[20];
+  unsigned int length = 0;
+
+  do {
+    buffer[length++] = '0' + (value % 10U);
+    value /= 10U;
+  } while (value);
+
+  while (length)
+    uart_putc(buffer[--length]);
+}
+
 bool uart_has_data(void) {
   return !(mmio_read(UART0_FR) & UART_FR_RXFE);
 }
