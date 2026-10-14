@@ -14,8 +14,8 @@ ELF     := $(OBJ_DIR)/kernel8.elf
 C_SRCS  := $(wildcard $(SRC_DIR)/*.c)
 S_SRCS  := $(wildcard $(SRC_DIR)/*.S)
 
-C_OBJS  := $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(C_SRCS))
-S_OBJS  := $(patsubst $(SRC_DIR)/%.S,$(OBJ_DIR)/%.o,$(S_SRCS))
+C_OBJS := $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(C_SRCS))
+S_OBJS := $(patsubst $(SRC_DIR)/%.S,$(OBJ_DIR)/%.S.o,$(S_SRCS))
 
 OBJS    := $(S_OBJS) $(C_OBJS)
 DEPS    := $(OBJS:.o=.d)
@@ -58,7 +58,7 @@ $(ELF): $(OBJS) link.ld
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(OBJ_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(OBJ_DIR)/%.o: $(SRC_DIR)/%.S | $(OBJ_DIR)
+$(OBJ_DIR)/%.S.o: $(SRC_DIR)/%.S | $(OBJ_DIR)
 	$(CC) $(ASFLAGS) -c $< -o $@
 
 $(OBJ_DIR):

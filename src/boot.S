@@ -27,7 +27,7 @@
 .extern __bss_start
 .extern __bss_end
 .extern __stack_top
-
+.extern exception_vectors
 
 // Entry point, as specified by ENTRY(_start) in link.ld.
 // We must not assume that the stack pointer is valid yet.
@@ -219,8 +219,23 @@ clear_bss:
   b clear_bss
 
 bss_complete:
+  // Install our EL1 exception vector table.
+  //
+  // VBAR_EL1 is the Vector Base Address Register.
+  // The processor adds a fixed offset to this address
+  // when an exception is taken.
+  //
+  // The base address must be 2048-byte aligned.
+  //
+  // LDR here loads the address of the symbol, not
+  // the contents stored at that address.
+  ldr x0, =exception_vectors
+  msr vbar_el1, x0
 
-  // BL - Branch with Link.
+  // Ensure the new vector base is effective before
+  // any subsequent instruction might cause an exception.
+  isb
+
   // Branch to main() and put the return address in x30.
   // From here onward, we execute normal C code using
   // the stack and initialized static storage.
