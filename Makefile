@@ -34,6 +34,7 @@ CFLAGS := \
   -nostartfiles \
   -Wall -Wextra \
   -O2 \
+  -mgeneral-regs-only \
   -MMD -MP
 
 ASFLAGS := \

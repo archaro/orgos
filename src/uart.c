@@ -27,6 +27,25 @@
 #define UART_LCRH_FEN   (1U << 4)
 #define UART_LCRH_WLEN8 (3U << 5)
 
+#define UART0_IFLS (UART0_BASE + 0x34)
+#define UART0_IMSC (UART0_BASE + 0x38)
+#define UART0_MIS  (UART0_BASE + 0x40)
+
+#define UART_INT_RX (1U << 4)
+#define UART_INT_RT (1U << 6)
+
+// Interrupt-driven UART receive buffer.
+// The interrupt handler owns rx_head.
+// The foreground reader owns rx_tail.
+// The buffer size must be a power of two.
+#define UART_RX_BUFFER_SIZE 256U
+#define RX_MASK (UART_RX_BUFFER_SIZE - 1U)
+static uint8_t rx_buffer[UART_RX_BUFFER_SIZE];
+static volatile uint32_t rx_head;
+static volatile uint32_t rx_tail;
+static volatile uint32_t rx_overruns;
+
+
 void uart_init(uint32_t clock_hz, uint32_t baud) {
   uint32_t value;
 
@@ -76,12 +95,67 @@ void uart_putc(char c) {
 }
 
 bool uart_has_data(void) {
-  return !(mmio_read(UART0_FR) & UART_FR_RXFE);
+  return rx_head != rx_tail;
 }
 
 char uart_getc(void) {
   while (!uart_has_data())
     ;
 
-  return (char)(mmio_read(UART0_DR) & 0xffU);
+  uint32_t tail = rx_tail;
+  char c = (char)rx_buffer[tail];
+
+  __asm__ volatile("dmb ish" ::: "memory");
+
+  rx_tail = (tail + 1U) & RX_MASK;
+
+  return c;
 }
+
+uint32_t uart_rx_overruns(void) {
+  return rx_overruns;
+}
+
+void uart_enable_rx_irq(void) {
+  // Select the lowest receive FIFO threshold:
+  // RXIFLSEL = 000, meaning 1/8 full.
+  uint32_t value = mmio_read(UART0_IFLS);
+  value &= ~(7U << 3);
+  mmio_write(UART0_IFLS, value);
+
+  // Clear old receive interrupt conditions.
+  mmio_write(UART0_ICR, UART_INT_RX | UART_INT_RT);
+
+  // Enable receive and receive-timeout interrupts.
+  // Other UART interrupt sources remain disabled.
+  mmio_write(UART0_IMSC, UART_INT_RX | UART_INT_RT);
+}
+
+void uart_handle_irq(void) {
+  // Drain the hardware FIFO completely.
+  // A receive interrupt represents potentially
+  // several bytes, not necessarily just one.
+  while (!(mmio_read(UART0_FR) & UART_FR_RXFE)) {
+    uint32_t data = mmio_read(UART0_DR);
+    uint32_t next = (rx_head + 1U) & RX_MASK;
+
+    if (next == rx_tail) {
+      // Software buffer full.
+      // Drop the incoming byte and count it.
+      rx_overruns++;
+      continue;
+    }
+
+    rx_buffer[rx_head] = (uint8_t)(data & 0xffU);
+
+    // Publish the byte before updating the head.
+    __asm__ volatile("dmb ish" ::: "memory");
+
+    rx_head = next;
+  }
+
+  // Clear the RX and receive-timeout conditions.
+  // The GIC interrupt will be ended by irq_dispatch().
+  mmio_write(UART0_ICR, UART_INT_RX | UART_INT_RT);
+}
+

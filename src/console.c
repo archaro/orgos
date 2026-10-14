@@ -4,6 +4,7 @@
 
 #include "console.h"
 #include "uart.h"
+#include "irq.h"
 
 #define CONSOLE_LINE_SIZE 256
 
@@ -60,6 +61,18 @@ static void cmd_uptime(const char *args) {
   console_puts("s\n");
 }
 
+static void cmd_irq(const char *args) {
+  (void)args;
+
+  console_puts("Interrupts handled: ");
+  console_putu64(irq_count());
+  console_putc('\n');
+
+  console_puts("UART RX overruns : ");
+  console_putu32(uart_rx_overruns());
+  console_putc('\n');
+}
+
 static void cmd_help(const char *args);
 
 typedef struct {
@@ -74,6 +87,7 @@ static const console_command_t commands[] = {
   { "timer",  cmd_timer,  "Display system timer information" },
   { "uptime", cmd_uptime, "Show time since OrgOS started" },
   { "help",   cmd_help,   "List available commands" },
+  { "irq", cmd_irq, "Display interrupt statistics" },
   { NULL, NULL, NULL }
 };
 

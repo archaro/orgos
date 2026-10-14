@@ -10,3 +10,6 @@ enable_uart=1
 # Disable Bluetooth and assign PL011 UART0 to GPIO14/15
 dtoverlay=disable-bt
 
+# Enable GIC-400
+enable_gic=1
+

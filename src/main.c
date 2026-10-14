@@ -3,6 +3,8 @@
 
 #include "mailbox.h"
 #include "timer.h"
+#include "gic.h"
+#include "irq.h"
 #include "uart.h"
 #include "console.h"
 
@@ -58,6 +60,26 @@ void main(void) {
   console_puts("Baud rate: ");
   console_putu32(UART_BAUD);
   console_puts("\n");
+
+  // Initialise interrupt delivery.
+  // VBAR_EL1 was installed by boot.S.
+  // The CPU's IRQ mask is still set.
+  gic_init();
+
+  // Enable UART0 at the interrupt controller.
+  gic_enable_irq(GIC_IRQ_UART0);
+
+  // Enable receive interrupts at the UART itself.
+  uart_enable_rx_irq();
+
+  // Ensure device configuration is complete before
+  // permitting the processor to accept IRQs.
+  __asm__ volatile("dsb sy\nisb" ::: "memory");
+
+  // Unmask IRQs at the processor.
+  // DAIFClr #2 clears the I bit (IRQ mask).
+  // Other exception masks remain unchanged.
+  __asm__ volatile("msr daifclr, #2\nisb" ::: "memory");
 
   console_puts("\nOrgOS interactive console.\n");
   console_run();
