@@ -8,6 +8,17 @@
 
 #define UART_BAUD 115200U
 
+static unsigned int current_el(void) {
+  uint64_t value;
+
+  __asm__ volatile(
+    "mrs %0, CurrentEL"
+    : "=r"(value)
+  );
+
+  return (unsigned int)((value >> 2) & 3U);
+}
+
 void main(void) {
   uint32_t clock_hz;
   bool clock_ok;
@@ -27,6 +38,11 @@ void main(void) {
 
   console_puts("\nOrgOS - bare metal Raspberry Pi 4\n");
   console_puts("--------------------------------\n");
+
+  // What EL are we at?
+  console_puts("Current exception level: EL");
+  console_putu32(current_el());
+  console_puts("\n");
 
   // Configure the UART clock
   if (clock_ok) {
