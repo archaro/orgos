@@ -5,6 +5,7 @@
 #include "console.h"
 #include "uart.h"
 #include "irq.h"
+#include "midi.h"
 
 #define CONSOLE_LINE_SIZE 256
 
@@ -75,6 +76,123 @@ static void cmd_irq(const char *args) {
 
 static void cmd_help(const char *args);
 
+/*
+ * Return true if the next whitespace-delimited word
+ * matches the supplied string.
+ *
+ * Advance the input pointer past the matched word.
+ */
+static bool
+next_word_is(const char **input, const char *word)
+{
+  const char *p = *input;
+  const char *w = word;
+
+  while (*p == ' ' || *p == '\t')
+    p++;
+
+  while (*w && *p == *w) {
+    p++;
+    w++;
+  }
+
+  if (*w || (*p && *p != ' ' && *p != '\t'))
+    return false;
+
+  *input = p;
+  return true;
+}
+
+static bool next_uint(const char **input, unsigned int *value) {
+  // Read an unsigned decimal integer.
+  // Reject missing values, non-decimal characters and overflow.
+  const char *p = *input;
+  unsigned int result = 0;
+  bool found = false;
+
+  while (*p == ' ' || *p == '\t')
+    p++;
+
+  while (*p >= '0' && *p <= '9') {
+    unsigned int digit = (unsigned int)(*p - '0');
+
+    if (result > (UINT32_MAX - digit) / 10U)
+      return false;
+
+    result = result * 10U + digit;
+    found = true;
+    p++;
+  }
+
+  if (!found || (*p && *p != ' ' && *p != '\t'))
+    return false;
+
+  *value = result;
+  *input = p;
+  return true;
+}
+
+static bool end_of_args(const char *p) {
+  while (*p == ' ' || *p == '\t')
+    p++;
+
+  return *p == '\0';
+}
+
+static void console_puthex8(uint8_t value) {
+  // Print one byte as two hexadecimal digits.
+  static const char hex[] = "0123456789ABCDEF";
+
+  console_putc(hex[value >> 4]);
+  console_putc(hex[value & 0x0f]);
+}
+
+static void cmd_midi(const char *args) {
+  midi_message_t msg;
+  const char *p = args;
+  unsigned int channel, a, b;
+  bool valid = false;
+
+  if (next_word_is(&p, "noteon")) {
+    if (next_uint(&p, &channel) && next_uint(&p, &a) &&
+        next_uint(&p, &b) && end_of_args(p))
+      valid = midi_note_on(&msg, channel, a, b);
+
+  } else if (next_word_is(&p, "noteoff")) {
+    if (next_uint(&p, &channel) && next_uint(&p, &a) &&
+        next_uint(&p, &b) && end_of_args(p))
+      valid = midi_note_off(&msg, channel, a, b);
+
+  } else if (next_word_is(&p, "cc")) {
+    if (next_uint(&p, &channel) && next_uint(&p, &a) &&
+        next_uint(&p, &b) && end_of_args(p))
+      valid = midi_control_change(&msg, channel, a, b);
+
+  } else if (next_word_is(&p, "pc")) {
+    if (next_uint(&p, &channel) && next_uint(&p, &a) &&
+        end_of_args(p))
+      valid = midi_program_change(&msg, channel, a);
+  }
+
+  if (!valid) {
+    console_puts("Invalid MIDI command or arguments.\n");
+    console_puts("Usage:\n");
+    console_puts("  midi noteon  channel note velocity\n");
+    console_puts("  midi noteoff channel note velocity\n");
+    console_puts("  midi cc      channel controller value\n");
+    console_puts("  midi pc      channel program\n");
+    return;
+  }
+
+  console_puts("MIDI: ");
+  for (unsigned int i = 0; i < msg.length; i++) {
+    if (i)
+      console_putc(' ');
+    console_puthex8(msg.data[i]);
+  }
+  console_putc('\n');
+}
+
 typedef struct {
   const char *name;
   console_command_fn handler;
@@ -88,6 +206,7 @@ static const console_command_t commands[] = {
   { "uptime", cmd_uptime, "Show time since OrgOS started" },
   { "help",   cmd_help,   "List available commands" },
   { "irq", cmd_irq, "Display interrupt statistics" },
+  { "midi", cmd_midi, "Construct and inspect MIDI messages" },
   { NULL, NULL, NULL }
 };
 
