@@ -5,6 +5,7 @@
 #include "console.h"
 #include "uart.h"
 #include "irq.h"
+#include "pcie.h"
 #include "midi.h"
 
 #define CONSOLE_LINE_SIZE 256
@@ -147,6 +148,110 @@ static void console_puthex8(uint8_t value) {
   console_putc(hex[value & 0x0f]);
 }
 
+static void console_puthex(uint32_t value, unsigned int digits) {
+  static const char hex[] = "0123456789ABCDEF";
+
+  for (unsigned int i = 0; i < digits; i++) {
+    unsigned int shift = (digits - 1U - i) * 4U;
+    console_putc(hex[(value >> shift) & 0x0fU]);
+  }
+}
+
+
+static void cmd_pci(const char *args) {
+  if (next_word_is(&args, "init") && end_of_args(args)) {
+    console_puts("Initialising BCM2711 PCIe link...\n");
+    pcie_init_result_t result = pcie_init_link();
+    switch (result) {
+      case PCIE_INIT_OK:
+        console_puts("PCIe link established.\n");
+        break;
+      case PCIE_INIT_ALREADY_UP:
+        console_puts("PCIe link is already active.\n");
+        break;
+      case PCIE_INIT_NOT_ROOT_COMPLEX:
+        console_puts("PCIe initialization failed: not in RC mode.\n");
+        break;
+      case PCIE_INIT_LINK_TIMEOUT:
+        console_puts("PCIe initialization failed: link timeout.\n");
+        break;
+    }
+    console_putc('\n');
+  } else if (!end_of_args(args)) {
+    console_puts("Usage: pci [init]\n");
+    return;
+  }
+
+  pcie_info_t info;
+  pcie_probe(&info);
+
+  console_puts("BCM2711 PCIe controller:\n");
+  console_puts("  Status      : 0x");
+  console_puthex(info.status, 8);
+  console_putc('\n');
+  console_puts("  Revision    : 0x");
+  console_puthex(info.revision, 8);
+  console_putc('\n');
+  console_puts("  Mode        : ");
+  console_puts(info.root_complex ?
+      "Root complex\n" : "Not root complex\n");
+  console_puts("  Link        : ");
+  console_puts(info.link_up ? "Up\n" : "Down\n");
+  if (!info.root_complex || !info.link_up) {
+    console_puts(
+        "\nPCIe host bridge is not ready.\n");
+    return;
+  }
+
+  console_puts("\nRoot bridge:\n");
+  console_puts("  Vendor ID   : 0x");
+  console_puthex(info.root_vendor, 4);
+  console_putc('\n');
+  console_puts("  Device ID   : 0x");
+  console_puthex(info.root_device, 4);
+  console_putc('\n');
+  console_puts("  Secondary   : ");
+  console_putu32(info.secondary_bus);
+  console_putc('\n');
+  console_puts("  Subordinate : ");
+  console_putu32(info.subordinate_bus);
+  console_putc('\n');
+  if (info.secondary_bus == 0 ||
+      info.subordinate_bus < info.secondary_bus) {
+    console_puts(
+        "\nDownstream bus is not configured.\n");
+    return;
+  }
+
+  if (!info.endpoint_present) {
+    console_puts("\nNo downstream device found.\n");
+    return;
+  }
+
+  console_puts("\nDownstream device:\n");
+  console_puts("  Vendor ID   : 0x");
+  console_puthex(info.endpoint_vendor, 4);
+  console_putc('\n');
+  console_puts("  Device ID   : 0x");
+  console_puthex(info.endpoint_device, 4);
+  console_putc('\n');
+  console_puts("  Class       : 0x");
+  console_puthex(info.endpoint_class, 6);
+  console_putc('\n');
+  console_puts("  BAR0        : 0x");
+  console_puthex(info.endpoint_bar0, 8);
+  console_putc('\n');
+  console_puts("  BAR1        : 0x");
+  console_puthex(info.endpoint_bar1, 8);
+  console_putc('\n');
+  if (info.endpoint_vendor == 0x1106U &&
+      info.endpoint_device == 0x3483U) {
+    console_puts("\nVIA VL805 USB controller detected.\n");
+  } else {
+    console_puts("Unknown USB device detected.\n");
+  }
+}
+
 static void cmd_midi(const char *args) {
   midi_message_t msg;
   const char *p = args;
@@ -206,6 +311,7 @@ static const console_command_t commands[] = {
   { "uptime", cmd_uptime, "Show time since OrgOS started" },
   { "help",   cmd_help,   "List available commands" },
   { "irq", cmd_irq, "Display interrupt statistics" },
+  { "pci", cmd_pci, "Inspect or initialise PCIe controller" },
   { "midi", cmd_midi, "Construct and inspect MIDI messages" },
   { NULL, NULL, NULL }
 };

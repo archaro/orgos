@@ -5,6 +5,7 @@
 #include "timer.h"
 #include "gic.h"
 #include "irq.h"
+#include "pcie.h"
 #include "uart.h"
 #include "console.h"
 
@@ -80,6 +81,28 @@ void main(void) {
   // DAIFClr #2 clears the I bit (IRQ mask).
   // Other exception masks remain unchanged.
   __asm__ volatile("msr daifclr, #2\nisb" ::: "memory");
+
+  // Initialise the BCM2711 PCIe link.
+  // PCIe initialization is not fatal at this stage:
+  // if it fails, retain access to the diagnostic
+  // console so that we can investigate.
+  console_puts("\nInitialising PCIe... ");
+
+  pcie_init_result_t pcie_result = pcie_init_link();
+  switch (pcie_result) {
+    case PCIE_INIT_OK:
+      console_puts("Link established.\n");
+      break;
+    case PCIE_INIT_ALREADY_UP:
+      console_puts("Link already active.\n");
+      break;
+    case PCIE_INIT_NOT_ROOT_COMPLEX:
+      console_puts("Failed: not in root-complex mode.\n");
+      break;
+    case PCIE_INIT_LINK_TIMEOUT:
+      console_puts("Failed: link timeout.\n");
+      break;
+  }
 
   console_puts("\nOrgOS interactive console.\n");
   console_run();
