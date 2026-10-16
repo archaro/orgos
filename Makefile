@@ -35,6 +35,7 @@ CFLAGS := \
   -Wall -Wextra \
   -O2 \
   -mgeneral-regs-only \
+  -mstrict-align \
   -MMD -MP
 
 ASFLAGS := \
