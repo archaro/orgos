@@ -5,6 +5,7 @@
 #include "console.h"
 #include "uart.h"
 #include "irq.h"
+#include "mmu.h"
 #include "pcie.h"
 #include "xhci.h"
 #include "midi.h"
@@ -158,6 +159,14 @@ static void console_puthex(uint32_t value, unsigned int digits) {
   }
 }
 
+static void console_puthex64(uint64_t value) {
+  static const char hex[] = "0123456789ABCDEF";
+
+  for (unsigned int i = 0; i < 16; i++) {
+    unsigned int shift = (15U - i) * 4U;
+    console_putc(hex[(value >> shift) & 0x0fU]);
+  }
+}
 
 static void cmd_pci(const char *args) {
   if (next_word_is(&args, "init") && end_of_args(args)) {
@@ -292,6 +301,57 @@ static void cmd_usb(const char *args) {
   console_putc('\n');
 }
 
+
+static void cmd_mmu(const char *args) {
+  (void)args;
+
+  mmu_info_t info;
+  mmu_get_info(&info);
+
+  console_puts("AArch64 EL1 memory management:\n");
+  console_puts("  Translation       : ");
+  console_puts((info.sctlr & 1U) ?
+      "Enabled\n" : "Disabled\n");
+  console_puts("  Data cache        : ");
+  console_puts((info.sctlr & (1U << 2)) ?
+      "Enabled\n" : "Disabled\n");
+  console_puts("  Instruction cache : ");
+  console_puts((info.sctlr & (1U << 12)) ?
+      "Enabled\n" : "Disabled\n");
+  console_puts("  Alignment check   : ");
+  console_puts((info.sctlr & (1U << 1)) ?
+      "Enabled\n" : "Disabled\n");
+  console_puts("  Physical addr bits: ");
+  unsigned int pa_bits = mmu_physical_address_bits();
+  if (pa_bits)
+    console_putu32(pa_bits);
+  else
+    console_puts("Unknown encoding");
+  console_putc('\n');
+  console_puts("  4 KiB granule     : ");
+  console_puts(mmu_granule_4k_supported() ?
+      "Supported\n" : "Unsupported/reserved\n");
+  console_puts("\nArchitectural registers:\n");
+  console_puts("  ID_AA64MMFR0_EL1 : 0x");
+  console_puthex64(info.id_aa64mmfr0);
+  console_putc('\n');
+  console_puts("  SCTLR_EL1        : 0x");
+  console_puthex64(info.sctlr);
+  console_putc('\n');
+  console_puts("  TCR_EL1          : 0x");
+  console_puthex64(info.tcr);
+  console_putc('\n');
+  console_puts("  MAIR_EL1         : 0x");
+  console_puthex64(info.mair);
+  console_putc('\n');
+  console_puts("  TTBR0_EL1        : 0x");
+  console_puthex64(info.ttbr0);
+  console_putc('\n');
+  console_puts("  TTBR1_EL1        : 0x");
+  console_puthex64(info.ttbr1);
+  console_putc('\n');
+}
+
 static void cmd_midi(const char *args) {
   midi_message_t msg;
   const char *p = args;
@@ -351,6 +411,7 @@ static const console_command_t commands[] = {
   { "uptime", cmd_uptime, "Show time since OrgOS started" },
   { "help",   cmd_help,   "List available commands" },
   { "irq", cmd_irq, "Display interrupt statistics" },
+  { "mmu", cmd_mmu, "Display AArch64 memory management state" },
   { "pci", cmd_pci, "Inspect or initialise PCIe controller" },
   { "usb", cmd_usb, "Inspect VL805 xHCI capabilities" },
   { "midi", cmd_midi, "Construct and inspect MIDI messages" },
