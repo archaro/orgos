@@ -18,3 +18,5 @@ bool mmu_enabled(void);
 bool mmu_granule_4k_supported(void);
 
 unsigned int mmu_physical_address_bits(void);
+
+bool mmu_init(void);

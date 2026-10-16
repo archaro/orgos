@@ -3,6 +3,7 @@
 #include <stdbool.h>
 
 #include "console.h"
+#include "mailbox.h"
 #include "uart.h"
 #include "irq.h"
 #include "mmu.h"
@@ -301,10 +302,48 @@ static void cmd_usb(const char *args) {
   console_putc('\n');
 }
 
-
 static void cmd_mmu(const char *args) {
-  (void)args;
+  // Deliberately access an unmapped virtual address.
+  // Our initial translation tables leave the entire
+  // 2-3 GiB region unmapped. Address 0x80000000
+  // therefore has no valid translation.
+  // This is a destructive diagnostic: a successful
+  // test enters exception_panic() and halts OrgOS.
+  if (next_word_is(&args, "fault") && end_of_args(args)) {
+    if (!mmu_enabled()) {
+      console_puts("MMU is disabled; refusing fault test.\n");
+      return;
+    }
 
+    console_puts(
+        "MMU translation fault test.\n"
+        "Reading unmapped virtual address 0x80000000...\n"
+        "Expected result: synchronous EL1 data abort.\n"
+        "OrgOS will halt. Reboot required.\n\n");
+
+    // The volatile load ensures that the compiler
+    // actually emits a memory access.
+    // Because the virtual address is unmapped,
+    // the load should never complete.
+    volatile const uint32_t *address =
+        (volatile const uint32_t *)(uintptr_t)0x80000000ULL;
+
+    uint32_t value = *address;
+
+    // If execution reaches here, the fault test
+    // did not behave as expected.
+    console_puts("UNEXPECTED: read succeeded: 0x");
+    console_puthex(value, 8);
+    console_putc('\n');
+    return;
+  }
+
+  if (!end_of_args(args)) {
+    console_puts("Usage: mmu [fault]\n");
+    return;
+  }
+
+  // Existing MMU diagnostic code follows here.
   mmu_info_t info;
   mmu_get_info(&info);
 
@@ -404,12 +443,48 @@ typedef struct {
   const char *description;
 } console_command_t;
 
+
+static void cmd_memory(const char *args) {
+  (void)args;
+
+  uint32_t base;
+  uint32_t size;
+
+  console_puts("ARM memory allocation:\n");
+
+  if (!mailbox_get_arm_memory(&base, &size)) {
+    console_puts("  Firmware memory query failed.\n");
+    return;
+  }
+
+  uint64_t end = (uint64_t)base + size;
+  console_puts("  Base address : 0x");
+  console_puthex(base, 8);
+  console_putc('\n');
+  console_puts("  Size         : ");
+  console_putu32(size / (1024U * 1024U));
+  console_puts(" MiB\n");
+  console_puts("  End address  : 0x");
+  console_puthex64(end);
+  console_puts(" (exclusive)\n");
+  // The initial MMU implementation maps only
+  // the lowest 512 MiB of physical RAM.
+  console_puts("  Initial MMU RAM mapping: 512 MiB\n");
+
+  if (base != 0 || end > 0x20000000ULL) {
+    console_puts(
+        "  Note: Firmware ARM memory extends outside\n"
+        "        the initial MMU RAM mapping.\n");
+  }
+}
+
 // Commands will be added here as they are implemented.
 // The NULL entry terminates the table.
 static const console_command_t commands[] = {
   { "timer",  cmd_timer,  "Display system timer information" },
   { "uptime", cmd_uptime, "Show time since OrgOS started" },
   { "help",   cmd_help,   "List available commands" },
+  { "memory", cmd_memory, "Display firmware ARM memory allocation" },
   { "irq", cmd_irq, "Display interrupt statistics" },
   { "mmu", cmd_mmu, "Display AArch64 memory management state" },
   { "pci", cmd_pci, "Inspect or initialise PCIe controller" },

@@ -16,6 +16,7 @@
 
 #define MAILBOX_CHANNEL_PROPERTY 8U
 #define MAILBOX_TAG_GET_CLOCK    0x00030002U
+#define MAILBOX_TAG_GET_ARM_MEMORY 0x00010005U
 
 #define MAILBOX_TIMEOUT 1000000U
 
@@ -109,6 +110,59 @@ bool mailbox_get_clock_rate(uint32_t clock_id, uint32_t *rate) {
     return false;
 
   *rate = message[6];
+
+  return true;
+}
+
+
+// Retrieve the ARM memory region from the firmware.
+// Property tag 0x00010005 (Get ARM Memory):
+//   [0] Total message size
+//   [1] Request / response status
+//   [2] Tag identifier
+//   [3] Value buffer size (8 bytes)
+//   [4] Tag request / response length
+//   [5] ARM memory base address
+//   [6] ARM memory size in bytes
+//   [7] End tag
+// The message buffer is the same statically allocated,
+// 16-byte-aligned buffer used by our clock queries.
+// This reports firmware-assigned ARM memory, not
+// necessarily every usable or unreserved RAM page.
+bool mailbox_get_arm_memory(uint32_t *base, uint32_t *size) {
+  if (!base || !size)
+    return false;
+
+  message[0] = sizeof(message);
+  message[1] = 0;
+  message[2] = MAILBOX_TAG_GET_ARM_MEMORY;
+  message[3] = 8;
+  message[4] = 0;
+  message[5] = 0;
+  message[6] = 0;
+  message[7] = 0;
+
+  if (!mailbox_call())
+    return false;
+
+  // Check that the firmware returned the expected
+  // tag and a successful eight-byte response.
+  if (message[2] != MAILBOX_TAG_GET_ARM_MEMORY)
+    return false;
+
+  if (message[3] < 8)
+    return false;
+
+  if (message[4] != 0x80000008U)
+    return false;
+
+  if (message[6] == 0)
+    return false;
+
+  // Both values fit into uint32_t according to
+  // the mailbox property interface.
+  *base = message[5];
+  *size = message[6];
 
   return true;
 }

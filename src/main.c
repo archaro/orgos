@@ -5,6 +5,7 @@
 #include "timer.h"
 #include "gic.h"
 #include "irq.h"
+#include "mmu.h"
 #include "pcie.h"
 #include "uart.h"
 #include "console.h"
@@ -116,6 +117,19 @@ void main(void) {
   console_puts("Baud rate: ");
   console_putu32(UART_BAUD);
   console_puts("\n");
+
+  // Install the initial EL1 identity-mapped
+  // translation tables and enable the MMU.
+  // Caches remain disabled for this first test.
+  // Interrupts are still masked at this point,
+  // so no IRQ handler can interrupt the transition.
+  console_puts("\nInitialising MMU... ");
+  if (mmu_init()) {
+    console_puts("Translation enabled.\n");
+  } else {
+    console_puts("FAILED.\n");
+    console_puts("Continuing without MMU.\n");
+  }
 
   // Initialise interrupt delivery.
   // VBAR_EL1 was installed by boot.S.
