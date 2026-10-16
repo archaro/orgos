@@ -60,43 +60,105 @@
 
 #define PCIE_BURST_MASK   (3U << 20)
 
-//Read a register from the root-complex configuration
-//space, which is directly mapped at PCIE_BASE.
-static uint32_t root_config_read(uint32_t offset)
-{
+/*
+ * BCM2711 PCIe outbound MMIO aperture.
+ *
+ * CPU physical 0x600000000 maps to PCI bus 0xC0000000.
+ * Window size: 64 MiB.
+ */
+#define PCIE_CPU_MMIO_BASE   0x600000000ULL
+#define PCIE_BUS_MMIO_BASE   0xc0000000U
+#define PCIE_MMIO_SIZE_MB    64U
+
+/*
+ * BCM2711 outbound window 0 registers.
+ */
+#define PCIE_MEM_WIN0_LO         (PCIE_BASE + 0x400c)
+#define PCIE_MEM_WIN0_HI         (PCIE_BASE + 0x4010)
+#define PCIE_MEM_WIN0_BASE_LIMIT (PCIE_BASE + 0x4070)
+#define PCIE_MEM_WIN0_BASE_HI    (PCIE_BASE + 0x4080)
+#define PCIE_MEM_WIN0_LIMIT_HI   (PCIE_BASE + 0x4084)
+
+/*
+ * PCI configuration-space registers.
+ */
+#define PCI_COMMAND             0x04U
+#define PCI_MEMORY_BASE_LIMIT   0x20U
+
+#define PCI_COMMAND_MEMORY      (1U << 1)
+
+static bool xhci_resources_ready;
+
+bool pcie_xhci_ready(void) {
+  return xhci_resources_ready;
+}
+
+// Read a register from the root-complex configuration
+// space, which is directly mapped at PCIE_BASE.
+static uint32_t root_config_read(uint32_t offset) {
   return mmio_read(PCIE_BASE + offset);
 }
 
-//Read a 32-bit configuration register from a
-//downstream PCIe device.
-//The Broadcom controller requires us to select a
-//bus/device/function using the extended config index.
-//Only call this after confirming the link is up.
+// Read a 32-bit configuration register from a
+// downstream PCIe device.
+// The Broadcom controller requires us to select a
+// bus/device/function using the extended config index.
+// Only call this after confirming the link is up.
 static uint32_t device_config_read(uint8_t bus, uint8_t device, uint8_t function, uint32_t offset) {
-  uint32_t index =
-      ((uint32_t)bus << 20) |
-      ((uint32_t)device << 15) |
-      ((uint32_t)function << 12);
+  uint32_t index = ((uint32_t)bus << 20) | ((uint32_t)device << 15) | ((uint32_t)function << 12);
 
   mmio_write(PCIE_CFG_INDEX, index);
 
-  //Ensure the index write completes before reading
-  //the selected configuration register.
+  // Ensure the index write completes before reading
+  // the selected configuration register.
   __asm__ volatile("dsb sy" ::: "memory");
-
   return mmio_read(PCIE_CFG_DATA + offset);
+}
+
+static void pcie_set_memory_decode(uint8_t bus, bool enabled) {
+  uintptr_t address;
+
+  if (bus == 0) {
+    address = PCIE_BASE + PCI_COMMAND;
+  } else {
+    mmio_write(PCIE_CFG_INDEX, ((uint32_t)bus << 20));
+    __asm__ volatile("dsb sy" ::: "memory");
+    address = PCIE_CFG_DATA + PCI_COMMAND;
+  }
+
+  volatile uint16_t *command =
+      (volatile uint16_t *)address;
+  uint16_t value = *command;
+  if (enabled)
+    value |= PCI_COMMAND_MEMORY;
+  else
+    value &= (uint16_t)~PCI_COMMAND_MEMORY;
+  *command = value;
+  __asm__ volatile("dsb sy" ::: "memory");
+}
+
+// Write a 32-bit downstream configuration register.
+// This mirrors device_config_read() but performs
+// a write to the selected BDF.
+static void device_config_write(uint8_t bus, uint8_t device, uint8_t function, uint32_t offset, uint32_t value) {
+  uint32_t index = ((uint32_t)bus << 20) | ((uint32_t)device << 15) | ((uint32_t)function << 12);
+
+  mmio_write(PCIE_CFG_INDEX, index);
+  __asm__ volatile("dsb sy" ::: "memory");
+  mmio_write(PCIE_CFG_DATA + offset, value);
+  __asm__ volatile("dsb sy" ::: "memory");
 }
 
 void pcie_probe(pcie_info_t *info) {
   if (!info)
     return;
 
-  //Initialise all results explicitly.
+  // Initialise all results explicitly.
   *info = (pcie_info_t){0};
 
-  //Inspect the controller's current state.
-  //We do not change resets, clocks, address windows
-  //or controller configuration at this stage.
+  // Inspect the controller's current state.
+  // We do not change resets, clocks, address windows
+  // or controller configuration at this stage.
   info->status = mmio_read(PCIE_STATUS);
   info->revision = mmio_read(PCIE_REVISION);
 
@@ -105,40 +167,40 @@ void pcie_probe(pcie_info_t *info) {
   info->link_up = (info->status & (PCIE_STATUS_DL | PCIE_STATUS_PHY)) ==
      (PCIE_STATUS_DL | PCIE_STATUS_PHY);
 
-  //If the link is inactive, stop here.
-  //Linux's Broadcom driver specifically avoids
-  //downstream configuration reads when the link
-  //is down because they can cause a CPU abort.
+  // If the link is inactive, stop here.
+  // Linux's Broadcom driver specifically avoids
+  // downstream configuration reads when the link
+  // is down because they can cause a CPU abort.
   if (!info->root_complex || !info->link_up)
     return;
 
-  //Read the root bridge's PCI identification.
+  // Read the root bridge's PCI identification.
   uint32_t id = root_config_read(PCI_VENDOR_DEVICE);
 
   info->root_vendor = (uint16_t)(id & 0xffffU);
   info->root_device = (uint16_t)(id >> 16);
 
-  //A Type 1 PCI bridge contains primary,
-  //secondary and subordinate bus numbers.
+  // A Type 1 PCI bridge contains primary,
+  // secondary and subordinate bus numbers.
   uint32_t buses = root_config_read(PCI_BUS_NUMBERS);
 
   info->secondary_bus = (uint8_t)((buses >> 8) & 0xffU);
 
   info->subordinate_bus = (uint8_t)((buses >> 16) & 0xffU);
 
-  //If the firmware hasn't configured a downstream
-  //bus number, don't invent one.
+  // If the firmware hasn't configured a downstream
+  // bus number, don't invent one.
   if (info->secondary_bus == 0 ||
       info->subordinate_bus < info->secondary_bus)
     return;
 
-  //On a Raspberry Pi 4B, the VL805 is normally
-  //the first device (device 0, function 0)
-  //on the downstream bus.
+  // On a Raspberry Pi 4B, the VL805 is normally
+  // the first device (device 0, function 0)
+  // on the downstream bus.
   id = device_config_read(info->secondary_bus, 0, 0, PCI_VENDOR_DEVICE);
 
-  //PCI configuration reads commonly return all
-  //ones when no device responds.
+  // PCI configuration reads commonly return all
+  // ones when no device responds.
   if (id == 0xffffffffU || (id & 0xffffU) == 0xffffU)
     return;
 
@@ -146,17 +208,17 @@ void pcie_probe(pcie_info_t *info) {
   info->endpoint_vendor = (uint16_t)(id & 0xffffU);
   info->endpoint_device = (uint16_t)(id >> 16);
 
-  //Class code occupies bits [31:8].
-  //USB xHCI class/subclass/interface = 0x0C0330.
+  // Class code occupies bits [31:8].
+  // USB xHCI class/subclass/interface = 0x0C0330.
   uint32_t class_rev = device_config_read(
       info->secondary_bus, 0, 0,
       PCI_CLASS_REV);
 
   info->endpoint_class = class_rev >> 8;
 
-  //Read the BARs without writing to them.
-  //These may be unassigned if the host bridge
-  //has not been configured.
+  // Read the BARs without writing to them.
+  // These may be unassigned if the host bridge
+  // has not been configured.
   info->endpoint_bar0 = device_config_read(
       info->secondary_bus, 0, 0, PCI_BAR0);
 
@@ -245,5 +307,93 @@ pcie_init_result_t pcie_init_link(void) {
   } while (timer_now_us() < deadline);
 
   return PCIE_INIT_LINK_TIMEOUT;
+}
+
+
+pcie_map_result_t pcie_map_xhci(void) {
+  pcie_info_t info;
+
+  if (xhci_resources_ready)
+    return PCIE_MAP_OK;
+  // Only proceed when the link is active and
+  // the expected VIA VL805 has been identified.
+  pcie_probe(&info);
+
+  if (!info.link_up)
+    return PCIE_MAP_LINK_DOWN;
+
+  // This code is tested on the CME U2MIDI Pro:
+  // Other devices will need to be tested and enabled.
+  if (!info.endpoint_present ||
+      info.endpoint_vendor != 0x1106U ||
+      info.endpoint_device != 0x3483U ||
+      info.endpoint_class != 0x0c0330U)
+    return PCIE_MAP_WRONG_DEVICE;
+
+  // BAR0 should describe a 64-bit, non-I/O,
+  // non-prefetchable memory resource.
+  // PCI memory BAR bits [2:1] = 10 for 64-bit.
+  if ((info.endpoint_bar0 & 0x0fU) != 0x04U)
+    return PCIE_MAP_BAD_BAR;
+
+  // Configure outbound window 0.
+  // PCIe address base = 0xC0000000.
+  // ARM physical base = 0x600000000.
+  // BCM2711 base/limit registers express
+  // CPU addresses in units of 1 MiB.
+  uint64_t cpu_base_mb = PCIE_CPU_MMIO_BASE >> 20;
+  uint64_t cpu_limit_mb = cpu_base_mb + PCIE_MMIO_SIZE_MB - 1U;
+
+  mmio_write(PCIE_MEM_WIN0_LO, PCIE_BUS_MMIO_BASE);
+  mmio_write(PCIE_MEM_WIN0_HI, 0);
+
+  uint32_t base_limit =
+      (uint32_t)((cpu_base_mb & 0xfffU) << 4) |
+      (uint32_t)((cpu_limit_mb & 0xfffU) << 20);
+
+  mmio_write(PCIE_MEM_WIN0_BASE_LIMIT, base_limit);
+  mmio_write(PCIE_MEM_WIN0_BASE_HI, (uint32_t)(cpu_base_mb >> 12));
+  mmio_write(PCIE_MEM_WIN0_LIMIT_HI, (uint32_t)(cpu_limit_mb >> 12));
+
+  // Configure the root bridge's downstream
+  // memory forwarding aperture.
+  // Type 1 bridge memory-base/limit registers
+  // have 1 MiB granularity.
+  // 0xC000C000 describes a 1 MiB aperture
+  // beginning at bus address 0xC0000000.
+  // The VL805 occupies only 4 KiB, so 1 MiB
+  // is enough for this initial experiment.
+  mmio_write(PCIE_BASE + PCI_MEMORY_BASE_LIMIT, 0xc000c000U);
+
+  // Disable the endpoint's memory decoding
+  // before changing its BAR.
+  // Preserve unrelated PCI command bits.
+  uint8_t bus = info.secondary_bus;
+  pcie_set_memory_decode(bus, false);
+
+  // Assign the 64-bit BAR.
+  // The low DWORD contains the base address
+  // and the BAR type bits.
+  // The high DWORD is zero because our PCIe
+  // bus address fits in 32 bits.
+  device_config_write(bus, 0, 0, PCI_BAR0, PCIE_BUS_MMIO_BASE | 0x04U);
+  device_config_write(bus, 0, 0, PCI_BAR1, 0);
+
+  // Read back the assignment before allowing
+  // memory transactions to reach the device.
+  uint32_t bar0 = device_config_read( bus, 0, 0, PCI_BAR0);
+  uint32_t bar1 = device_config_read( bus, 0, 0, PCI_BAR1);
+
+  if ((bar0 & ~0x0fU) != PCIE_BUS_MMIO_BASE || bar1 != 0)
+    return PCIE_MAP_VERIFY_FAILED;
+
+  // Enable downstream memory forwarding at the
+  // root bridge, followed by endpoint decoding.
+  // PCI bus mastering is deliberately NOT enabled.
+  pcie_set_memory_decode(0, true);
+  pcie_set_memory_decode(bus, true);
+  __asm__ volatile("dsb sy\nisb" ::: "memory");
+  xhci_resources_ready = true;
+  return PCIE_MAP_OK;
 }
 

@@ -35,3 +35,14 @@ typedef enum {
 
 pcie_init_result_t pcie_init_link(void);
 
+typedef enum {
+  PCIE_MAP_OK,
+  PCIE_MAP_LINK_DOWN,
+  PCIE_MAP_WRONG_DEVICE,
+  PCIE_MAP_BAD_BAR,
+  PCIE_MAP_VERIFY_FAILED
+} pcie_map_result_t;
+
+pcie_map_result_t pcie_map_xhci(void);
+
+bool pcie_xhci_ready(void);

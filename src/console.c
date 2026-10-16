@@ -6,6 +6,7 @@
 #include "uart.h"
 #include "irq.h"
 #include "pcie.h"
+#include "xhci.h"
 #include "midi.h"
 
 #define CONSOLE_LINE_SIZE 256
@@ -252,6 +253,45 @@ static void cmd_pci(const char *args) {
   }
 }
 
+
+static void cmd_usb(const char *args) {
+  (void)args;
+  // The VL805 is configured at boot.
+  // This command merely inspects the controller.
+  if (!pcie_xhci_ready()) {
+    console_puts("VL805 PCI resources are not configured.\n");
+    return;
+  }
+
+  xhci_info_t info;
+  if (!xhci_probe(&info)) {
+    console_puts("xHCI capability probe failed.\n");
+    return;
+  }
+  console_puts("\nVL805 xHCI controller:\n");
+  console_puts("  Capability length : ");
+  console_putu32(info.capability_length);
+  console_putc('\n');
+  console_puts("  xHCI version      : 0x");
+  console_puthex(info.version, 4);
+  console_putc('\n');
+  console_puts("  Maximum slots     : ");
+  console_putu32(info.max_slots);
+  console_putc('\n');
+  console_puts("  Maximum interrupters: ");
+  console_putu32(info.max_interrupters);
+  console_putc('\n');
+  console_puts("  Maximum ports     : ");
+  console_putu32(info.max_ports);
+  console_putc('\n');
+  console_puts("  Doorbell offset   : 0x");
+  console_puthex(info.doorbell_offset, 8);
+  console_putc('\n');
+  console_puts("  Runtime offset    : 0x");
+  console_puthex(info.runtime_offset, 8);
+  console_putc('\n');
+}
+
 static void cmd_midi(const char *args) {
   midi_message_t msg;
   const char *p = args;
@@ -312,6 +352,7 @@ static const console_command_t commands[] = {
   { "help",   cmd_help,   "List available commands" },
   { "irq", cmd_irq, "Display interrupt statistics" },
   { "pci", cmd_pci, "Inspect or initialise PCIe controller" },
+  { "usb", cmd_usb, "Inspect VL805 xHCI capabilities" },
   { "midi", cmd_midi, "Construct and inspect MIDI messages" },
   { NULL, NULL, NULL }
 };

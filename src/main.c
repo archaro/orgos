@@ -22,6 +22,61 @@ static unsigned int current_el(void) {
   return (unsigned int)((value >> 2) & 3U);
 }
 
+bool pcie_subsystem_init(void) {
+  // Initialise the PCIe subsystem.
+  // First establish the link to the VL805, then
+  // configure its memory resources.
+  // PCIe failures are non-fatal for now: preserve
+  // the diagnostic console.
+  console_puts("\nInitialising PCIe... ");
+  pcie_init_result_t pcie_result = pcie_init_link();
+  switch (pcie_result) {
+    case PCIE_INIT_OK:
+      console_puts("Link established.\n");
+      break;
+    case PCIE_INIT_ALREADY_UP:
+      console_puts("Link already active.\n");
+      break;
+    case PCIE_INIT_NOT_ROOT_COMPLEX:
+      console_puts("Failed: not in root-complex mode.\n");
+      break;
+    case PCIE_INIT_LINK_TIMEOUT:
+      console_puts("Failed: link timeout.\n");
+      break;
+  }
+  
+  // Only configure PCI resources when the link
+  // has been successfully established.
+  pcie_map_result_t map_result = PCIE_MAP_LINK_DOWN;
+  if (pcie_result == PCIE_INIT_OK ||
+      pcie_result == PCIE_INIT_ALREADY_UP) {
+    console_puts("Configuring VL805 PCI resources... ");
+    map_result = pcie_map_xhci();
+    switch (map_result) {
+      case PCIE_MAP_OK:
+        console_puts("OK.\n");
+        break;
+      case PCIE_MAP_LINK_DOWN:
+        console_puts("Failed: PCIe link down.\n");
+        break;
+      case PCIE_MAP_WRONG_DEVICE:
+        console_puts("Failed: unexpected PCIe device.\n");
+        break;
+      case PCIE_MAP_BAD_BAR:
+        console_puts("Failed: unexpected BAR type.\n");
+        break;
+      case PCIE_MAP_VERIFY_FAILED:
+        console_puts("Failed: BAR verification error.\n");
+        break;
+    }
+  }
+
+  if (map_result == PCIE_MAP_OK)
+    return true;
+  else
+    return false;
+}
+
 void main(void) {
   uint32_t clock_hz;
   bool clock_ok;
@@ -82,27 +137,8 @@ void main(void) {
   // Other exception masks remain unchanged.
   __asm__ volatile("msr daifclr, #2\nisb" ::: "memory");
 
-  // Initialise the BCM2711 PCIe link.
-  // PCIe initialization is not fatal at this stage:
-  // if it fails, retain access to the diagnostic
-  // console so that we can investigate.
-  console_puts("\nInitialising PCIe... ");
-
-  pcie_init_result_t pcie_result = pcie_init_link();
-  switch (pcie_result) {
-    case PCIE_INIT_OK:
-      console_puts("Link established.\n");
-      break;
-    case PCIE_INIT_ALREADY_UP:
-      console_puts("Link already active.\n");
-      break;
-    case PCIE_INIT_NOT_ROOT_COMPLEX:
-      console_puts("Failed: not in root-complex mode.\n");
-      break;
-    case PCIE_INIT_LINK_TIMEOUT:
-      console_puts("Failed: link timeout.\n");
-      break;
-  }
+  if (!pcie_subsystem_init())
+    console_puts("\nUNABLE TO INITIALISE PCIE BUS!\n");
 
   console_puts("\nOrgOS interactive console.\n");
   console_run();
