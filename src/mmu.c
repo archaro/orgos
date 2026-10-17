@@ -117,6 +117,11 @@ uint64_t mmu_ram_mapped_bytes(void) {
 
 #define DESC_ATTR(index) ((uint64_t)(index) << 2)
 
+// AP[2:1] = 10:
+//   EL1 read-only
+//   EL0 no access
+#define DESC_AP_RO (2ULL << 6)
+
 // A 36-bit virtual address space provides 64
 // level-1 regions, each covering 1 GiB.
 // Our physical RAM occupies the first 8 GiB,
@@ -128,6 +133,10 @@ uint64_t mmu_ram_mapped_bytes(void) {
 static uint64_t l1_table[MMU_TABLE_ENTRIES] __attribute__((aligned(4096)));
 static uint64_t l2_ram[MMU_RAM_L1_REGIONS][MMU_TABLE_ENTRIES] __attribute__((aligned(4096)));
 static uint64_t l2_pcie[MMU_TABLE_ENTRIES] __attribute__((aligned(4096)));
+#define MMU_PAGE_SIZE 4096ULL
+// Level-3 page table for the first 2 MiB.
+// 512 pages × 4 KiB = 2 MiB.
+static uint64_t l3_kernel[MMU_TABLE_ENTRIES] __attribute__((aligned(4096)));
 
 // Create a level-1 table descriptor pointing to
 // a level-2 translation table.
@@ -136,23 +145,30 @@ static uint64_t table_descriptor(const uint64_t *table) {
 }
 
 // Create a level-2 block descriptor.
-// Physical address must be 2 MiB aligned.
-// Device memory must never be executable.
-// We also mark ordinary RAM UXN, but initially
-// leave PXN clear because the kernel executes
-// from low RAM.
-// We'll introduce page-level code permissions
-// when we separate executable and writable RAM.
+// All block mappings are non-executable at
+// both EL1 and EL0.
+// Only explicitly protected kernel pages
+// may contain executable instructions.
 static uint64_t block_descriptor(uint64_t address, unsigned int attribute, bool device) {
-  uint64_t descriptor = (address & ~(MMU_BLOCK_SIZE - 1ULL)) | DESC_VALID |
-      DESC_AF | DESC_ATTR(attribute) | DESC_UXN;
-
-  if (device) {
-    descriptor |= DESC_PXN;
-  } else {
+  uint64_t descriptor =
+      (address & ~(MMU_BLOCK_SIZE - 1ULL)) | DESC_VALID | DESC_AF |
+      DESC_ATTR(attribute) | DESC_PXN | DESC_UXN;
+  if (!device)
     descriptor |= DESC_SH_INNER;
-  }
+  return descriptor;
+}
 
+// Construct a level-3 page descriptor.
+// Level-3 descriptors use bits [1:0] = 11.
+// Physical addresses must be 4 KiB aligned.
+static uint64_t page_descriptor(uint64_t address, bool read_only, bool executable) {
+  uint64_t descriptor =
+      (address & ~(MMU_PAGE_SIZE - 1ULL)) | DESC_VALID | DESC_TABLE |
+      DESC_AF | DESC_SH_INNER | DESC_ATTR(ATTR_NORMAL_NC) | DESC_UXN;
+  if (read_only)
+    descriptor |= DESC_AP_RO;
+  if (!executable)
+    descriptor |= DESC_PXN;
   return descriptor;
 }
 
@@ -164,6 +180,100 @@ static void map_block(uint64_t *table, uint64_t physical_address, unsigned int a
   table[index] = block_descriptor( physical_address, attribute, device);
 }
 
+// Assembly routine responsible for changing the
+// EL1 system registers and enabling translation.
+extern void mmu_enable_el1( uint64_t translation_table, uint64_t mair, uint64_t tcr);
+extern char __kernel_start[];
+extern char __kernel_end[];
+extern char __text_start[];
+extern char __text_end[];
+extern char __rodata_start[];
+extern char __rodata_end[];
+extern char __data_start[];
+extern char __data_end[];
+extern char __bss_start[];
+extern char __bss_end[];
+extern char __stack_bottom[];
+extern char __stack_top[];
+
+// Check whether a physical address belongs to
+// the half-open interval [start, end).
+static bool address_in_range(uint64_t address, uint64_t start, uint64_t end) {
+  return address >= start && address < end;
+}
+
+// Replace the first 2 MiB RAM block with
+// 512 individual 4 KiB page descriptors.
+// Executable pages are read-only.
+// Writable pages are execute-never.
+static bool protect_kernel_pages(void) {
+  uint64_t text_start = (uint64_t)(uintptr_t)__text_start;
+  uint64_t text_end = (uint64_t)(uintptr_t)__text_end;
+  uint64_t rodata_start = (uint64_t)(uintptr_t)__rodata_start;
+  uint64_t rodata_end = (uint64_t)(uintptr_t)__rodata_end;
+  uint64_t data_start = (uint64_t)(uintptr_t)__data_start;
+  uint64_t data_end = (uint64_t)(uintptr_t)__data_end;
+  uint64_t bss_start = (uint64_t)(uintptr_t)__bss_start;
+  uint64_t bss_end = (uint64_t)(uintptr_t)__bss_end;
+  uint64_t stack_start = (uint64_t)(uintptr_t)__stack_bottom;
+  uint64_t stack_end = (uint64_t)(uintptr_t)__stack_top;
+
+  // All section boundaries must be page-aligned.
+  const uint64_t boundaries[] = {
+    text_start, text_end,
+    rodata_start, rodata_end,
+    data_start, data_end,
+    bss_start, bss_end,
+    stack_start, stack_end
+  };
+
+  for (unsigned int i = 0;
+       i < sizeof(boundaries) / sizeof(boundaries[0]);
+       i++) {
+    if (boundaries[i] & (MMU_PAGE_SIZE - 1ULL))
+      return false;
+  }
+
+  // All protected sections must fit inside
+  // our first 2 MiB page table.
+  if (text_start < 0x80000ULL ||
+      text_end > MMU_BLOCK_SIZE ||
+      stack_end > MMU_BLOCK_SIZE)
+    return false;
+
+  // Validate the section ordering.
+  if (text_start > text_end ||
+      text_end > rodata_start ||
+      rodata_start > rodata_end ||
+      rodata_end > data_start ||
+      data_start > data_end ||
+      data_end > bss_start ||
+      bss_start > bss_end ||
+      bss_end > stack_start ||
+      stack_start > stack_end)
+    return false;
+
+  // Populate every page in the first 2 MiB.
+  // Non-kernel pages remain writable but
+  // cannot execute code.
+  for (unsigned int i = 0; i < MMU_TABLE_ENTRIES; i++) {
+    uint64_t address = (uint64_t)i * MMU_PAGE_SIZE;
+    bool read_only = false;
+    bool executable = false;
+    if (address_in_range(address, text_start, text_end)) {
+      read_only = true;
+      executable = true;
+    } else if (address_in_range(address, rodata_start, rodata_end)) {
+      read_only = true;
+    }
+    l3_kernel[i] = page_descriptor(address, read_only, executable);
+  }
+  // Replace the first 2 MiB block descriptor
+  // with a level-2 table descriptor.
+  // L2[0][0] points to the level-3 table.
+  l2_ram[0][0] = table_descriptor(l3_kernel);
+  return true;
+}
 
 // Construct identity mappings for all RAM banks
 // discovered through the firmware Device Tree.
@@ -247,9 +357,15 @@ static bool build_initial_tables(const physmem_map_t *memory)
     map_block(l2_pcie, address, ATTR_DEVICE, true);
   }
   l1_table[24] = table_descriptor(l2_pcie);
+  // Replace the first low-RAM block with
+  // page-level kernel protection.
+  // The tables are still inactive here,
+  // so no TLB maintenance is required.
+  if (!protect_kernel_pages())
+    return false;
+
   return true;
 }
-
 
 // Ask the AArch64 MMU to translate a virtual
 // address for an EL1 privileged read.
@@ -291,12 +407,35 @@ bool mmu_translate(uint64_t address, mmu_translation_t *result) {
   return true;
 }
 
+// Perform a privileged EL1 write translation.
+// This checks whether the page would permit
+// a write; it does not actually modify memory.
+bool mmu_translate_write(uint64_t address, mmu_translation_t *result) {
+  if (!result || !mmu_enabled())
+    return false;
 
-// Assembly routine responsible for changing the
-// EL1 system registers and enabling translation.
-extern void mmu_enable_el1( uint64_t translation_table, uint64_t mair, uint64_t tcr);
-extern char __kernel_start[];
-extern char __kernel_end[];
+  uint64_t par;
+  __asm__ volatile(
+      "at s1e1w, %1\n"
+      "isb\n"
+      "mrs %0, par_el1\n"
+      : "=r"(par)
+      : "r"(address)
+      : "memory");
+
+  result->virtual_address = address;
+  result->par = par;
+  result->fault = (par & 1ULL) != 0;
+  result->fault_status = 0;
+  result->physical_address = 0;
+  if (result->fault) {
+    result->fault_status = (uint8_t)((par >> 1) & 0x3fU);
+  } else {
+    result->physical_address =
+        (par & 0x000FFFFFFFFFF000ULL) | (address & 0xfffULL);
+  }
+  return true;
+}
 
 bool mmu_init(const physmem_map_t *memory) {
   if (mmu_enabled())

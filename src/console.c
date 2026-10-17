@@ -230,6 +230,22 @@ static void print_mmu_translation(uint64_t address) {
   }
 }
 
+static void print_mmu_write_test(uint64_t address) {
+  mmu_translation_t result;
+
+  console_puts("  VA 0x");
+  console_puthex64(address);
+  if (!mmu_translate_write(address, &result)) {
+    console_puts(" : diagnostic unavailable\n");
+  } else if (result.fault) {
+    console_puts(" : WRITE DENIED (status 0x");
+    console_puthex(result.fault_status, 2);
+    console_puts(")\n");
+  } else {
+    console_puts(" : WRITE ALLOWED\n");
+  }
+}
+
 static void cmd_pci(const char *args) {
   if (next_word_is(&args, "init") && end_of_args(args)) {
     console_puts("Initialising BCM2711 PCIe link...\n");
@@ -323,7 +339,6 @@ static void cmd_pci(const char *args) {
     console_puts("Unknown USB device detected.\n");
   }
 }
-
 
 static void cmd_usb(const char *args) {
   (void)args;
@@ -531,6 +546,27 @@ static void cmd_physmem(const char *args) {
 }
 
 static void cmd_mmu(const char *args) {
+  // Non-destructive permissions diagnostics.
+  if (next_word_is(&args, "permissions") && end_of_args(args)) {
+    extern char __text_start[];
+    extern char __rodata_start[];
+    extern char __data_start[];
+    extern char __bss_start[];
+    extern char __stack_bottom[];
+    console_puts("EL1 kernel write permissions:\n");
+    console_puts("Text:\n");
+    print_mmu_write_test( (uint64_t)(uintptr_t)__text_start);
+    console_puts("Read-only data:\n");
+    print_mmu_write_test( (uint64_t)(uintptr_t)__rodata_start);
+    console_puts("Initialized data:\n");
+    print_mmu_write_test( (uint64_t)(uintptr_t)__data_start);
+    console_puts("BSS:\n");
+    print_mmu_write_test( (uint64_t)(uintptr_t)__bss_start);
+    console_puts("Kernel stack:\n");
+    print_mmu_write_test( (uint64_t)(uintptr_t)__stack_bottom);
+    return;
+  }
+
   // Non-destructive translation diagnostics.
   // With no address, examine representative
   // addresses from each RAM bank and the

@@ -30,5 +30,6 @@ typedef struct {
   bool fault;
 } mmu_translation_t;
 bool mmu_translate(uint64_t address, mmu_translation_t *result);
+bool mmu_translate_write(uint64_t address, mmu_translation_t *result);
 
 bool mmu_init(const physmem_map_t *memory);
