@@ -1,6 +1,23 @@
 
 ENTRY(_start)
 
+/*
+ * ELF program headers.
+ *
+ * These describe the intended access permissions
+ * of the loadable portions of the kernel.
+ *
+ * PF_X = 1
+ * PF_W = 2
+ * PF_R = 4
+ */
+PHDRS
+{
+  text   PT_LOAD FLAGS(5);  /* Read + execute */
+  rodata PT_LOAD FLAGS(4);  /* Read only */
+  data   PT_LOAD FLAGS(6);  /* Read + write */
+}
+
 SECTIONS
 {
   . = 0x80000;
@@ -20,36 +37,24 @@ SECTIONS
     *(.text .text.*)
     . = ALIGN(4096);
     __text_end = .;
-  }
+  } :text
 
-  /*
-   * Read-only kernel data.
-   */
   .rodata : ALIGN(4096)
   {
     __rodata_start = .;
     *(.rodata .rodata.*)
     . = ALIGN(4096);
     __rodata_end = .;
-  }
+  } :rodata
 
-  /*
-   * Initialized writable data.
-   */
   .data : ALIGN(4096)
   {
     __data_start = .;
     *(.data .data.*)
     . = ALIGN(4096);
     __data_end = .;
-  }
+  } :data
 
-  /*
-   * Zero-initialized writable data.
-   *
-   * Keep the bounds page-aligned so
-   * boot.S can safely clear this region.
-   */
   .bss (NOLOAD) : ALIGN(4096)
   {
     __bss_start = .;
@@ -57,18 +62,14 @@ SECTIONS
     *(COMMON)
     . = ALIGN(4096);
     __bss_end = .;
-  }
+  } :data
 
-  /*
-   * Initial EL1 kernel stack.
-   */
   .stack (NOLOAD) : ALIGN(4096)
   {
     __stack_bottom = .;
     . += 16384;
     __stack_top = .;
-  }
-
+  } :data
   . = ALIGN(4096);
   __kernel_end = .;
 

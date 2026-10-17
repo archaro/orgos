@@ -49,28 +49,50 @@ mmu_enable_el1:
   dsb sy
   isb
 
+  // OrgOS currently uses only CPU core 0.
+  //
+  // IC IALLUIS was tested on the Raspberry Pi 4B
+  // and caused interrupt-driven UART reception to
+  // stop working, although polled transmission
+  // continued normally.
+  //
+  // IC IALLU works correctly in this configuration.
+  // The cause of the IALLUIS behaviour remains
+  // undetermined; revisit during multicore bring-up.
+  ic iallu
+
+  // Complete instruction-cache maintenance
+  // before changing SCTLR_EL1.
+  dsb ish
+  isb
+
   // Read the existing EL1 system control.
   mrs x3, sctlr_el1
 
-  // Enable stage-1 address translation.
-  // SCTLR_EL1.M = bit 0.
+  // M: bit 0 - enable stage-1 translation.
   orr x3, x3, #1
 
-  // Enable Write eXecute Never.
-  // SCTLR_EL1.WXN = bit 19.
-  //
-  // This prevents execution through writable
-  // stage-1 mappings, providing an additional
-  // safeguard against accidental RWX pages.
-  //
-  // Kernel .text is mapped read-only, so it
-  // remains executable.
+  // WXN: bit 19 - prohibit execution through
+  // writable mappings.
   mov x4, #0x80000
   orr x3, x3, x4
 
-  // Commit both settings together, then
-  // synchronize instruction execution.
+  // I: bit 12 - enable instruction caching.
+  //
+  // This does not enable the data cache.
+  mov x4, #0x1000
+  orr x3, x3, x4
+
+  // Explicitly leave C (bit 2) disabled.
+  // Data-cache initialization is a separate
+  // development stage.
+  bic x3, x3, #4
+
+  // Activate translation, WXN and I-cache.
   msr sctlr_el1, x3
+
+  // Ensure subsequent instruction fetches
+  // observe the updated control settings.
   isb
 
   ret
