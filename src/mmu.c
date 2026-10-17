@@ -117,13 +117,16 @@ uint64_t mmu_ram_mapped_bytes(void) {
 
 #define DESC_ATTR(index) ((uint64_t)(index) << 2)
 
-// Page-table storage.
-// GCC's alignment attribute guarantees that every
-// table begins on a 4 KiB boundary.
-// Each table contains 512 64-bit descriptors.
+// A 36-bit virtual address space provides 64
+// level-1 regions, each covering 1 GiB.
+// Our physical RAM occupies the first 8 GiB,
+// so eight level-2 tables are sufficient.
+// Region 3 also contains the BCM2711 MMIO
+// registers. Those entries receive Device
+// attributes rather than Normal attributes.
+#define MMU_RAM_L1_REGIONS 8U
 static uint64_t l1_table[MMU_TABLE_ENTRIES] __attribute__((aligned(4096)));
-static uint64_t l2_ram[MMU_TABLE_ENTRIES] __attribute__((aligned(4096)));
-static uint64_t l2_peripherals[MMU_TABLE_ENTRIES] __attribute__((aligned(4096)));
+static uint64_t l2_ram[MMU_RAM_L1_REGIONS][MMU_TABLE_ENTRIES] __attribute__((aligned(4096)));
 static uint64_t l2_pcie[MMU_TABLE_ENTRIES] __attribute__((aligned(4096)));
 
 // Create a level-1 table descriptor pointing to
@@ -161,57 +164,146 @@ static void map_block(uint64_t *table, uint64_t physical_address, unsigned int a
   table[index] = block_descriptor( physical_address, attribute, device);
 }
 
-// Fill our initial identity map.
-// All tables begin zeroed. A zero descriptor means the address is not mapped.
-static void build_initial_tables(uint64_t ram_end) {
+
+// Construct identity mappings for all RAM banks
+// discovered through the firmware Device Tree.
+// Every RAM bank must fit inside our initial
+// 8 GiB physical-RAM mapping area.
+// This implementation uses 2 MiB blocks,
+// so bank bases and sizes must be aligned
+// to 2 MiB boundaries.
+// No memory is allocated or modified here:
+// we are only constructing translations.
+static bool build_initial_tables(const physmem_map_t *memory)
+{
+  if (!memory || memory->bank_count == 0)
+    return false;
+
+  // Start with every descriptor invalid.
   for (unsigned int i = 0; i < MMU_TABLE_ENTRIES; i++) {
     l1_table[i] = 0;
-    l2_ram[i] = 0;
-    l2_peripherals[i] = 0;
     l2_pcie[i] = 0;
   }
 
-  // Map the firmware-reported ARM RAM.
-  // For now we use complete 2 MiB blocks only.
-  // Any incomplete final block remains unmapped.
-  // Our next stage will introduce 4 KiB mappings
-  // where finer granularity is required.
-  for (uint64_t address = 0; address + MMU_BLOCK_SIZE <= ram_end; address += MMU_BLOCK_SIZE) {
-    map_block(l2_ram, address, ATTR_NORMAL_NC, false);
+  for (unsigned int region = 0; region < MMU_RAM_L1_REGIONS; region++) {
+    for (unsigned int i = 0; i < MMU_TABLE_ENTRIES; i++) {
+      l2_ram[region][i] = 0;
+    }
   }
 
-  // BCM2711 peripheral area:
-  // 0xFC000000 - 0xFFFFFFFF
-  // This includes the PCIe bridge, UART, firmware mailbox, system timer and GIC.
+  // Each level-1 entry selects the corresponding
+  // 1 GiB region's level-2 table.
+  // Unpopulated level-2 entries remain invalid.
+  for (unsigned int region = 0; region < MMU_RAM_L1_REGIONS; region++) {
+    l1_table[region] = table_descriptor(l2_ram[region]);
+  }
+
+  mapped_ram_bytes = 0;
+  // Populate the RAM blocks.
+  for (unsigned int bank = 0; bank < memory->bank_count; bank++) {
+    uint64_t start = memory->banks[bank].address;
+    uint64_t size = memory->banks[bank].size;
+    if (size == 0)
+      return false;
+    if ((start & (MMU_BLOCK_SIZE - 1ULL)) != 0 || (size & (MMU_BLOCK_SIZE - 1ULL)) != 0)
+      return false;
+    if (size > UINT64_MAX - start)
+      return false;
+    uint64_t end = start + size;
+    if (end > 8ULL * MMU_GIB)
+      return false;
+    if (size > UINT64_MAX - mapped_ram_bytes)
+      return false;
+    for (uint64_t address = start; address < end; address += MMU_BLOCK_SIZE) {
+      unsigned int region = (unsigned int)(address >> 30);
+      unsigned int index = (unsigned int)((address >> 21) & 0x1ffU);
+      // Reject overlapping RAM banks.
+      if (l2_ram[region][index] & DESC_VALID)
+        return false;
+      l2_ram[region][index] = block_descriptor(address, ATTR_NORMAL_NC, false);
+    }
+    mapped_ram_bytes += size;
+  }
+
+  // BCM2711 peripheral MMIO occupies:
+  //   0xFC000000 - 0xFFFFFFFF
+  // It shares level-1 region 3 with the
+  // upper part of RAM Bank 1.
   for (uint64_t address = 0xfc000000ULL; address < 0x100000000ULL; address += MMU_BLOCK_SIZE) {
-    map_block(l2_peripherals, address, ATTR_DEVICE, true);
+    unsigned int index = (unsigned int)((address >> 21) & 0x1ffU);
+    // Never overwrite a RAM descriptor with a
+    // Device descriptor. Such an overlap means
+    // our memory descriptions are inconsistent.
+    if (l2_ram[3][index] & DESC_VALID)
+      return false;
+    l2_ram[3][index] = block_descriptor(address, ATTR_DEVICE, true);
   }
 
-  // VL805 xHCI outbound PCIe MMIO aperture:
-  // 0x600000000 - 0x603FFFFFF
-  // Exactly 64 MiB.
+  // VL805 PCIe outbound MMIO window.
+  //   0x600000000 - 0x603FFFFFF
+  // This is level-1 region 24, outside
+  // the physical RAM area.
   for (uint64_t address = 0x600000000ULL; address < 0x604000000ULL; address += MMU_BLOCK_SIZE) {
     map_block(l2_pcie, address, ATTR_DEVICE, true);
   }
-
-  // Install level-1 entries.
-  // L1[0]  = 0-1 GiB region containing low RAM
-  // L1[3]  = 3-4 GiB region containing peripherals
-  // L1[24] = 24-25 GiB region containing VL805 MMIO
-  l1_table[0] = table_descriptor(l2_ram);
-  l1_table[3] = table_descriptor(l2_peripherals);
   l1_table[24] = table_descriptor(l2_pcie);
+  return true;
 }
+
+
+// Ask the AArch64 MMU to translate a virtual
+// address for an EL1 privileged read.
+// AT S1E1R performs stage-1 translation at EL1.
+// It does not read the target memory.
+// PAR_EL1 contains either:
+//   F = 0: Successful translation.
+//   F = 1: Translation or permission failure.
+// On success, PAR_EL1[51:12] contains the
+// resulting physical address, aligned to 4 KiB.
+// The original page offset is added to produce
+// the complete translated address.
+// On failure, PAR_EL1[6:1] contains the fault
+// status code.
+bool mmu_translate(uint64_t address, mmu_translation_t *result) {
+  if (!result || !mmu_enabled())
+    return false;
+
+  uint64_t par;
+  // Ensure the translation instruction completes
+  // before reading PAR_EL1.
+  // The memory clobber prevents compiler reordering
+  // across the inline assembly sequence.
+  __asm__ volatile( "at s1e1r, %1\n" "isb\n" "mrs %0, par_el1\n"
+      : "=r"(par) : "r"(address) : "memory");
+  result->virtual_address = address;
+  result->par = par;
+  result->fault = (par & 1ULL) != 0;
+  result->fault_status = 0;
+  result->physical_address = 0;
+  if (result->fault) {
+    result->fault_status =
+        (uint8_t)((par >> 1) & 0x3fU);
+  } else {
+    result->physical_address =
+        (par & 0x000FFFFFFFFFF000ULL) |
+        (address & 0xfffULL);
+  }
+  return true;
+}
+
 
 // Assembly routine responsible for changing the
 // EL1 system registers and enabling translation.
 extern void mmu_enable_el1( uint64_t translation_table, uint64_t mair, uint64_t tcr);
-
+extern char __kernel_start[];
 extern char __kernel_end[];
 
-bool mmu_init(uint32_t arm_base, uint32_t arm_size) {
+bool mmu_init(const physmem_map_t *memory) {
   if (mmu_enabled())
     return true;
+
+  if (!memory || memory->bank_count == 0)
+    return false;
 
   if (!mmu_granule_4k_supported())
     return false;
@@ -219,53 +311,48 @@ bool mmu_init(uint32_t arm_base, uint32_t arm_size) {
   if (mmu_physical_address_bits() < 36)
     return false;
 
-  // Our initial L1[0] / L2 RAM arrangement supports
-  // one contiguous RAM region beginning at zero
-  // and occupying at most 1 GiB.
-  if (arm_base != 0 || arm_size == 0)
+  // Confirm that the entire kernel, including
+  // its stack, relocated FDT and page tables,
+  // lies inside one firmware-described RAM bank.
+  uint64_t kernel_start = (uint64_t)(uintptr_t)__kernel_start;
+  uint64_t kernel_end = (uint64_t)(uintptr_t)__kernel_end;
+  bool kernel_covered = false;
+  for (unsigned int i = 0; i < memory->bank_count; i++) {
+    uint64_t start = memory->banks[i].address;
+    uint64_t size = memory->banks[i].size;
+    if (size > UINT64_MAX - start)
+      return false;
+    uint64_t end = start + size;
+    if (kernel_start >= start && kernel_end <= end) {
+      kernel_covered = true;
+      break;
+    }
+  }
+
+  if (!kernel_covered)
     return false;
 
-  if ((uint64_t)arm_size > MMU_GIB)
+  if (!build_initial_tables(memory))
     return false;
 
-  // Round down to a complete 2 MiB block.
-  // Avoid mapping the final partial block, which
-  // might include memory not assigned to ARM.
-  uint64_t ram_end = (uint64_t)arm_size & ~(MMU_BLOCK_SIZE - 1ULL);
-
-  // The kernel image, .bss, translation tables
-  // and stack must all be inside mapped RAM.
-  if (ram_end < MMU_BLOCK_SIZE)
-    return false;
-
-  if ((uint64_t)(uintptr_t)__kernel_end > ram_end)
-    return false;
-
-  build_initial_tables(ram_end);
-  mapped_ram_bytes = ram_end;
-
-  // MAIR_EL1 attribute encodings:
-  // Index 0: Device-nGnRnE = 0x00
-  // Index 1: Normal non-cacheable = 0x44
-  // Index 2: Normal WB/WA cacheable = 0xFF
+  // MAIR:
+  // Attribute 0: Device-nGnRnE
+  // Attribute 1: Normal, non-cacheable
+  // Attribute 2: Normal, write-back cacheable
+  // We continue using non-cacheable RAM
+  // during this stage of development.
   uint64_t mair = (0x00ULL << 0) | (0x44ULL << 8) | (0xffULL << 16);
 
-  // TCR_EL1:
-  // T0SZ = 28 -> 36-bit TTBR0 address space
-  // IRGN0 = 0  -> Non-cacheable table walks
-  // ORGN0 = 0  -> Non-cacheable table walks
-  // SH0 = 3    -> Inner-shareable
-  // TG0 = 0    -> 4 KiB granule
-  // EPD1 = 1   -> Disable TTBR1 walks
-  // IPS = 1    -> 36-bit physical address output
-  // Although the processor supports 44-bit
-  // physical addresses, our current mapped
-  // physical regions fit within 36 bits.
+  // TCR:
+  // T0SZ  = 28: 36-bit virtual addresses
+  // SH0   = 3:  inner-shareable
+  // EPD1  = 1:  disable TTBR1 walks
+  // IPS   = 1:  36-bit physical addresses
+  // Translation-table walks remain non-cacheable.
   uint64_t tcr = 28ULL | (3ULL << 12) | (1ULL << 23) | (1ULL << 32);
 
-  mmu_enable_el1((uint64_t)(uintptr_t)l1_table,
-      mair, tcr);
-
+  mmu_enable_el1( (uint64_t)(uintptr_t)l1_table, mair, tcr);
   return mmu_enabled();
 }
+
 

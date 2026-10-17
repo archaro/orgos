@@ -173,12 +173,14 @@ void main(void) {
     console_puts("FAILED.\n");
   }
 
-  // The MMU requires valid memory information.
-  // A failed initialization is fatal, because
-  // later subsystems will depend on translation.
-  console_puts("Initialising MMU... ");
-  if (memory_ok && mmu_init(arm_base, arm_size)) {
-    console_puts("Translation enabled.\n");
+  // Build our physical-memory inventory before
+  // constructing the translation tables.
+  // The FDT has already been relocated into
+  // kernel-owned memory, and translation is
+  // still disabled.
+  console_puts("Building physical memory map... ");
+  if (physmem_init()) {
+    console_puts("OK.\n");
   } else {
     console_puts("FAILED.\n");
     console_puts("System halted.\n");
@@ -188,13 +190,12 @@ void main(void) {
     }
   }
 
-  // Build the physical-memory inventory now that
-  // the private FDT is accessible through our MMU.
-  // This is discovery only: no RAM mapping or
-  // allocation takes place here.
-  console_puts("Building physical memory map... ");
-  if (physmem_init()) {
-    console_puts("OK.\n");
+  // The MMU requires valid memory information.
+  // A failed initialization is fatal, because
+  // later subsystems will depend on translation.
+  console_puts("Initialising MMU... ");
+  if (memory_ok && mmu_init(physmem_get_map())) {
+    console_puts("Translation enabled.\n");
   } else {
     console_puts("FAILED.\n");
     console_puts("System halted.\n");

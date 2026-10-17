@@ -492,15 +492,11 @@ bool fdt_get_memory_map(fdt_memory_map_t *map) {
   if (!fdt_valid || !map)
     return false;
 
-  // Ensure that the entire FDT is inside our
-  // current low-RAM identity mapping.
-  // This is a temporary requirement until
-  // we introduce permanent FDT storage.
-  extern uint64_t mmu_ram_mapped_bytes(void);
-  uint64_t mapped_end = mmu_ram_mapped_bytes();
-
-  if (current_fdt.address >= mapped_end ||
-      current_fdt.total_size > mapped_end - current_fdt.address)
+  // We only parse OrgOS's private FDT copy.
+  // The storage is part of the kernel's .bss,
+  // so it is accessible both before enabling
+  // translation and afterward.
+  if (!fdt_relocated)
     return false;
 
   const volatile uint8_t *blob = (const volatile uint8_t *)(uintptr_t) current_fdt.address;

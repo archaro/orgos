@@ -109,6 +109,45 @@ next_word_is(const char **input, const char *word)
   return true;
 }
 
+
+// Parse an unsigned 64-bit hexadecimal address.
+// Accept either:
+//   0x100000000
+//   100000000
+// Reject missing digits, invalid characters,
+// overflow, and trailing non-whitespace text.
+static bool next_hex64(const char **input, uint64_t *value) {
+  const char *p = *input;
+  uint64_t result = 0;
+  bool found = false;
+
+  while (*p == ' ' || *p == '\t')
+    p++;
+  if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X'))
+    p += 2;
+  for (;;) {
+    unsigned int digit;
+    if (*p >= '0' && *p <= '9')
+      digit = (unsigned int)(*p - '0');
+    else if (*p >= 'a' && *p <= 'f')
+      digit = (unsigned int)(*p - 'a') + 10U;
+    else if (*p >= 'A' && *p <= 'F')
+      digit = (unsigned int)(*p - 'A') + 10U;
+    else
+      break;
+    if (result > (UINT64_MAX - digit) / 16ULL)
+      return false;
+    result = result * 16ULL + digit;
+    found = true;
+    p++;
+  }
+  if (!found || (*p && *p != ' ' && *p != '\t'))
+    return false;
+  *value = result;
+  *input = p;
+  return true;
+}
+
 static bool next_uint(const char **input, unsigned int *value) {
   // Read an unsigned decimal integer.
   // Reject missing values, non-decimal characters and overflow.
@@ -168,6 +207,26 @@ static void console_puthex64(uint64_t value) {
   for (unsigned int i = 0; i < 16; i++) {
     unsigned int shift = (15U - i) * 4U;
     console_putc(hex[(value >> shift) & 0x0fU]);
+  }
+}
+
+static void print_mmu_translation(uint64_t address) {
+  mmu_translation_t result;
+
+  console_puts("  VA 0x");
+  console_puthex64(address);
+  if (!mmu_translate(address, &result)) {
+    console_puts(" : diagnostic unavailable\n");
+    return;
+  }
+  if (result.fault) {
+    console_puts(" : FAULT (status 0x");
+    console_puthex(result.fault_status, 2);
+    console_puts(")\n");
+  } else {
+    console_puts(" -> PA 0x");
+    console_puthex64(result.physical_address);
+    console_putc('\n');
   }
 }
 
@@ -472,13 +531,48 @@ static void cmd_physmem(const char *args) {
 }
 
 static void cmd_mmu(const char *args) {
+  // Non-destructive translation diagnostics.
+  // With no address, examine representative
+  // addresses from each RAM bank and the
+  // currently configured MMIO regions.
+  if (next_word_is(&args, "translate")) {
+    if (!mmu_enabled()) {
+      console_puts("MMU is disabled.\n");
+      return;
+    }
+    if (end_of_args(args)) {
+      static const uint64_t test_addresses[] = {
+        0x0000000000008000ULL,  // Bank 0
+        0x000000003B400000ULL,  // Gap after Bank 0
+        0x0000000040000000ULL,  // Bank 1
+        0x00000000FC000000ULL,  // Peripheral MMIO
+        0x0000000100000000ULL,  // Bank 2
+        0x0000000180000000ULL,  // Bank 3
+        0x0000000200000000ULL,  // Gap after Bank 3
+        0x0000000600000000ULL   // VL805 MMIO
+      };
+      console_puts("EL1 stage-1 read translations:\n");
+      for (unsigned int i = 0; i < sizeof(test_addresses) /
+               sizeof(test_addresses[0]); i++) {
+        print_mmu_translation(test_addresses[i]);
+      }
+      return;
+    }
+    uint64_t address;
+    if (!next_hex64(&args, &address) || !end_of_args(args)) {
+      console_puts("Usage: mmu translate [hex-address]\n");
+      return;
+    }
+    console_puts("EL1 stage-1 read translation:\n");
+    print_mmu_translation(address);
+    return;
+  }
+
   // Deliberately access an unmapped virtual address.
-  // Our initial translation tables leave the entire
-  // 2-3 GiB region unmapped. Address 0x80000000
-  // therefore has no valid translation.
+  // Address 0x3c000000 has no valid translation.
   // This is a destructive diagnostic: a successful
   // test enters exception_panic() and halts OrgOS.
-  if (next_word_is(&args, "fault") && end_of_args(args)) {
+    if (next_word_is(&args, "fault") && end_of_args(args)) {
     if (!mmu_enabled()) {
       console_puts("MMU is disabled; refusing fault test.\n");
       return;
@@ -486,7 +580,7 @@ static void cmd_mmu(const char *args) {
 
     console_puts(
         "MMU translation fault test.\n"
-        "Reading unmapped virtual address 0x80000000...\n"
+        "Reading unmapped virtual address 0x3c000000ULL...\n"
         "Expected result: synchronous EL1 data abort.\n"
         "OrgOS will halt. Reboot required.\n\n");
 
@@ -495,7 +589,7 @@ static void cmd_mmu(const char *args) {
     // Because the virtual address is unmapped,
     // the load should never complete.
     volatile const uint32_t *address =
-        (volatile const uint32_t *)(uintptr_t)0x80000000ULL;
+        (volatile const uint32_t *)(uintptr_t)0x3c000000ULL;
 
     uint32_t value = *address;
 
@@ -508,7 +602,7 @@ static void cmd_mmu(const char *args) {
   }
 
   if (!end_of_args(args)) {
-    console_puts("Usage: mmu [fault]\n");
+    console_puts("Usage: mmu [translate [hex-address] | fault]\n");
     return;
   }
 
