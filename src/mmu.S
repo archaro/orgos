@@ -83,10 +83,14 @@ mmu_enable_el1:
   mov x4, #0x1000
   orr x3, x3, x4
 
-  // Explicitly leave C (bit 2) disabled.
-  // Data-cache initialization is a separate
-  // development stage.
-  bic x3, x3, #4
+  // C: bit 2 - enable data and unified caches.
+  //
+  // All ordinary RAM mappings now use Normal
+  // write-back, write-allocate attributes.
+  //
+  // Peripheral and PCIe MMIO mappings remain
+  // Device-nGnRnE and are not cacheable.
+  orr x3, x3, #4
 
   // Activate translation, WXN and I-cache.
   msr sctlr_el1, x3

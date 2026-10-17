@@ -2,6 +2,7 @@
 #include <stdbool.h>
 
 #include "mmu.h"
+#include "cache.h"
 
 // Read the AArch64 memory-model feature register.
 // ID_AA64MMFR0_EL1 describes, among other things:
@@ -164,7 +165,7 @@ static uint64_t block_descriptor(uint64_t address, unsigned int attribute, bool 
 static uint64_t page_descriptor(uint64_t address, bool read_only, bool executable) {
   uint64_t descriptor =
       (address & ~(MMU_PAGE_SIZE - 1ULL)) | DESC_VALID | DESC_TABLE |
-      DESC_AF | DESC_SH_INNER | DESC_ATTR(ATTR_NORMAL_NC) | DESC_UXN;
+      DESC_AF | DESC_SH_INNER | DESC_ATTR(ATTR_NORMAL_WB) | DESC_UXN;
   if (read_only)
     descriptor |= DESC_AP_RO;
   if (!executable)
@@ -330,7 +331,7 @@ static bool build_initial_tables(const physmem_map_t *memory)
       // Reject overlapping RAM banks.
       if (l2_ram[region][index] & DESC_VALID)
         return false;
-      l2_ram[region][index] = block_descriptor(address, ATTR_NORMAL_NC, false);
+      l2_ram[region][index] = block_descriptor(address, ATTR_NORMAL_WB, false);
     }
     mapped_ram_bytes += size;
   }
@@ -573,6 +574,13 @@ bool mmu_init(const physmem_map_t *memory) {
   if (!kernel_covered)
     return false;
 
+  // Initialize the local data-cache hierarchy
+  // before constructing the final translation
+  // tables and enabling write-back caching.
+  // This must occur with SCTLR_EL1.C clear.
+  if (!cache_init_data())
+    return false;
+
   if (!build_initial_tables(memory))
     return false;
 
@@ -584,16 +592,20 @@ bool mmu_init(const physmem_map_t *memory) {
   // during this stage of development.
   uint64_t mair = (0x00ULL << 0) | (0x44ULL << 8) | (0xffULL << 16);
 
-  // TCR:
-  // T0SZ  = 28: 36-bit virtual addresses
-  // SH0   = 3:  inner-shareable
-  // EPD1  = 1:  disable TTBR1 walks
-  // IPS   = 1:  36-bit physical addresses
-  // Translation-table walks remain non-cacheable.
-  uint64_t tcr = 28ULL | (3ULL << 12) | (1ULL << 23) | (1ULL << 32);
+  // TCR_EL1:
+  // T0SZ  = 28 : 36-bit virtual addresses
+  // IRGN0 = 01 : Inner write-back, write-allocate
+  // ORGN0 = 01 : Outer write-back, write-allocate
+  // SH0   = 11 : Inner Shareable
+  // EPD1  = 1  : TTBR1 disabled
+  // IPS   = 001: 36-bit physical address output
+  // Translation-table memory is ordinary
+  // write-back cacheable RAM.
+    uint64_t tcr = 28ULL | (1ULL << 8) | (1ULL << 10) |
+        (3ULL << 12) | (1ULL << 23) | (1ULL << 32);
 
-  mmu_enable_el1( (uint64_t)(uintptr_t)l1_table, mair, tcr);
-  return mmu_enabled();
-}
+    mmu_enable_el1( (uint64_t)(uintptr_t)l1_table, mair, tcr);
+    return mmu_enabled();
+  }
 
 

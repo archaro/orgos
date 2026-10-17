@@ -108,3 +108,72 @@ bool cache_clean_invalidate(const void *address, size_t length) {
   return cache_maintain( address, length, CACHE_CLEAN_INVALIDATE);
 }
 
+bool cache_init_data(void) {
+  uint64_t sctlr;
+  uint64_t clidr;
+  __asm__ volatile( "mrs %0, sctlr_el1" : "=r"(sctlr));
+
+  // Refuse to invalidate the entire cache
+  // hierarchy if D-cache is already enabled.
+  // Doing so could discard dirty kernel data.
+  if (sctlr & (1ULL << 2))
+    return false;
+
+  __asm__ volatile( "mrs %0, clidr_el1" : "=r"(clidr));
+
+  // Inspect up to seven architecturally
+  // described cache levels.
+  for (unsigned int level = 0; level < 7; level++) {
+    unsigned int type = (unsigned int)((clidr >> (level * 3U)) & 7U);
+
+    if (type == 0)
+      break;
+
+    // 1 = instruction-only
+    // 2 = data-only
+    // 3 = separate instruction/data
+    // 4 = unified
+    if (type == 1)
+      continue;
+
+    if (type < 2 || type > 4)
+      return false;
+
+    // Select the data/unified cache at this
+    // level using CSSELR_EL1.
+    uint64_t selector = (uint64_t)level << 1;
+    __asm__ volatile( "msr csselr_el1, %0\n"
+        "isb" :: "r"(selector) : "memory");
+
+    uint64_t ccsidr;
+    __asm__ volatile( "mrs %0, ccsidr_el1" : "=r"(ccsidr));
+
+    // Legacy CCSIDR format used by Cortex-A72.
+    unsigned int line_shift = (unsigned int)(ccsidr & 7U) + 4U;
+    unsigned int ways = (unsigned int)((ccsidr >> 3) & 0x3ffU) + 1U;
+    unsigned int sets = (unsigned int)((ccsidr >> 13) & 0x7fffU) + 1U;
+    unsigned int way_shift =
+        ways > 1 ? (unsigned int)__builtin_clz(ways - 1U) : 0;
+
+    for (unsigned int way = 0; way < ways; way++) {
+      for (unsigned int set = 0; set < sets; set++) {
+        uint64_t operand =
+            ((uint64_t)level << 1) | ((uint64_t)set << line_shift);
+
+        if (ways > 1)
+          operand |= (uint64_t)way << way_shift;
+
+        __asm__ volatile( "dc isw, %0" :: "r"(operand) : "memory");
+      }
+    }
+  }
+
+  __asm__ volatile(
+      "dsb sy\n"
+      "msr csselr_el1, xzr\n"
+      "isb"
+      ::: "memory");
+
+  return true;
+}
+

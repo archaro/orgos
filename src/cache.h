@@ -20,4 +20,4 @@ bool cache_get_info(cache_info_t *info);
 bool cache_clean(const void *address, size_t length);
 bool cache_invalidate(const void *address, size_t length);
 bool cache_clean_invalidate( const void *address, size_t length);
-
+bool cache_init_data(void);
