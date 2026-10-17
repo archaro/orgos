@@ -3,6 +3,7 @@
 
 #include "mailbox.h"
 #include "timer.h"
+#include "fdt.h"
 #include "gic.h"
 #include "irq.h"
 #include "mmu.h"
@@ -133,6 +134,17 @@ void main(void) {
   console_puts("Baud rate: ");
   console_putu32(UART_BAUD);
   console_puts("\n");
+
+  // Inspect the firmware-supplied Device Tree
+  // before enabling address translation.
+  // This is diagnostic only. An absent or invalid
+  // FDT must not prevent OrgOS from booting.
+  console_puts("\nChecking firmware Device Tree... ");
+  if (fdt_init()) {
+    console_puts("Valid FDT detected.\n");
+  } else {
+    console_puts("Not available or invalid.\n");
+  }
 
   // Discover the firmware-reported ARM memory region
   // before constructing the EL1 translation tables.

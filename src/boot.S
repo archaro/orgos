@@ -28,11 +28,21 @@
 .extern __bss_end
 .extern __stack_top
 .extern exception_vectors
+.extern firmware_fdt_address
 
 // Entry point, as specified by ENTRY(_start) in link.ld.
 // We must not assume that the stack pointer is valid yet.
 // Consequently, the following code uses only CPU registers.
 _start:
+  // On a Raspberry Pi AArch64 firmware boot, x0
+  // conventionally contains the physical address
+  // of the Flattened Device Tree.
+  // Save it before using x0 for core identification
+  // and exception-level initialization.
+  // x19 is a callee-saved register and our bootstrap
+  // does not otherwise use it.
+  mov x19, x0
+
   // Identify the executing core, and suspend the others.
   // We want exactly one core executing OrgOS for now.
   // MPIDR_EL1 is the Multiprocessor Affinity Register.
@@ -219,6 +229,13 @@ clear_bss:
   b clear_bss
 
 bss_complete:
+  // Preserve the firmware Device Tree address in
+  // a global variable accessible from C.
+  // This must happen AFTER clearing .bss, because
+  // firmware_fdt_address is stored in that section.
+  ldr x0, =firmware_fdt_address
+  str x19, [x0]
+
   // Install our EL1 exception vector table.
   //
   // VBAR_EL1 is the Vector Base Address Register.

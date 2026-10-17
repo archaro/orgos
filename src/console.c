@@ -5,6 +5,7 @@
 #include "console.h"
 #include "mailbox.h"
 #include "uart.h"
+#include "fdt.h"
 #include "irq.h"
 #include "mmu.h"
 #include "pcie.h"
@@ -302,6 +303,49 @@ static void cmd_usb(const char *args) {
   console_putc('\n');
 }
 
+
+static void cmd_fdt(const char *args) {
+  if (!end_of_args(args)) {
+    console_puts("Usage: fdt\n");
+    return;
+  }
+
+  fdt_info_t info;
+  console_puts("Firmware Flattened Device Tree:\n");
+  console_puts("  Firmware pointer : 0x");
+  console_puthex64(firmware_fdt_address);
+  console_putc('\n');
+  if (!fdt_get_info(&info)) {
+    console_puts("  Status           : Not available or invalid\n");
+    return;
+  }
+  console_puts("  Status           : Valid header\n");
+  console_puts("  Total size       : ");
+  console_putu32(info.total_size);
+  console_puts(" bytes\n");
+  console_puts("  Version          : ");
+  console_putu32(info.version);
+  console_putc('\n');
+  console_puts("  Compatible with  : ");
+  console_putu32(info.last_compatible_version);
+  console_putc('\n');
+  console_puts("  Structure offset : 0x");
+  console_puthex(info.structure_offset, 8);
+  console_putc('\n');
+  console_puts("  Structure size   : ");
+  console_putu32(info.structure_size);
+  console_puts(" bytes\n");
+  console_puts("  Strings offset   : 0x");
+  console_puthex(info.strings_offset, 8);
+  console_putc('\n');
+  console_puts("  Strings size     : ");
+  console_putu32(info.strings_size);
+  console_puts(" bytes\n");
+  console_puts("  Reservations     : 0x");
+  console_puthex(info.reservations_offset, 8);
+  console_puts(" (offset)\n");
+}
+
 static void cmd_mmu(const char *args) {
   // Deliberately access an unmapped virtual address.
   // Our initial translation tables leave the entire
@@ -544,6 +588,7 @@ static const console_command_t commands[] = {
   { "help",   cmd_help,   "List available commands" },
   { "memory", cmd_memory, "Display firmware ARM memory allocation" },
   { "irq", cmd_irq, "Display interrupt statistics" },
+  { "fdt", cmd_fdt, "Inspect firmware Device Tree header" },
   { "mmu", cmd_mmu, "Display AArch64 memory management state" },
   { "pci", cmd_pci, "Inspect or initialise PCIe controller" },
   { "usb", cmd_usb, "Inspect VL805 xHCI capabilities" },
