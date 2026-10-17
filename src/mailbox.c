@@ -15,6 +15,7 @@
 #define MAILBOX_EMPTY   (1U << 30)
 
 #define MAILBOX_CHANNEL_PROPERTY 8U
+#define MAILBOX_TAG_GET_BOARD_REVISION 0x00010002U
 #define MAILBOX_TAG_GET_CLOCK    0x00030002U
 #define MAILBOX_TAG_GET_ARM_MEMORY 0x00010005U
 
@@ -67,6 +68,47 @@ static bool mailbox_call(void) {
 
   return false;
 }
+
+
+// Retrieve the board revision from Raspberry Pi firmware.
+// Property tag 0x00010002:
+//   [0] Message size
+//   [1] Request / response code
+//   [2] Tag identifier
+//   [3] Value buffer size (4 bytes)
+//   [4] Tag request / response length
+//   [5] Board revision code
+//   [6] End tag
+// This reuses the existing mailbox buffer and
+// synchronous mailbox_call() implementation.
+bool mailbox_get_board_revision(uint32_t *revision) {
+  if (!revision)
+    return false;
+
+  message[0] = 7U * sizeof(uint32_t);
+  message[1] = 0;
+  message[2] = MAILBOX_TAG_GET_BOARD_REVISION;
+  message[3] = 4;
+  message[4] = 0;
+  message[5] = 0;
+  message[6] = 0;
+
+  if (!mailbox_call())
+    return false;
+
+  if (message[2] != MAILBOX_TAG_GET_BOARD_REVISION)
+    return false;
+
+  if (message[3] < 4)
+    return false;
+
+  if (message[4] != 0x80000004U)
+    return false;
+
+  *revision = message[5];
+  return true;
+}
+
 
 bool mailbox_get_clock_rate(uint32_t clock_id, uint32_t *rate) {
   if (rate == NULL)

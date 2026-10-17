@@ -95,8 +95,24 @@ void main(void) {
 
   uart_init(clock_hz, UART_BAUD);
 
-  console_puts("\nOrgOS - bare metal Raspberry Pi 4\n");
-  console_puts("--------------------------------\n");
+  console_puts("\nWelcome to OrgOS\n");
+  console_puts("----------------\n");
+  // Identify the Raspberry Pi hardware.
+  // The board revision includes the model, processor
+  // and installed RAM capacity in its modern encoding.
+  // Query the firmware before enabling the MMU,
+  // while mailbox access is still straightforward.
+  uint32_t board_revision;
+  console_puts("Board revision: ");
+  if (mailbox_get_board_revision(&board_revision)) {
+    static const char hex[] = "0123456789ABCDEF";
+    console_puts("0x");
+    for (int shift = 28; shift >= 0; shift -= 4)
+      console_putc(hex[(board_revision >> shift) & 0x0fU]);
+    console_putc('\n');
+  } else {
+    console_puts("Unavailable\n");
+  }
 
   // What EL are we at?
   console_puts("Current exception level: EL");

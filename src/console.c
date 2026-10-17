@@ -444,6 +444,27 @@ typedef struct {
 } console_command_t;
 
 
+// Decode the RAM capacity field in the modern
+// Raspberry Pi board revision encoding.
+// Bits [22:20] identify the installed RAM size.
+// Bit 23 distinguishes the modern encoding from
+// the original revision-number scheme.
+// Return zero if the code cannot be decoded.
+static uint32_t board_ram_mib(uint32_t revision) {
+  if (!(revision & (1U << 23)))
+    return 0;
+
+  static const uint32_t sizes[] = {
+    256, 512, 1024, 2048, 4096, 8192, 16384
+  };
+
+  uint32_t code = (revision >> 20) & 7U;
+  if (code >= sizeof(sizes) / sizeof(sizes[0]))
+    return 0;
+
+  return sizes[code];
+}
+
 static void cmd_memory(const char *args) {
   (void)args;
 
@@ -455,6 +476,46 @@ static void cmd_memory(const char *args) {
     console_puts("  Firmware memory query failed.\n");
     return;
   }
+
+  uint32_t revision;
+  if (mailbox_get_board_revision(&revision)) {
+    console_puts("  Board revision : 0x");
+    console_puthex(revision, 8);
+    console_putc('\n');
+    if (revision & (1U << 23)) {
+      uint32_t model = (revision >> 4) & 0xffU;
+      uint32_t processor = (revision >> 12) & 0x0fU;
+      uint32_t ram_mib = board_ram_mib(revision);
+      console_puts("  Board model    : ");
+      if (model == 0x11U)
+        console_puts("Raspberry Pi 4 Model B\n");
+      else {
+        console_puts("Type 0x");
+        console_puthex(model, 2);
+        console_putc('\n');
+      }
+      console_puts("  Processor      : ");
+      if (processor == 3U)
+        console_puts("BCM2711\n");
+      else {
+        console_puts("Code ");
+        console_putu32(processor);
+        console_putc('\n');
+      }
+      console_puts("  Installed RAM  : ");
+      if (ram_mib) {
+        console_putu32(ram_mib);
+        console_puts(" MiB\n");
+      } else {
+        console_puts("Unknown\n");
+      }
+    } else {
+      console_puts("  Legacy revision encoding\n");
+    }
+  } else {
+    console_puts("  Board revision query failed.\n");
+  }
+  console_putc('\n');
 
   uint64_t end = (uint64_t)base + size;
   uint64_t mapped = mmu_ram_mapped_bytes();
