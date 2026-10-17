@@ -304,9 +304,77 @@ static void cmd_usb(const char *args) {
 }
 
 
+static void cmd_fdt_memory(void) {
+  // Static storage avoids placing the entire
+  // discovery report on our 16 KiB kernel stack.
+  // The console is currently single-threaded.
+  static fdt_memory_map_t map;
+
+  if (!fdt_get_memory_map(&map)) {
+    console_puts("FDT memory-map parsing failed.\n");
+    return;
+  }
+
+  console_puts("Firmware Device Tree memory map:\n");
+  console_puts("  Root address cells : ");
+  console_putu32(map.address_cells);
+  console_putc('\n');
+  console_puts("  Root size cells    : ");
+  console_putu32(map.size_cells);
+  console_putc('\n');
+  console_puts("\nMemory banks:\n");
+
+  uint64_t total_ram = 0;
+  if (map.bank_count == 0)
+    console_puts("  None described.\n");
+
+  for (unsigned int i = 0; i < map.bank_count; i++) {
+    const fdt_memory_range_t *range = &map.banks[i];
+    console_puts("  Bank ");
+    console_putu32(i);
+    console_puts(":\n");
+    console_puts("    Base : 0x");
+    console_puthex64(range->address);
+    console_putc('\n');
+    console_puts("    Size : ");
+    console_putu64(range->size / (1024ULL * 1024ULL));
+    console_puts(" MiB\n");
+    total_ram += range->size;
+  }
+  console_puts("  Total described RAM: ");
+  console_putu64(total_ram / (1024ULL * 1024ULL));
+  console_puts(" MiB\n");
+  console_puts("\nReserved regions:\n");
+  if (map.reservation_count == 0)
+    console_puts("  None explicitly described.\n");
+  for (unsigned int i = 0;
+       i < map.reservation_count; i++) {
+    const fdt_reservation_t *entry =
+        &map.reservations[i];
+    console_puts("  Reservation ");
+    console_putu32(i);
+    console_puts(entry->kind == FDT_RESERVE_HEADER ?
+        " (header):\n" : " (/reserved-memory):\n");
+    console_puts("    Base : 0x");
+    console_puthex64(entry->range.address);
+    console_putc('\n');
+    console_puts("    Size : ");
+    console_putu64(entry->range.size);
+    console_puts(" bytes\n");
+  }
+  console_puts(
+      "\nNote: These are firmware-described ranges,\n"
+      "not an allocation-ready free-memory map.\n");
+}
+
 static void cmd_fdt(const char *args) {
+  if (next_word_is(&args, "memory") && end_of_args(args)) {
+    cmd_fdt_memory();
+    return;
+  }
+
   if (!end_of_args(args)) {
-    console_puts("Usage: fdt\n");
+    console_puts("Usage: fdt [memory]\n");
     return;
   }
 
@@ -588,7 +656,7 @@ static const console_command_t commands[] = {
   { "help",   cmd_help,   "List available commands" },
   { "memory", cmd_memory, "Display firmware ARM memory allocation" },
   { "irq", cmd_irq, "Display interrupt statistics" },
-  { "fdt", cmd_fdt, "Inspect firmware Device Tree header" },
+  { "fdt", cmd_fdt, "Inspect firmware Device Tree and memory map" },
   { "mmu", cmd_mmu, "Display AArch64 memory management state" },
   { "pci", cmd_pci, "Inspect or initialise PCIe controller" },
   { "usb", cmd_usb, "Inspect VL805 xHCI capabilities" },
