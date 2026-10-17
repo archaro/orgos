@@ -4,6 +4,7 @@
 
 #include "console.h"
 #include "mailbox.h"
+#include "timer.h"
 #include "uart.h"
 #include "fdt.h"
 #include "physmem.h"
@@ -18,7 +19,74 @@
 
 typedef void (*console_command_fn)(const char *args);
 
-#include "timer.h"
+static bool end_of_args(const char *p) {
+  while (*p == ' ' || *p == '\t')
+    p++;
+
+  return *p == '\0';
+}
+
+static void console_puthex8(uint8_t value) {
+  // Print one byte as two hexadecimal digits.
+  static const char hex[] = "0123456789ABCDEF";
+
+  console_putc(hex[value >> 4]);
+  console_putc(hex[value & 0x0f]);
+}
+
+static void console_puthex(uint32_t value, unsigned int digits) {
+  static const char hex[] = "0123456789ABCDEF";
+
+  for (unsigned int i = 0; i < digits; i++) {
+    unsigned int shift = (digits - 1U - i) * 4U;
+    console_putc(hex[(value >> shift) & 0x0fU]);
+  }
+}
+
+static void console_puthex64(uint64_t value) {
+  static const char hex[] = "0123456789ABCDEF";
+
+  for (unsigned int i = 0; i < 16; i++) {
+    unsigned int shift = (15U - i) * 4U;
+    console_putc(hex[(value >> shift) & 0x0fU]);
+  }
+}
+
+static void cmd_mailbox(const char *args) {
+  if (!end_of_args(args)) {
+    console_puts("Usage: mailbox\n");
+    return;
+  }
+
+  uint32_t revision;
+  uint32_t clock_hz;
+  uint32_t base;
+  uint32_t size;
+  console_puts("Firmware mailbox diagnostics:\n");
+  console_puts("  Board revision : ");
+  if (mailbox_get_board_revision(&revision)) {
+    console_puts("0x");
+    console_puthex(revision, 8);
+    console_putc('\n');
+  } else {
+    console_puts("FAILED\n");
+  }
+  console_puts("  UART clock     : ");
+  if (mailbox_get_clock_rate(
+          MAILBOX_CLOCK_UART, &clock_hz)) {
+    console_putu32(clock_hz);
+    console_puts(" Hz\n");
+  } else {
+    console_puts("FAILED\n");
+  }
+  console_puts("  ARM low memory : ");
+  if (mailbox_get_arm_memory(&base, &size)) {
+    console_putu32(size / (1024U * 1024U));
+    console_puts(" MiB\n");
+  } else {
+    console_puts("FAILED\n");
+  }
+}
 
 static void cmd_timer(const char *args) {
   (void)args;
@@ -83,15 +151,10 @@ static void cmd_irq(const char *args) {
 
 static void cmd_help(const char *args);
 
-/*
- * Return true if the next whitespace-delimited word
- * matches the supplied string.
- *
- * Advance the input pointer past the matched word.
- */
-static bool
-next_word_is(const char **input, const char *word)
-{
+// Return true if the next whitespace-delimited word
+// matches the supplied string.
+// Advance the input pointer past the matched word.
+static bool next_word_is(const char **input, const char *word) {
   const char *p = *input;
   const char *w = word;
 
@@ -176,39 +239,6 @@ static bool next_uint(const char **input, unsigned int *value) {
   *value = result;
   *input = p;
   return true;
-}
-
-static bool end_of_args(const char *p) {
-  while (*p == ' ' || *p == '\t')
-    p++;
-
-  return *p == '\0';
-}
-
-static void console_puthex8(uint8_t value) {
-  // Print one byte as two hexadecimal digits.
-  static const char hex[] = "0123456789ABCDEF";
-
-  console_putc(hex[value >> 4]);
-  console_putc(hex[value & 0x0f]);
-}
-
-static void console_puthex(uint32_t value, unsigned int digits) {
-  static const char hex[] = "0123456789ABCDEF";
-
-  for (unsigned int i = 0; i < digits; i++) {
-    unsigned int shift = (digits - 1U - i) * 4U;
-    console_putc(hex[(value >> shift) & 0x0fU]);
-  }
-}
-
-static void console_puthex64(uint64_t value) {
-  static const char hex[] = "0123456789ABCDEF";
-
-  for (unsigned int i = 0; i < 16; i++) {
-    unsigned int shift = (15U - i) * 4U;
-    console_putc(hex[(value >> shift) & 0x0fU]);
-  }
 }
 
 static void print_mmu_translation(uint64_t address) {
@@ -955,6 +985,7 @@ static void cmd_memory(const char *args) {
 // Commands will be added here as they are implemented.
 // The NULL entry terminates the table.
 static const console_command_t commands[] = {
+  { "mailbox", cmd_mailbox, "Test firmware property mailbox communication" },
   { "timer",  cmd_timer,  "Display system timer information" },
   { "uptime", cmd_uptime, "Show time since OrgOS started" },
   { "help",   cmd_help,   "List available commands" },
