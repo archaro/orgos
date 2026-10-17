@@ -9,6 +9,7 @@
 #include "physmem.h"
 #include "irq.h"
 #include "mmu.h"
+#include "cache.h"
 #include "pcie.h"
 #include "xhci.h"
 #include "midi.h"
@@ -777,6 +778,35 @@ static void cmd_mmu(const char *args) {
   console_putc('\n');
 }
 
+static void cmd_cache(const char *args) {
+  if (!end_of_args(args)) {
+    console_puts("Usage: cache\n");
+    return;
+  }
+
+  cache_info_t info;
+  if (!cache_get_info(&info)) {
+    console_puts("Cache information unavailable.\n");
+    return;
+  }
+  console_puts("AArch64 cache information:\n");
+  console_puts("  CTR_EL0             : 0x");
+  console_puthex64(info.ctr_el0);
+  console_putc('\n');
+  console_puts("  Data cache line     : ");
+  console_putu64(info.data_line_size);
+  console_puts(" bytes\n");
+  console_puts("  Instruction line    : ");
+  console_putu64(info.instruction_line_size);
+  console_puts(" bytes\n");
+  mmu_info_t mmu;
+  mmu_get_info(&mmu);
+  console_puts("  Instruction cache   : ");
+  console_puts((mmu.sctlr & (1ULL << 12)) ?  "Enabled\n" : "Disabled\n");
+  console_puts("  Data cache          : ");
+  console_puts((mmu.sctlr & (1ULL << 2)) ?  "Enabled\n" : "Disabled\n");
+}
+
 static void cmd_midi(const char *args) {
   midi_message_t msg;
   const char *p = args;
@@ -933,6 +963,7 @@ static const console_command_t commands[] = {
   { "fdt", cmd_fdt, "Inspect firmware Device Tree and memory map" },
   { "physmem", cmd_physmem, "Display physical RAM and reservations" },
   { "mmu", cmd_mmu, "Display AArch64 memory management state" },
+  { "cache", cmd_cache, "Display CPU cache configuration" },
   { "pci", cmd_pci, "Inspect or initialise PCIe controller" },
   { "usb", cmd_usb, "Inspect VL805 xHCI capabilities" },
   { "midi", cmd_midi, "Construct and inspect MIDI messages" },
