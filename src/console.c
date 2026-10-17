@@ -451,13 +451,13 @@ static void cmd_memory(const char *args) {
   uint32_t size;
 
   console_puts("ARM memory allocation:\n");
-
   if (!mailbox_get_arm_memory(&base, &size)) {
     console_puts("  Firmware memory query failed.\n");
     return;
   }
 
   uint64_t end = (uint64_t)base + size;
+  uint64_t mapped = mmu_ram_mapped_bytes();
   console_puts("  Base address : 0x");
   console_puthex(base, 8);
   console_putc('\n');
@@ -467,14 +467,11 @@ static void cmd_memory(const char *args) {
   console_puts("  End address  : 0x");
   console_puthex64(end);
   console_puts(" (exclusive)\n");
-  // The initial MMU implementation maps only
-  // the lowest 512 MiB of physical RAM.
-  console_puts("  Initial MMU RAM mapping: 512 MiB\n");
-
-  if (base != 0 || end > 0x20000000ULL) {
-    console_puts(
-        "  Note: Firmware ARM memory extends outside\n"
-        "        the initial MMU RAM mapping.\n");
+  console_puts("  MMU-mapped RAM: ");
+  console_putu64(mapped / (1024ULL * 1024ULL));
+  console_puts(" MiB\n");
+  if (mapped < size) {
+    console_puts("  Note: A partial final RAM block is not mapped.\n");
   }
 }
 

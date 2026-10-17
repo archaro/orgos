@@ -118,17 +118,39 @@ void main(void) {
   console_putu32(UART_BAUD);
   console_puts("\n");
 
-  // Install the initial EL1 identity-mapped
-  // translation tables and enable the MMU.
-  // Caches remain disabled for this first test.
-  // Interrupts are still masked at this point,
-  // so no IRQ handler can interrupt the transition.
-  console_puts("\nInitialising MMU... ");
-  if (mmu_init()) {
+  // Discover the firmware-reported ARM memory region
+  // before constructing the EL1 translation tables.
+  // At this point:
+  //   - The MMU is still disabled.
+  //   - Data caches are disabled.
+  //   - UART is available for diagnostics.
+  //   - CPU interrupts remain masked.
+  uint32_t arm_base = 0;
+  uint32_t arm_size = 0;
+
+  console_puts("\nDiscovering ARM memory... ");
+  bool memory_ok = mailbox_get_arm_memory(&arm_base, &arm_size);
+  if (memory_ok) {
+    console_puts("OK (");
+    console_putu32(arm_size / (1024U * 1024U));
+    console_puts(" MiB).\n");
+  } else {
+    console_puts("FAILED.\n");
+  }
+
+  // The MMU requires valid memory information.
+  // A failed initialization is fatal, because
+  // later subsystems will depend on translation.
+  console_puts("Initialising MMU... ");
+  if (memory_ok && mmu_init(arm_base, arm_size)) {
     console_puts("Translation enabled.\n");
   } else {
     console_puts("FAILED.\n");
-    console_puts("Continuing without MMU.\n");
+    console_puts("System halted.\n");
+    __asm__ volatile("msr daifset, #0xf" ::: "memory");
+    for (;;) {
+      __asm__ volatile("wfe");
+    }
   }
 
   // Initialise interrupt delivery.

@@ -76,6 +76,12 @@ unsigned int mmu_physical_address_bits(void) {
   return bits[parange];
 }
 
+static uint64_t mapped_ram_bytes;
+
+uint64_t mmu_ram_mapped_bytes(void) {
+  return mapped_ram_bytes;
+}
+
 // Initial OrgOS EL1 identity map.
 // Translation granule: 4 KiB
 // Virtual address size: 36 bits
@@ -157,7 +163,7 @@ static void map_block(uint64_t *table, uint64_t physical_address, unsigned int a
 
 // Fill our initial identity map.
 // All tables begin zeroed. A zero descriptor means the address is not mapped.
-static void build_initial_tables(void) {
+static void build_initial_tables(uint64_t ram_end) {
   for (unsigned int i = 0; i < MMU_TABLE_ENTRIES; i++) {
     l1_table[i] = 0;
     l2_ram[i] = 0;
@@ -165,10 +171,12 @@ static void build_initial_tables(void) {
     l2_pcie[i] = 0;
   }
 
-  // Low 512 MiB: normal, non-cacheable.
-  // This includes our kernel at 0x80000, its exception vectors, stack, and tables.
-  // The mapping does not grant ownership of all this memory to our kernel allocator.
-  for (uint64_t address = 0; address < 0x20000000ULL; address += MMU_BLOCK_SIZE) {
+  // Map the firmware-reported ARM RAM.
+  // For now we use complete 2 MiB blocks only.
+  // Any incomplete final block remains unmapped.
+  // Our next stage will introduce 4 KiB mappings
+  // where finer granularity is required.
+  for (uint64_t address = 0; address + MMU_BLOCK_SIZE <= ram_end; address += MMU_BLOCK_SIZE) {
     map_block(l2_ram, address, ATTR_NORMAL_NC, false);
   }
 
@@ -199,19 +207,42 @@ static void build_initial_tables(void) {
 // EL1 system registers and enabling translation.
 extern void mmu_enable_el1( uint64_t translation_table, uint64_t mair, uint64_t tcr);
 
-bool mmu_init(void) {
+extern char __kernel_end[];
+
+bool mmu_init(uint32_t arm_base, uint32_t arm_size) {
   if (mmu_enabled())
     return true;
 
   if (!mmu_granule_4k_supported())
     return false;
 
-  // We need at least 36 physical address bits.
-  // This Pi reports 44.
   if (mmu_physical_address_bits() < 36)
     return false;
 
-  build_initial_tables();
+  // Our initial L1[0] / L2 RAM arrangement supports
+  // one contiguous RAM region beginning at zero
+  // and occupying at most 1 GiB.
+  if (arm_base != 0 || arm_size == 0)
+    return false;
+
+  if ((uint64_t)arm_size > MMU_GIB)
+    return false;
+
+  // Round down to a complete 2 MiB block.
+  // Avoid mapping the final partial block, which
+  // might include memory not assigned to ARM.
+  uint64_t ram_end = (uint64_t)arm_size & ~(MMU_BLOCK_SIZE - 1ULL);
+
+  // The kernel image, .bss, translation tables
+  // and stack must all be inside mapped RAM.
+  if (ram_end < MMU_BLOCK_SIZE)
+    return false;
+
+  if ((uint64_t)(uintptr_t)__kernel_end > ram_end)
+    return false;
+
+  build_initial_tables(ram_end);
+  mapped_ram_bytes = ram_end;
 
   // MAIR_EL1 attribute encodings:
   // Index 0: Device-nGnRnE = 0x00
