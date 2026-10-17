@@ -32,4 +32,30 @@ typedef struct {
 bool mmu_translate(uint64_t address, mmu_translation_t *result);
 bool mmu_translate_write(uint64_t address, mmu_translation_t *result);
 
+
+typedef enum {
+  MMU_DESC_UNMAPPED,
+  MMU_DESC_BLOCK,
+  MMU_DESC_PAGE
+} mmu_descriptor_kind_t;
+
+typedef struct {
+  uint64_t virtual_address;
+  uint64_t physical_address;
+  uint64_t l1_descriptor;
+  uint64_t l2_descriptor;
+  uint64_t l3_descriptor;
+  uint64_t leaf_descriptor;
+  uint64_t mapping_size;
+  unsigned int level;
+  unsigned int attr_index;
+  unsigned int access_permissions;
+  bool read_only;
+  bool pxn;
+  bool uxn;
+  bool access_flag;
+  mmu_descriptor_kind_t kind;
+} mmu_descriptor_info_t;
+bool mmu_inspect(uint64_t address, mmu_descriptor_info_t *info);
+
 bool mmu_init(const physmem_map_t *memory);

@@ -49,19 +49,28 @@ mmu_enable_el1:
   dsb sy
   isb
 
-  // Read SCTLR_EL1 and enable its M bit.
-  // M = 1 enables stage-1 address translation.
-  // Do not set C or I: both caches remain disabled.
-  // Preserve the remaining SCTLR configuration.
+  // Read the existing EL1 system control.
   mrs x3, sctlr_el1
-  orr x3, x3, #1
-  msr sctlr_el1, x3
 
-  // After this synchronization barrier, subsequent
-  // instruction fetches and memory accesses use
-  // the newly installed translation regime.
-  // Our identity mappings ensure execution can
-  // continue at the same numerical PC.
+  // Enable stage-1 address translation.
+  // SCTLR_EL1.M = bit 0.
+  orr x3, x3, #1
+
+  // Enable Write eXecute Never.
+  // SCTLR_EL1.WXN = bit 19.
+  //
+  // This prevents execution through writable
+  // stage-1 mappings, providing an additional
+  // safeguard against accidental RWX pages.
+  //
+  // Kernel .text is mapped read-only, so it
+  // remains executable.
+  mov x4, #0x80000
+  orr x3, x3, x4
+
+  // Commit both settings together, then
+  // synchronize instruction execution.
+  msr sctlr_el1, x3
   isb
 
   ret

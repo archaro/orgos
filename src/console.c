@@ -545,7 +545,94 @@ static void cmd_physmem(const char *args) {
   console_puts( "\nStatus: Inventory constructed; allocation not enabled.\n");
 }
 
+static void print_mmu_descriptor(uint64_t address) {
+  mmu_descriptor_info_t info;
+
+  if (!mmu_inspect(address, &info)) {
+    console_puts("Descriptor inspection unavailable.\n");
+    return;
+  }
+
+  console_puts("MMU descriptor inspection:\n");
+  console_puts("  Virtual address : 0x");
+  console_puthex64(info.virtual_address);
+  console_putc('\n');
+  console_puts("  L1 descriptor   : 0x");
+  console_puthex64(info.l1_descriptor);
+  console_putc('\n');
+
+  if (info.level >= 2) {
+    console_puts("  L2 descriptor   : 0x");
+    console_puthex64(info.l2_descriptor);
+    console_putc('\n');
+  }
+
+  if (info.level >= 3) {
+    console_puts("  L3 descriptor   : 0x");
+    console_puthex64(info.l3_descriptor);
+    console_putc('\n');
+  }
+
+  if (info.kind == MMU_DESC_UNMAPPED) {
+    console_puts("  Mapping         : Unmapped\n");
+    console_puts("  Fault level     : ");
+    console_putu32(info.level);
+    console_putc('\n');
+    return;
+  }
+  console_puts("  Mapping         : ");
+  console_puts(info.kind == MMU_DESC_PAGE ?
+      "4 KiB page\n" : "2 MiB block\n");
+  console_puts("  Physical address: 0x");
+  console_puthex64(info.physical_address);
+  console_putc('\n');
+  console_puts("  Attribute index : ");
+  console_putu32(info.attr_index);
+  if (info.attr_index == 0)
+    console_puts(" (Device-nGnRnE)\n");
+  else if (info.attr_index == 1)
+    console_puts(" (Normal non-cacheable)\n");
+  else if (info.attr_index == 2)
+    console_puts(" (Normal write-back)\n");
+  else
+    console_puts(" (Unknown)\n");
+  console_puts("  Access          : ");
+  console_puts(info.read_only ?  "Read-only\n" : "Read/write\n");
+  console_puts("  EL0 access      : ");
+  console_puts((info.access_permissions & 1U) ?
+      "Permitted by AP\n" : "Denied by AP\n");
+  console_puts("  Access flag     : ");
+  console_puts(info.access_flag ?  "Set\n" : "Clear\n");
+  console_puts("  PXN             : ");
+  console_puts(info.pxn ? "Yes\n" : "No\n");
+  console_puts("  UXN             : ");
+  console_puts(info.uxn ? "Yes\n" : "No\n");
+  console_puts("  WXN             : ");
+  mmu_info_t registers;
+  mmu_get_info(&registers);
+  console_puts((registers.sctlr & (1ULL << 19)) ?
+      "Enabled\n" : "Disabled\n");
+  bool el1_executable =
+      !info.pxn && !(registers.sctlr & (1ULL << 19) && !info.read_only);
+  console_puts("  EL1 execution   : ");
+  console_puts(el1_executable ?
+      "Permitted by leaf permissions\n" :
+      "Prevented by leaf permissions/WXN\n");
+}
+
 static void cmd_mmu(const char *args) {
+  // Inspect transalation descriptors
+  if (next_word_is(&args, "inspect")) {
+    uint64_t address;
+    if (!next_hex64(&args, &address) ||
+        !end_of_args(args)) {
+      console_puts("Usage: mmu inspect <hex-address>\n");
+      return;
+    }
+    print_mmu_descriptor(address);
+    return;
+  }
+
   // Non-destructive permissions diagnostics.
   if (next_word_is(&args, "permissions") && end_of_args(args)) {
     extern char __text_start[];
@@ -596,7 +683,9 @@ static void cmd_mmu(const char *args) {
     }
     uint64_t address;
     if (!next_hex64(&args, &address) || !end_of_args(args)) {
-      console_puts("Usage: mmu translate [hex-address]\n");
+      console_puts(
+        "Usage: mmu [inspect <hex-address> | "
+        "permissions | translate [hex-address] | fault]\n");
       return;
     }
     console_puts("EL1 stage-1 read translation:\n");
@@ -648,17 +737,15 @@ static void cmd_mmu(const char *args) {
 
   console_puts("AArch64 EL1 memory management:\n");
   console_puts("  Translation       : ");
-  console_puts((info.sctlr & 1U) ?
-      "Enabled\n" : "Disabled\n");
+  console_puts((info.sctlr & 1U) ?  "Enabled\n" : "Disabled\n");
   console_puts("  Data cache        : ");
-  console_puts((info.sctlr & (1U << 2)) ?
-      "Enabled\n" : "Disabled\n");
+  console_puts((info.sctlr & (1U << 2)) ?  "Enabled\n" : "Disabled\n");
   console_puts("  Instruction cache : ");
-  console_puts((info.sctlr & (1U << 12)) ?
-      "Enabled\n" : "Disabled\n");
+  console_puts((info.sctlr & (1U << 12)) ?  "Enabled\n" : "Disabled\n");
   console_puts("  Alignment check   : ");
-  console_puts((info.sctlr & (1U << 1)) ?
-      "Enabled\n" : "Disabled\n");
+  console_puts((info.sctlr & (1U << 1)) ?  "Enabled\n" : "Disabled\n");
+  console_puts("  Write-execute-never: ");
+  console_puts((info.sctlr & (1ULL << 19)) ?  "Enabled\n" : "Disabled\n");
   console_puts("  Physical addr bits: ");
   unsigned int pa_bits = mmu_physical_address_bits();
   if (pa_bits)

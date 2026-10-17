@@ -437,6 +437,108 @@ bool mmu_translate_write(uint64_t address, mmu_translation_t *result) {
   return true;
 }
 
+// Inspect the stage-1 translation descriptors
+// installed by OrgOS.
+// Current assumptions:
+//   - TTBR0 only
+//   - 36-bit virtual addresses
+//   - 4 KiB translation granule
+//   - Level-1 starting table
+//   - Level-2 blocks or level-3 pages
+// No access is made to the target VA.
+bool mmu_inspect(uint64_t address, mmu_descriptor_info_t *info) {
+  if (!info || !mmu_enabled())
+    return false;
+
+  // Reject addresses outside our configured
+  // 36-bit TTBR0 virtual-address space.
+  if (address >= (1ULL << 36))
+    return false;
+
+  *info = (mmu_descriptor_info_t){0};
+  info->virtual_address = address;
+  info->kind = MMU_DESC_UNMAPPED;
+
+  unsigned int l1_index = (unsigned int)((address >> 30) & 0x3fU);
+  unsigned int l2_index = (unsigned int)((address >> 21) & 0x1ffU);
+  unsigned int l3_index = (unsigned int)((address >> 12) & 0x1ffU);
+  uint64_t l1 = l1_table[l1_index];
+  info->level = 1;
+  info->l1_descriptor = l1;
+
+  if (!(l1 & DESC_VALID))
+    return true;
+
+  // OrgOS currently installs L1 table
+  // descriptors only, never L1 blocks.
+  if ((l1 & DESC_TABLE) == 0)
+    return false;
+
+  uint64_t *l2;
+  if (l1_index < MMU_RAM_L1_REGIONS) {
+    l2 = l2_ram[l1_index];
+  } else if (l1_index == 24U) {
+    l2 = l2_pcie;
+  } else {
+    return false;
+  }
+
+  // Confirm the L1 descriptor actually
+  // points to the expected static table.
+  if ((l1 & 0x0000FFFFFFFFF000ULL) != (uint64_t)(uintptr_t)l2)
+    return false;
+
+  uint64_t l2_entry = l2[l2_index];
+  info->level = 2;
+  info->l2_descriptor = l2_entry;
+
+  if (!(l2_entry & DESC_VALID))
+    return true;
+
+  uint64_t leaf;
+  uint64_t mapping_size;
+  if (l2_entry & DESC_TABLE) {
+    // At present the only L3 table covers
+    // the first 2 MiB of physical RAM.
+    if (l1_index != 0 || l2_index != 0)
+      return false;
+
+    if ((l2_entry & 0x0000FFFFFFFFF000ULL) != (uint64_t)(uintptr_t)l3_kernel)
+      return false;
+    uint64_t l3_entry = l3_kernel[l3_index];
+    info->level = 3;
+    info->l3_descriptor = l3_entry;
+    if (!(l3_entry & DESC_VALID))
+      return true;
+    if (!(l3_entry & DESC_TABLE))
+      return false;
+    info->kind = MMU_DESC_PAGE;
+    leaf = l3_entry;
+    mapping_size = MMU_PAGE_SIZE;
+  } else {
+    info->kind = MMU_DESC_BLOCK;
+    leaf = l2_entry;
+    mapping_size = MMU_BLOCK_SIZE;
+  }
+  info->leaf_descriptor = leaf;
+  info->mapping_size = mapping_size;
+
+  // For our 36-bit output physical addresses,
+  // extract the descriptor's address field
+  // at the appropriate mapping granularity.
+  uint64_t base = leaf & 0x0000000FFFFFFFFFULL;
+  base &= ~(mapping_size - 1ULL);
+  info->physical_address = base | (address & (mapping_size - 1ULL));
+  info->attr_index = (unsigned int)((leaf >> 2) & 7U);
+  info->access_permissions = (unsigned int)((leaf >> 6) & 3U);
+  // AP[2] is set for read-only mappings.
+  info->read_only = (info->access_permissions & 2U) != 0;
+  info->access_flag = (leaf & DESC_AF) != 0;
+  info->pxn = (leaf & DESC_PXN) != 0;
+  info->uxn = (leaf & DESC_UXN) != 0;
+  return true;
+}
+
 bool mmu_init(const physmem_map_t *memory) {
   if (mmu_enabled())
     return true;
