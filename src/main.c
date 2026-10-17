@@ -4,6 +4,7 @@
 #include "mailbox.h"
 #include "timer.h"
 #include "fdt.h"
+#include "physmem.h"
 #include "gic.h"
 #include "irq.h"
 #include "mmu.h"
@@ -142,6 +143,12 @@ void main(void) {
   console_puts("\nChecking firmware Device Tree... ");
   if (fdt_init()) {
     console_puts("Valid FDT detected.\n");
+    console_puts("Relocating Device Tree... ");
+    if (fdt_relocate()) {
+      console_puts("OK.\n");
+    } else {
+      console_puts("FAILED.\n");
+    }
   } else {
     console_puts("Not available or invalid.\n");
   }
@@ -172,6 +179,22 @@ void main(void) {
   console_puts("Initialising MMU... ");
   if (memory_ok && mmu_init(arm_base, arm_size)) {
     console_puts("Translation enabled.\n");
+  } else {
+    console_puts("FAILED.\n");
+    console_puts("System halted.\n");
+    __asm__ volatile("msr daifset, #0xf" ::: "memory");
+    for (;;) {
+      __asm__ volatile("wfe");
+    }
+  }
+
+  // Build the physical-memory inventory now that
+  // the private FDT is accessible through our MMU.
+  // This is discovery only: no RAM mapping or
+  // allocation takes place here.
+  console_puts("Building physical memory map... ");
+  if (physmem_init()) {
+    console_puts("OK.\n");
   } else {
     console_puts("FAILED.\n");
     console_puts("System halted.\n");

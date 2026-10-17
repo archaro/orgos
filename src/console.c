@@ -6,6 +6,7 @@
 #include "mailbox.h"
 #include "uart.h"
 #include "fdt.h"
+#include "physmem.h"
 #include "irq.h"
 #include "mmu.h"
 #include "pcie.h"
@@ -380,10 +381,15 @@ static void cmd_fdt(const char *args) {
 
   fdt_info_t info;
   console_puts("Firmware Flattened Device Tree:\n");
-  console_puts("  Firmware pointer : 0x");
-  console_puthex64(firmware_fdt_address);
+  console_puts("  Firmware address : 0x");
+  console_puthex64(fdt_original_address());
   console_putc('\n');
-  if (!fdt_get_info(&info)) {
+
+  if (fdt_get_info(&info)) {
+    console_puts("  OrgOS copy       : 0x");
+    console_puthex64(info.address);
+    console_putc('\n');
+  } else {
     console_puts("  Status           : Not available or invalid\n");
     return;
   }
@@ -412,6 +418,57 @@ static void cmd_fdt(const char *args) {
   console_puts("  Reservations     : 0x");
   console_puthex(info.reservations_offset, 8);
   console_puts(" (offset)\n");
+}
+
+static void cmd_physmem(const char *args) {
+  if (!end_of_args(args)) {
+    console_puts("Usage: physmem\n");
+    return;
+  }
+
+  const physmem_map_t *map = physmem_get_map();
+  if (!map) {
+    console_puts("Physical memory map unavailable.\n");
+    return;
+  }
+  console_puts("OrgOS physical memory inventory:\n");
+  console_puts("\nRAM banks:\n");
+
+  for (unsigned int i = 0; i < map->bank_count; i++) {
+    const fdt_memory_range_t *bank = &map->banks[i];
+    console_puts("  Bank ");
+    console_putu32(i);
+    console_puts(": 0x");
+    console_puthex64(bank->address);
+    console_puts(" - 0x");
+    console_puthex64(bank->address + bank->size);
+    console_puts(" (exclusive)\n");
+  }
+  console_puts("\nFirmware-described RAM: ");
+  console_putu64( map->described_ram_bytes / (1024ULL * 1024ULL));
+  console_puts(" MiB\n");
+  console_puts("\nReserved physical ranges:\n");
+
+  static const char *names[] = {
+    "FDT header",
+    "/reserved-memory",
+    "OrgOS kernel",
+    "Original FDT",
+    "Low memory page"
+  };
+
+  for (unsigned int i = 0;
+       i < map->reservation_count; i++) {
+    const physmem_reservation_t *entry = &map->reservations[i];
+    console_puts("  ");
+    console_puts(names[entry->kind]);
+    console_puts(": 0x");
+    console_puthex64(entry->address);
+    console_puts(" - 0x");
+    console_puthex64(entry->address + entry->size);
+    console_puts(" (exclusive)\n");
+  }
+  console_puts( "\nStatus: Inventory constructed; allocation not enabled.\n");
 }
 
 static void cmd_mmu(const char *args) {
@@ -657,6 +714,7 @@ static const console_command_t commands[] = {
   { "memory", cmd_memory, "Display firmware ARM memory allocation" },
   { "irq", cmd_irq, "Display interrupt statistics" },
   { "fdt", cmd_fdt, "Inspect firmware Device Tree and memory map" },
+  { "physmem", cmd_physmem, "Display physical RAM and reservations" },
   { "mmu", cmd_mmu, "Display AArch64 memory management state" },
   { "pci", cmd_pci, "Inspect or initialise PCIe controller" },
   { "usb", cmd_usb, "Inspect VL805 xHCI capabilities" },

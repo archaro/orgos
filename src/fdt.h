@@ -58,3 +58,7 @@ typedef struct {
 
 bool fdt_get_memory_map(fdt_memory_map_t *map);
 
+#define FDT_STORAGE_CAPACITY (128U * 1024U)
+
+bool fdt_relocate(void);
+uint64_t fdt_original_address(void);

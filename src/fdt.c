@@ -15,6 +15,14 @@ uint64_t firmware_fdt_address;
 static fdt_info_t current_fdt;
 static bool fdt_valid;
 
+// Permanent kernel-owned FDT storage.
+// 4 KiB alignment will allow us to protect or
+// remap this storage at page granularity later.
+static uint8_t fdt_storage[FDT_STORAGE_CAPACITY] __attribute__((aligned(4096)));
+
+static uint64_t original_fdt_address;
+static bool fdt_relocated;
+
 // Read a big-endian 32-bit integer from an FDT.
 // Byte accesses also avoid alignment assumptions
 // about the supplied firmware data.
@@ -31,6 +39,8 @@ static bool section_valid(uint32_t offset, uint32_t size, uint32_t total) {
 
 bool fdt_init(void) {
   fdt_valid = false;
+  fdt_relocated = false;
+  original_fdt_address = 0;
 
   uint64_t address = firmware_fdt_address;
   if (address == 0 || (address & 7U) != 0)
@@ -514,6 +524,57 @@ bool fdt_get_memory_map(fdt_memory_map_t *map) {
   if (!parse_structure( structure, current_fdt.structure_size,
           strings, current_fdt.strings_size, map))
     return false;
+
+  return true;
+}
+
+uint64_t fdt_original_address(void) {
+  return original_fdt_address;
+}
+
+bool fdt_relocate(void) {
+  if (!fdt_valid)
+    return false;
+
+  if (fdt_relocated)
+    return true;
+
+  if (current_fdt.total_size > sizeof(fdt_storage))
+    return false;
+
+  uint64_t source_address = current_fdt.address;
+  uint64_t destination_address = (uint64_t)(uintptr_t)fdt_storage;
+  uint64_t length = current_fdt.total_size;
+
+  // Refuse overlapping source and destination ranges.
+  // Our copy operation is not intended to be memmove().
+  if (source_address < destination_address + length &&
+      destination_address < source_address + length)
+    return false;
+
+  const volatile uint8_t *source =
+      (const volatile uint8_t *)(uintptr_t)source_address;
+
+  // Copy bytes explicitly.
+  // This code works before or after enabling the MMU,
+  // provided both addresses are mapped.
+  for (uint32_t i = 0; i < current_fdt.total_size; i++)
+    fdt_storage[i] = source[i];
+
+  // Verify the copied bytes before adopting the new
+  // address as our authoritative Device Tree.
+  for (uint32_t i = 0; i < current_fdt.total_size; i++) {
+    if (fdt_storage[i] != source[i])
+      return false;
+  }
+
+  // Make our kernel-owned copy authoritative.
+  // All existing FDT parsing functions refer to
+  // current_fdt.address, so they will automatically
+  // use the private copy from this point onward.
+  original_fdt_address = source_address;
+  current_fdt.address = destination_address;
+  fdt_relocated = true;
 
   return true;
 }
