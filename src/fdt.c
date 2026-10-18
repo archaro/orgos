@@ -575,3 +575,170 @@ bool fdt_relocate(void) {
   return true;
 }
 
+// Test whether a string-list property contains
+// the requested compatible identifier.
+static bool property_has_string(
+    fdt_property_t property, const char *expected) {
+
+  uint32_t offset = 0;
+
+  while (offset < property.length) {
+    uint32_t length;
+
+    if (!string_length(property.data + offset,
+            property.length - offset, &length))
+      return false;
+
+    if (name_equals(property.data + offset,
+            length, expected))
+      return true;
+
+    offset += length + 1U;
+  }
+
+  return false;
+}
+
+// Decode a property as an array of 32-bit cells.
+// FDT integers are stored in big-endian order.
+static bool copy_property_cells(
+    fdt_property_t property,
+    uint32_t *output,
+    unsigned int capacity,
+    unsigned int *count) {
+
+  if ((property.length & 3U) != 0)
+    return false;
+
+  unsigned int cells = property.length / 4U;
+
+  if (cells > capacity)
+    return false;
+
+  for (unsigned int i = 0; i < cells; i++)
+    output[i] = read_be32(property.data + i * 4U);
+
+  *count = cells;
+  return true;
+}
+
+bool fdt_get_pcie_dma(fdt_pcie_dma_t *result) {
+  if (!fdt_valid || !fdt_relocated || !result)
+    return false;
+
+  *result = (fdt_pcie_dma_t){0};
+  const volatile uint8_t *blob =
+      (const volatile uint8_t *)(uintptr_t)current_fdt.address;
+  const volatile uint8_t *structure = blob + current_fdt.structure_offset;
+  const volatile uint8_t *strings = blob + current_fdt.strings_offset;
+
+  // Each level carries its own address/size-cell
+  // settings. PCIe dma-ranges uses the parent bus's
+  // address cells and the PCIe node's own cells.
+  typedef struct {
+    uint32_t address_cells;
+    uint32_t size_cells;
+    bool compatible;
+    fdt_property_t dma;
+    fdt_property_t scb;
+    bool has_dma;
+    bool has_scb;
+  } dma_node_t;
+  dma_node_t stack[FDT_MAX_DEPTH] = {0};
+  unsigned int depth = 0;
+  uint32_t offset = 0;
+
+  while (section_valid(offset, 4U, current_fdt.structure_size)) {
+    uint32_t token = read_be32(structure + offset);
+    offset += 4U;
+
+    if (token == FDT_BEGIN_NODE) {
+      uint32_t length;
+      if (depth >= FDT_MAX_DEPTH || !string_length(structure + offset,
+              current_fdt.structure_size - offset, &length))
+        return false;
+
+      if (!advance_aligned(&offset, length + 1U, current_fdt.structure_size))
+        return false;
+      dma_node_t *node = &stack[depth];
+      *node = (dma_node_t){0};
+      if (depth == 0) {
+        node->address_cells = 2;
+        node->size_cells = 1;
+      } else {
+        node->address_cells = stack[depth - 1U].address_cells;
+        node->size_cells = stack[depth - 1U].size_cells;
+      }
+      depth++;
+    } else if (token == FDT_PROP) {
+      if (depth == 0 || !section_valid(offset, 8U,
+              current_fdt.structure_size))
+        return false;
+
+      uint32_t length = read_be32(structure + offset);
+      uint32_t name_offset = read_be32(structure + offset + 4U);
+      offset += 8U;
+      if (!section_valid(offset, length, current_fdt.structure_size))
+        return false;
+
+      const volatile uint8_t *name;
+      uint32_t name_length;
+      if (!property_name(strings, current_fdt.strings_size,
+              name_offset, &name, &name_length))
+        return false;
+
+      dma_node_t *node = &stack[depth - 1U];
+      fdt_property_t property = {
+        .data = structure + offset,
+        .length = length
+      };
+      if (name_equals(name, name_length, "compatible")) {
+        if (property_has_string(property, "brcm,bcm2711-pcie"))
+          node->compatible = true;
+      } else if (name_equals(name, name_length, "dma-ranges")) {
+        node->dma = property;
+        node->has_dma = true;
+      } else if (name_equals(name, name_length, "brcm,scb-sizes")) {
+        node->scb = property;
+        node->has_scb = true;
+      } else if (length == 4U &&
+          name_equals(name, name_length, "#address-cells")) {
+        node->address_cells = read_be32(property.data);
+      } else if (length == 4U &&
+          name_equals(name, name_length, "#size-cells")) {
+        node->size_cells = read_be32(property.data);
+      }
+      if (!advance_aligned(&offset, length,
+              current_fdt.structure_size))
+        return false;
+    } else if (token == FDT_END_NODE) {
+      if (depth == 0)
+        return false;
+      dma_node_t *node = &stack[depth - 1U];
+      if (node->compatible) {
+        if (!node->has_dma || depth < 2)
+          return false;
+        result->child_address_cells = node->address_cells;
+        result->parent_address_cells = stack[depth - 2U].address_cells;
+        result->size_cells = node->size_cells;
+        if (!copy_property_cells( node->dma, result->dma_cells,
+                FDT_MAX_DMA_CELLS, &result->dma_cell_count))
+          return false;
+        if (node->has_scb &&
+            !copy_property_cells( node->scb,
+                result->scb_cells, 8U, &result->scb_cell_count))
+          return false;
+        return true;
+      }
+      depth--;
+    } else if (token == FDT_NOP) {
+      continue;
+    } else if (token == FDT_END) {
+      break;
+    } else {
+      return false;
+    }
+  }
+
+  return false;
+}

@@ -75,10 +75,20 @@ bool pcie_subsystem_init(void) {
     }
   }
 
-  if (map_result == PCIE_MAP_OK)
-    return true;
-  else
+  if (map_result != PCIE_MAP_OK)
+  return false;
+
+  // Configure the inbound PCIe DMA aperture.
+  // This must happen after the PCIe link and VL805
+  // resources are established, but before enabling
+  // bus mastering or starting the xHCI controller.
+  console_puts("Configuring PCIe inbound DMA... ");
+  if (!pcie_dma_init()) {
+    console_puts("FAILED.\n");
     return false;
+  }
+  console_puts("OK.\n");
+  return true;
 }
 
 void main(void) {

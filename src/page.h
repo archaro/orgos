@@ -23,3 +23,5 @@ bool page_free(paddr_t address);
 bool page_alloc_run(unsigned int count,
     unsigned int alignment_pages, paddr_t *address);
 bool page_free_run(paddr_t address, unsigned int count);
+bool page_alloc_run_below(unsigned int count,
+    unsigned int alignment_pages, paddr_t limit, paddr_t *address);

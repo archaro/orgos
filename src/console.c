@@ -278,7 +278,106 @@ static void print_mmu_write_test(uint64_t address) {
   }
 }
 
+static void cmd_pci_dma_test(void) {
+  static const struct {
+    uint64_t physical;
+    uint64_t length;
+    uint64_t expected;
+    bool valid;
+  } tests[] = {
+    { 0x00000000ULL, 4096, 0x100000000ULL, true },
+    { 0x00001000ULL, 4096, 0x100001000ULL, true },
+    { 0x3B000000ULL, 4096, 0x13B000000ULL, true },
+    { 0xBFFFF000ULL, 4096, 0x1BFFFF000ULL, true },
+    { 0xBFFFF000ULL, 4097, 0, false },
+    { 0xC0000000ULL, 4096, 0, false },
+    { 0xFFFFFFFFULL, 4096, 0, false },
+    { 0x00001000ULL, 0, 0, false },
+    { 0x00001000ULL, UINT64_MAX, 0, false }
+  };
+
+  unsigned int passed = 0;
+  unsigned int failed = 0;
+  console_puts("PCIe DMA address translation self-test:\n");
+  for (unsigned int i = 0;
+       i < sizeof(tests) / sizeof(tests[0]); i++) {
+    uint64_t result = 0;
+    bool success = pcie_phys_to_dma(
+        tests[i].physical, tests[i].length, &result);
+    bool correct = success == tests[i].valid;
+    if (success && tests[i].valid)
+      correct = result == tests[i].expected;
+    console_puts("  Test ");
+    console_putu32(i + 1);
+    console_puts(": ");
+    console_puts(correct ? "PASS\n" : "FAIL\n");
+    if (correct)
+      passed++;
+    else
+      failed++;
+  }
+  // A NULL output pointer must always be rejected.
+  if (!pcie_phys_to_dma(0x1000, 4096, NULL))
+    passed++;
+  else
+    failed++;
+  console_puts("\nPassed: ");
+  console_putu32(passed);
+  console_puts("\nFailed: ");
+  console_putu32(failed);
+  console_putc('\n');
+  console_puts("\nResult: ");
+  console_puts(failed == 0 ?  "ALL TESTS PASSED\n" : "TEST FAILED\n");
+}
+
+static void cmd_pci_dma(void) {
+  pcie_dma_info_t info;
+
+  if (!pcie_dma_probe(&info)) {
+    console_puts("PCIe DMA registers unavailable.\n");
+    return;
+  }
+
+  console_puts("BCM2711 PCIe inbound DMA configuration:\n");
+  console_puts("  MISC_CTRL   : 0x");
+  console_puthex(info.misc_ctrl, 8);
+  console_putc('\n');
+  console_puts("  BAR2 low    : 0x");
+  console_puthex(info.bar2_lo, 8);
+  console_putc('\n');
+  console_puts("  BAR2 high   : 0x");
+  console_puthex(info.bar2_hi, 8);
+  console_putc('\n');
+  console_puts("  BAR3 low    : 0x");
+  console_puthex(info.bar3_lo, 8);
+  console_putc('\n');
+  console_puts("  Endian ctrl : 0x");
+  console_puthex(info.endian_ctrl, 8);
+  console_putc('\n');
+  console_puts("\n");
+  console_puts("  BAR2 size encoding : ");
+  console_putu32(info.bar2_lo & 0x1fU);
+  console_putc('\n');
+  console_puts("  SCB0 size encoding : ");
+  console_putu32((info.misc_ctrl >> 27) & 0x1fU);
+  console_putc('\n');
+  console_puts("\n");
+  console_puts("  Note: Inbound DMA configuration is read-only here.\n");
+}
+
 static void cmd_pci(const char *args) {
+  if (next_word_is(&args, "dma")) {
+    if (next_word_is(&args, "test") && end_of_args(args)) {
+      cmd_pci_dma_test();
+      return;
+    }
+    if (end_of_args(args)) {
+      cmd_pci_dma();
+      return;
+    }
+    console_puts("Usage: pci dma [test]\n");
+    return;
+  }
   if (next_word_is(&args, "init") && end_of_args(args)) {
     console_puts("Initialising BCM2711 PCIe link...\n");
     pcie_init_result_t result = pcie_init_link();
@@ -410,6 +509,43 @@ static void cmd_usb(const char *args) {
   console_putc('\n');
 }
 
+static void cmd_fdt_dma(void) {
+  fdt_pcie_dma_t info;
+
+  if (!fdt_get_pcie_dma(&info)) {
+    console_puts("PCIe DMA properties unavailable.\n");
+    return;
+  }
+
+  console_puts("BCM2711 PCIe Device Tree DMA properties:\n");
+  console_puts("  Child address cells  : ");
+  console_putu32(info.child_address_cells);
+  console_putc('\n');
+  console_puts("  Parent address cells : ");
+  console_putu32(info.parent_address_cells);
+  console_putc('\n');
+  console_puts("  Size cells           : ");
+  console_putu32(info.size_cells);
+  console_putc('\n');
+  console_puts("\n  dma-ranges:\n");
+  for (unsigned int i = 0; i < info.dma_cell_count; i++) {
+    console_puts("    Cell ");
+    console_putu32(i);
+    console_puts(": 0x");
+    console_puthex(info.dma_cells[i], 8);
+    console_putc('\n');
+  }
+  console_puts("\n  brcm,scb-sizes:\n");
+  if (info.scb_cell_count == 0)
+    console_puts("    Not present\n");
+  for (unsigned int i = 0; i < info.scb_cell_count; i++) {
+    console_puts("    Cell ");
+    console_putu32(i);
+    console_puts(": 0x");
+    console_puthex(info.scb_cells[i], 8);
+    console_putc('\n');
+  }
+}
 
 static void cmd_fdt_memory(void) {
   // Static storage avoids placing the entire
@@ -475,6 +611,10 @@ static void cmd_fdt_memory(void) {
 }
 
 static void cmd_fdt(const char *args) {
+  if (next_word_is(&args, "dma") && end_of_args(args)) {
+    cmd_fdt_dma();
+    return;
+  }
   if (next_word_is(&args, "memory") && end_of_args(args)) {
     cmd_fdt_memory();
     return;
@@ -1269,12 +1409,12 @@ static const console_command_t commands[] = {
   { "help",   cmd_help,   "List available commands" },
   { "memory", cmd_memory, "Display firmware ARM memory allocation" },
   { "irq", cmd_irq, "Display interrupt statistics" },
-  { "fdt", cmd_fdt, "Inspect firmware Device Tree and memory map" },
+  { "fdt", cmd_fdt, "Inspect firmware Device Tree, memory and DMA" },
   { "physmem", cmd_physmem, "Display physical RAM and reservations" },
   { "mmu", cmd_mmu, "Display AArch64 memory management state" },
   { "page", cmd_page, "Inspect, allocate or release physical pages" },
   { "cache", cmd_cache, "Display CPU cache configuration" },
-  { "pci", cmd_pci, "Inspect or initialise PCIe controller" },
+  { "pci", cmd_pci, "Inspect PCIe controller and DMA configuration" },
   { "usb", cmd_usb, "Inspect VL805 xHCI capabilities" },
   { "midi", cmd_midi, "Construct and inspect MIDI messages" },
   { NULL, NULL, NULL }

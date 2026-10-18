@@ -62,3 +62,17 @@ bool fdt_get_memory_map(fdt_memory_map_t *map);
 
 bool fdt_relocate(void);
 uint64_t fdt_original_address(void);
+
+#define FDT_MAX_DMA_CELLS 32U
+
+typedef struct {
+  uint32_t dma_cells[FDT_MAX_DMA_CELLS];
+  unsigned int dma_cell_count;
+  uint32_t scb_cells[8];
+  unsigned int scb_cell_count;
+  uint32_t child_address_cells;
+  uint32_t parent_address_cells;
+  uint32_t size_cells;
+} fdt_pcie_dma_t;
+
+bool fdt_get_pcie_dma(fdt_pcie_dma_t *result);

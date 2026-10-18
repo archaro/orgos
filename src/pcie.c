@@ -3,6 +3,7 @@
 #include <stdbool.h>
 
 #include "mmio.h"
+#include "fdt.h"
 #include "timer.h"
 #include "pcie.h"
 
@@ -51,6 +52,27 @@
 #define PCIE_HARD_DEBUG   (PCIE_BASE + 0x4204)
 #define PCIE_MISC_CTRL    (PCIE_BASE + 0x4008)
 
+// BCM2711 root-complex inbound windows.
+// BAR2 is the principal system-memory DMA window.
+#define PCIE_RC_BAR2_LO        (PCIE_BASE + 0x4034)
+#define PCIE_RC_BAR2_HI        (PCIE_BASE + 0x4038)
+#define PCIE_RC_BAR3_LO        (PCIE_BASE + 0x403c)
+
+// Root-complex vendor-specific BAR2 endian control.
+#define PCIE_RC_ENDIAN_CTRL    (PCIE_BASE + 0x0188)
+
+#define PCIE_RC_BAR2_SIZE_MASK  0x1fU
+#define PCIE_SCB0_SIZE_MASK    0xf8000000U
+#define PCIE_SCB0_SIZE_SHIFT   27U
+#define PCIE_BAR2_ENDIAN_MASK  0x0cU
+
+#define PCIE_DMA_WINDOW_SIZE   0x100000000ULL
+#define PCIE_DMA_VALID_SIZE    0xC0000000ULL
+#define PCIE_DMA_BUS_BASE      0x100000000ULL
+
+// log2(4 GiB) - 15
+#define PCIE_DMA_SIZE_CODE     17U
+
 #define PCIE_SERDES_IDDQ  (1U << 27)
 
 #define PCIE_SCB_ACCESS   (1U << 12)
@@ -88,6 +110,7 @@
 #define PCI_COMMAND_MEMORY      (1U << 1)
 
 static bool xhci_resources_ready;
+static bool dma_window_ready;
 
 bool pcie_xhci_ready(void) {
   return xhci_resources_ready;
@@ -397,3 +420,130 @@ pcie_map_result_t pcie_map_xhci(void) {
   return PCIE_MAP_OK;
 }
 
+bool pcie_dma_probe(pcie_dma_info_t *info) {
+  if (!info)
+    return false;
+
+  *info = (pcie_dma_info_t){0};
+  // These registers belong to the BCM2711 root
+  // complex. They are not VL805 endpoint registers.
+  // Do not inspect them until the PCIe controller
+  // has been brought out of reset and is active.
+  uint32_t status = mmio_read(PCIE_STATUS);
+
+  if (!(status & PCIE_STATUS_RC))
+    return false;
+
+  info->misc_ctrl = mmio_read(PCIE_MISC_CTRL);
+  info->bar2_lo = mmio_read(PCIE_RC_BAR2_LO);
+  info->bar2_hi = mmio_read(PCIE_RC_BAR2_HI);
+  info->bar3_lo = mmio_read(PCIE_RC_BAR3_LO);
+  info->endian_ctrl = mmio_read(PCIE_RC_ENDIAN_CTRL);
+  return true;
+}
+
+// Important: This function must only
+// ever be called once, during startup.
+bool pcie_dma_init(void) {
+  fdt_pcie_dma_t dma;
+
+  dma_window_ready = false;
+
+  if (!pcie_xhci_ready())
+    return false;
+
+  if (!fdt_get_pcie_dma(&dma))
+    return false;
+
+  // This initial implementation deliberately supports
+  // only the exact BCM2711 mapping reported by the
+  // firmware on our development Raspberry Pi.
+  // The code will have to be made more intelligent if
+  // another revision is used.
+  // PCIe address: 0x100000000
+  // CPU address:  0x000000000
+  // Valid size:   3 GiB
+  //
+  // The hardware aperture is rounded up to 4 GiB.
+  if (dma.child_address_cells != 3 ||
+      dma.parent_address_cells != 2 ||
+      dma.size_cells != 2 ||
+      dma.dma_cell_count != 7)
+    return false;
+
+  if (dma.dma_cells[0] != 0x02000000U ||
+      dma.dma_cells[1] != 0x00000004U ||
+      dma.dma_cells[2] != 0x00000000U ||
+      dma.dma_cells[3] != 0x00000000U ||
+      dma.dma_cells[4] != 0x00000000U ||
+      dma.dma_cells[5] != 0x00000000U ||
+      dma.dma_cells[6] != 0xC0000000U)
+    return false;
+
+  // We have no explicit memory-controller sizes.
+  // For this single-range BCM2711 configuration,
+  // use the same power-of-two fallback as Linux.
+  if (dma.scb_cell_count != 0)
+    return false;
+
+  // The VL805 must not be bus mastering while
+  // its inbound memory window is being configured.
+  // Existing OrgOS PCIe initialisation leaves
+  // bus mastering disabled.
+  uint32_t bar2_lo = (uint32_t)PCIE_DMA_BUS_BASE | PCIE_DMA_SIZE_CODE;
+  uint32_t bar2_hi = (uint32_t)(PCIE_DMA_BUS_BASE >> 32);
+
+  // Program the inbound PCIe-to-RAM window.
+  mmio_write(PCIE_RC_BAR2_LO, bar2_lo);
+  mmio_write(PCIE_RC_BAR2_HI, bar2_hi);
+
+  // Configure the system-memory controller aperture.
+  uint32_t misc = mmio_read(PCIE_MISC_CTRL);
+  misc &= ~PCIE_SCB0_SIZE_MASK;
+  misc |= PCIE_DMA_SIZE_CODE << PCIE_SCB0_SIZE_SHIFT;
+  mmio_write(PCIE_MISC_CTRL, misc);
+
+  // Explicitly select little-endian DMA operation.
+  uint32_t endian = mmio_read(PCIE_RC_ENDIAN_CTRL);
+  endian &= ~PCIE_BAR2_ENDIAN_MASK;
+  mmio_write(PCIE_RC_ENDIAN_CTRL, endian);
+
+  // Ensure all register writes have completed
+  // before verifying the programmed values.
+  __asm__ volatile("dsb sy" ::: "memory");
+  if (mmio_read(PCIE_RC_BAR2_LO) != bar2_lo ||
+      mmio_read(PCIE_RC_BAR2_HI) != bar2_hi)
+    return false;
+
+  if ((mmio_read(PCIE_MISC_CTRL) &
+          PCIE_SCB0_SIZE_MASK) !=
+      (PCIE_DMA_SIZE_CODE << PCIE_SCB0_SIZE_SHIFT))
+    return false;
+
+  if (mmio_read(PCIE_RC_ENDIAN_CTRL) &
+      PCIE_BAR2_ENDIAN_MASK)
+    return false;
+
+  dma_window_ready = true;
+  return true;
+}
+
+bool pcie_phys_to_dma(uint64_t physical,
+    uint64_t length, uint64_t *dma_address) {
+
+  if (!dma_window_ready || !dma_address || length == 0)
+    return false;
+
+  // Firmware advertises CPU physical addresses
+  // [0, 3 GiB) through the BCM2711 PCIe inbound
+  // window, whose bus base is 0x100000000.
+  // Check subtraction rather than computing the
+  // end address, avoiding integer overflow.
+  if (physical >= PCIE_DMA_VALID_SIZE)
+    return false;
+  if (length > PCIE_DMA_VALID_SIZE - physical)
+    return false;
+
+  *dma_address = PCIE_DMA_BUS_BASE + physical;
+  return true;
+}

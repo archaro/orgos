@@ -45,4 +45,17 @@ typedef enum {
 
 pcie_map_result_t pcie_map_xhci(void);
 
+typedef struct {
+  uint32_t misc_ctrl;
+  uint32_t bar2_lo;
+  uint32_t bar2_hi;
+  uint32_t bar3_lo;
+  uint32_t endian_ctrl;
+} pcie_dma_info_t;
+
+bool pcie_dma_probe(pcie_dma_info_t *info);
+bool pcie_dma_init(void);
+bool pcie_phys_to_dma(uint64_t physical,
+    uint64_t length, uint64_t *dma_address);
+
 bool pcie_xhci_ready(void);
