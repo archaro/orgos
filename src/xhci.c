@@ -143,9 +143,22 @@ bool xhci_dma_release(xhci_dma_t *dma) {
   if (!dma)
     return false;
 
+  if (dma->scratchpad_count > XHCI_MAX_SCRATCHPADS)
+    return false;
+
   bool ok = true;
 
-  // All buffers must be CPU-owned before release.
+  // Release scratchpad pages before their pointer array.
+  // Each allocation must still belong to the CPU.
+  for (unsigned int i = 0;
+      i < dma->scratchpad_count; i++) {
+    if (dma->scratchpads[i].pages && !dma_free(&dma->scratchpads[i]))
+      ok = false;
+  }
+
+  if (dma->scratchpad_array.pages && !dma_free(&dma->scratchpad_array))
+    ok = false;
+
   if (dma->dcbaa.pages && !dma_free(&dma->dcbaa))
     ok = false;
 
@@ -166,6 +179,24 @@ bool xhci_dma_prepare(xhci_dma_t *dma) {
     return false;
 
   *dma = (xhci_dma_t){0};
+
+  // Discover the controller's actual scratchpad
+  // requirement from HCSPARAMS2.
+  if (!pcie_xhci_ready())
+    return false;
+
+  xhci_info_t info;
+  if (!xhci_probe(&info))
+    return false;
+
+  uint32_t params = xhci_read(XHCI_HCSPARAMS2);
+  unsigned int scratchpad_count =
+      (((params >> 21) & 0x1fU) << 5) | ((params >> 27) & 0x1fU);
+
+  if (scratchpad_count > XHCI_MAX_SCRATCHPADS)
+    return false;
+
+  // Existing controller structures.
   if (!dma_alloc(PAGE_SIZE, 64, &dma->command_ring))
     goto fail;
 
@@ -178,27 +209,49 @@ bool xhci_dma_prepare(xhci_dma_t *dma) {
   if (!dma_alloc(PAGE_SIZE, 64, &dma->dcbaa))
     goto fail;
 
-  // Configure a one-segment command ring.
-  // The final TRB links back to the start.
-  // Toggle Cycle ensures that wrapping the ring
-  // changes its producer cycle state.
+  // Configure the command ring's final Link TRB.
   xhci_trb_t *commands = (xhci_trb_t *)dma->command_ring.virtual;
   xhci_trb_t *link = &commands[XHCI_RING_TRBS - 1U];
   link->parameter = dma->command_ring.bus;
   link->status = 0;
-  link->control = (XHCI_TRB_LINK << XHCI_TRB_TYPE_SHIFT) |
+  link->control =
+      (XHCI_TRB_LINK << XHCI_TRB_TYPE_SHIFT) |
       XHCI_TRB_TOGGLE_CYCLE | XHCI_TRB_CYCLE;
 
-  // The event ring is initially zeroed.
-  // Its producer cycle state is established
-  // by the controller when ERSTBA is programmed.
+  // Configure the single-segment event ring.
   xhci_erst_entry_t *erst = (xhci_erst_entry_t *)dma->erst.virtual;
   erst[0].base = dma->event_ring.bus;
   erst[0].size = XHCI_RING_TRBS;
   erst[0].reserved = 0;
-  // DCBAA entries remain zero. We have not yet
-  // enabled any device slots.
+
+  // The DCBAA, scratchpad pointer array and
+  // scratchpad pages are initialised to zero by
+  // dma_alloc().
+  uint64_t *dcbaa = (uint64_t *)dma->dcbaa.virtual;
+  if (scratchpad_count != 0) {
+    // Allocate a complete page for the pointer array.
+    // It must be 64-byte aligned.
+    if (!dma_alloc(PAGE_SIZE, 64, &dma->scratchpad_array))
+      goto fail;
+    uint64_t *pointers = (uint64_t *)dma->scratchpad_array.virtual;
+    // Allocate each scratchpad page separately.
+    // Record each success immediately so partial
+    // failure can be cleaned up correctly.
+    for (unsigned int i = 0;
+        i < scratchpad_count; i++) {
+      if (!dma_alloc(PAGE_SIZE, PAGE_SIZE, &dma->scratchpads[i]))
+        goto fail;
+      dma->scratchpad_count++;
+      // The controller must receive a PCIe bus
+      // address, not a CPU virtual address.
+      pointers[i] = dma->scratchpads[i].bus;
+    }
+    // DCBAA entry zero points to the scratchpad
+    // pointer array, not to an individual page.
+    dcbaa[0] = dma->scratchpad_array.bus;
+  }
   return true;
+
 fail:
   xhci_dma_release(dma);
   return false;

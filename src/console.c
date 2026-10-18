@@ -895,6 +895,79 @@ static void cmd_usb_dma(void) {
   } else {
     console_puts("  Alignment    : PASS\n");
   }
+    console_puts("  Scratchpads  : ");
+  console_putu32(dma.scratchpad_count);
+  console_putc('\n');
+
+  bool scratchpads_ok = true;
+
+  uint64_t *dcbaa = (uint64_t *)dma.dcbaa.virtual;
+  uint64_t *pointers =
+      (uint64_t *)dma.scratchpad_array.virtual;
+
+  // This development controller requires exactly
+  // 31 scratchpad buffers.
+  if (dma.scratchpad_count != 31U ||
+      dma.scratchpad_array.pages != 1U ||
+      dcbaa[0] != dma.scratchpad_array.bus ||
+      (dma.scratchpad_array.bus & 63U))
+    scratchpads_ok = false;
+
+  if (scratchpads_ok) {
+    for (unsigned int i = 0;
+        i < dma.scratchpad_count; i++) {
+
+      dma_buffer_t *buffer = &dma.scratchpads[i];
+
+      if (buffer->pages != 1U ||
+          !buffer->virtual ||
+          (buffer->bus & (PAGE_SIZE - 1U)) ||
+          pointers[i] != buffer->bus ||
+          buffer->owner != DMA_OWNER_CPU) {
+        scratchpads_ok = false;
+        break;
+      }
+
+      // Every scratchpad page must start zeroed.
+      const uint8_t *bytes =
+          (const uint8_t *)buffer->virtual;
+
+      for (unsigned int j = 0; j < PAGE_SIZE; j++) {
+        if (bytes[j] != 0) {
+          scratchpads_ok = false;
+          break;
+        }
+      }
+
+      if (!scratchpads_ok)
+        break;
+    }
+  }
+
+  // No device contexts have been configured yet.
+  for (unsigned int i = 1; i <= 32U; i++) {
+    if (dcbaa[i] != 0) {
+      scratchpads_ok = false;
+      break;
+    }
+  }
+  console_puts("  Scratchpads  : ");
+  console_puts(scratchpads_ok ? "PASS\n" : "FAIL\n");
+  if (!scratchpads_ok)
+    passed = false;
+  // Five structural pages plus 31 scratchpad pages.
+  if (dma.scratchpad_count != 31U ||
+      dma.command_ring.pages +
+      dma.event_ring.pages +
+      dma.erst.pages +
+      dma.dcbaa.pages +
+      dma.scratchpad_array.pages +
+      dma.scratchpad_count != 36U) {
+    console_puts("  Page count   : FAIL\n");
+    passed = false;
+  } else {
+    console_puts("  Page count   : PASS (36 pages)\n");
+  }
   if (!xhci_dma_release(&dma)) {
     console_puts("  Release      : FAIL\n");
     passed = false;
