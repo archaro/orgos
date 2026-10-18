@@ -2,6 +2,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#include "timer.h"
 #include "mmio.h"
 #include "cache.h"
 #include "mailbox.h"
@@ -19,8 +20,10 @@
 #define MAILBOX_TAG_GET_BOARD_REVISION 0x00010002U
 #define MAILBOX_TAG_GET_CLOCK    0x00030002U
 #define MAILBOX_TAG_GET_ARM_MEMORY 0x00010005U
+#define MAILBOX_TAG_NOTIFY_XHCI_RESET 0x00030058U
 
-#define MAILBOX_TIMEOUT 1000000U
+#define MAILBOX_DEFAULT_TIMEOUT_US 1000000ULL
+#define MAILBOX_XHCI_TIMEOUT_US   10000000ULL
 
 // Firmware property mailbox buffer.
 // The Cortex-A72 reports 64-byte D-cache lines.
@@ -91,73 +94,54 @@ static bool mailbox_acquire_from_firmware(void) {
   return true;
 }
 
-static bool mailbox_call(void) {
+static mailbox_result_t mailbox_call(
+    mailbox_diagnostic_t *diagnostic, uint64_t timeout_us) {
+
+  if (diagnostic)
+    *diagnostic = (mailbox_diagnostic_t){0};
+
   if (mailbox_poisoned)
-    return false;
+    return MAILBOX_RESULT_UNAVAILABLE;
+
   uintptr_t address = (uintptr_t)message;
+  if ((address & 0x0fU) || address > UINT32_MAX)
+    return MAILBOX_RESULT_UNAVAILABLE;
 
-  // Property mailbox addresses must be
-  // aligned to 16 bytes, leaving the low
-  // four bits available for the channel.
-  if ((address & 0x0fU) != 0)
-    return false;
-
-  // The firmware property mailbox currently
-  // uses a 32-bit address field.
-  // Our kernel-owned static storage is in
-  // low RAM and identity-mapped.
-  if (address > UINT32_MAX)
-    return false;
-
-  uint32_t request =
-      (uint32_t)address | MAILBOX_CHANNEL_PROPERTY;
-
-  // Before submitting the request, make
-  // all CPU-written message fields visible
-  // to the firmware.
+  uint32_t request = (uint32_t)address | MAILBOX_CHANNEL_PROPERTY;
   if (!mailbox_release_to_firmware())
-    return false;
+    return MAILBOX_RESULT_CACHE_ERROR;
 
-  // Wait for space in the outgoing mailbox.
-  uint32_t timeout = MAILBOX_TIMEOUT;
+  uint64_t started = timer_now_us();
   while (mmio_read(MAILBOX_STATUS) & MAILBOX_FULL) {
-    if (--timeout == 0)
-      return false;
+    if (timer_now_us() - started >= timeout_us)
+      return MAILBOX_RESULT_WRITE_TIMEOUT;
   }
-
-  // The buffer now belongs to the firmware.
-  // Do not access it until completion.
   mmio_write(MAILBOX_WRITE, request);
-
-  // Wait for the matching response.
-  timeout = MAILBOX_TIMEOUT;
-
-  while (timeout--) {
+  started = timer_now_us();
+  while (timer_now_us() - started < timeout_us) {
     if (mmio_read(MAILBOX_STATUS) & MAILBOX_EMPTY)
       continue;
-
     uint32_t response = mmio_read(MAILBOX_READ);
     if (response != request)
       continue;
-
-    // The firmware has finished using the
-    // shared buffer.
-    // Invalidate any stale CPU cache contents
-    // before reading the response status.
-    if (!mailbox_acquire_from_firmware())
-      return false;
-
-    return message[1] == 0x80000000U;
+    if (!mailbox_acquire_from_firmware()) {
+      mailbox_poisoned = true;
+      return MAILBOX_RESULT_CACHE_ERROR;
+    }
+    if (diagnostic) {
+      diagnostic->response_received = true;
+      diagnostic->response_code = message[1];
+      diagnostic->tag = message[2];
+      diagnostic->tag_length = message[4];
+    }
+    if (message[1] != 0x80000000U)
+      return MAILBOX_RESULT_FIRMWARE_ERROR;
+    return MAILBOX_RESULT_OK;
   }
-
-  // A timeout after submission is potentially
-  // dangerous: the firmware might still be
-  // processing this request.
-  // The current driver has no recovery protocol,
-  // so do not reuse its buffer after such a
-  // timeout until the driver or system is reset.
+  // The firmware may still be using the buffer.
+  // Do not permit another request to overwrite it.
   mailbox_poisoned = true;
-  return false;
+  return MAILBOX_RESULT_READ_TIMEOUT;
 }
 
 // Retrieve the board revision from Raspberry Pi firmware.
@@ -183,7 +167,7 @@ bool mailbox_get_board_revision(uint32_t *revision) {
   message[5] = 0;
   message[6] = 0;
 
-  if (!mailbox_call())
+  if (mailbox_call(NULL, MAILBOX_DEFAULT_TIMEOUT_US) != MAILBOX_RESULT_OK)
     return false;
 
   if (message[2] != MAILBOX_TAG_GET_BOARD_REVISION)
@@ -222,7 +206,7 @@ bool mailbox_get_clock_rate(uint32_t clock_id, uint32_t *rate) {
   message[6] = 0;
   message[7] = 0;
 
-  if (!mailbox_call())
+  if (mailbox_call(NULL, MAILBOX_DEFAULT_TIMEOUT_US) != MAILBOX_RESULT_OK)
     return false;
 
   // Check that the tag itself succeeded.
@@ -273,7 +257,7 @@ bool mailbox_get_arm_memory(uint32_t *base, uint32_t *size) {
   message[6] = 0;
   message[7] = 0;
 
-  if (!mailbox_call())
+  if (mailbox_call(NULL, MAILBOX_DEFAULT_TIMEOUT_US) != MAILBOX_RESULT_OK)
     return false;
 
   // Check that the firmware returned the expected
@@ -298,3 +282,40 @@ bool mailbox_get_arm_memory(uint32_t *base, uint32_t *size) {
   return true;
 }
 
+bool mailbox_notify_xhci_reset(uint32_t device_address,
+    mailbox_diagnostic_t *diagnostic) {
+
+  if (!diagnostic)
+    return false;
+
+  *diagnostic = (mailbox_diagnostic_t){0};
+
+  message[0] = 7U * sizeof(uint32_t);
+  message[1] = 0;
+  message[2] = MAILBOX_TAG_NOTIFY_XHCI_RESET;
+  message[3] = 4;
+  message[4] = 0;
+  message[5] = device_address;
+  message[6] = 0;
+
+  mailbox_result_t result = mailbox_call(diagnostic, MAILBOX_XHCI_TIMEOUT_US);
+  diagnostic->result = result;
+
+  if (result != MAILBOX_RESULT_OK)
+    return false;
+
+  if (diagnostic->tag != MAILBOX_TAG_NOTIFY_XHCI_RESET) {
+    diagnostic->result = MAILBOX_RESULT_BAD_TAG;
+    return false;
+  }
+
+  // A successful property response has bit 31 set.
+  // The returned length may be zero for this tag.
+  if (!(diagnostic->tag_length & 0x80000000U) ||
+      (diagnostic->tag_length & 0x7fffffffU) > 4U) {
+    diagnostic->result = MAILBOX_RESULT_BAD_RESPONSE;
+    return false;
+  }
+
+  return true;
+}

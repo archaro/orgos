@@ -36,7 +36,7 @@ static void console_puthex8(uint8_t value) {
   console_putc(hex[value & 0x0f]);
 }
 
-static void console_puthex(uint32_t value, unsigned int digits) {
+void console_puthex(uint32_t value, unsigned int digits) {
   static const char hex[] = "0123456789ABCDEF";
 
   for (unsigned int i = 0; i < digits; i++) {
@@ -846,16 +846,245 @@ static void cmd_usb_state(void) {
   console_putc('\n');
 }
 
+static void cmd_usb_dma(void) {
+  xhci_dma_t dma;
+  page_stats_t before, after;
+  bool passed = true;
+  if (!page_get_stats(&before)) {
+    console_puts("Page allocator unavailable.\n");
+    return;
+  }
+  if (!xhci_dma_prepare(&dma)) {
+    console_puts("xHCI DMA preparation failed.\n");
+    return;
+  }
+  console_puts("xHCI DMA structures:\n");
+  console_puts("  Command ring : 0x");
+  console_puthex64(dma.command_ring.bus);
+  console_putc('\n');
+  console_puts("  Event ring   : 0x");
+  console_puthex64(dma.event_ring.bus);
+  console_putc('\n');
+  console_puts("  ERST         : 0x");
+  console_puthex64(dma.erst.bus);
+  console_putc('\n');
+  console_puts("  DCBAA        : 0x");
+  console_puthex64(dma.dcbaa.bus);
+  console_putc('\n');
+  xhci_trb_t *commands = (xhci_trb_t *)dma.command_ring.virtual;
+  xhci_trb_t *link = &commands[255];
+  if (link->parameter != dma.command_ring.bus ||
+      ((link->control >> 10) & 0x3fU) != 6U || (link->control & 3U) != 3U) {
+    console_puts("  Command ring : FAIL\n");
+    passed = false;
+  } else {
+    console_puts("  Command ring : PASS\n");
+  }
+  xhci_erst_entry_t *erst = (xhci_erst_entry_t *)dma.erst.virtual;
+  if (erst[0].base != dma.event_ring.bus || erst[0].size != 256) {
+    console_puts("  ERST         : FAIL\n");
+    passed = false;
+  } else {
+    console_puts("  ERST         : PASS\n");
+  }
+  // Confirm every DMA address has 64-byte alignment.
+  if ((dma.command_ring.bus & 63U) || (dma.event_ring.bus & 63U) ||
+      (dma.erst.bus & 63U) || (dma.dcbaa.bus & 63U)) {
+    console_puts("  Alignment    : FAIL\n");
+    passed = false;
+  } else {
+    console_puts("  Alignment    : PASS\n");
+  }
+  if (!xhci_dma_release(&dma)) {
+    console_puts("  Release      : FAIL\n");
+    passed = false;
+  } else {
+    console_puts("  Release      : PASS\n");
+  }
+  if (!page_get_stats(&after) || before.free_pages != after.free_pages ||
+      before.allocated_pages != after.allocated_pages) {
+    console_puts("  Accounting   : FAIL\n");
+    passed = false;
+  } else {
+    console_puts("  Accounting   : PASS\n");
+  }
+  console_puts("\nResult: ");
+  console_puts(passed ?  "ALL TESTS PASSED\n" : "TEST FAILED\n");
+}
+
+static void cmd_usb_ready(void) {
+  xhci_readiness_t result;
+
+  if (!xhci_check_readiness(&result)) {
+    console_puts("Cannot inspect xHCI readiness.\n");
+    return;
+  }
+
+  console_puts("VL805 readiness:\n");
+  console_puts("  HCSPARAMS2       : 0x");
+  console_puthex(result.hcsparams2, 8);
+  console_putc('\n');
+  console_puts("  Scratchpad count : ");
+  console_putu32(result.scratchpad_buffers);
+  console_putc('\n');
+  console_puts("  Controller ready : ");
+  console_puts(result.ready ? "Yes\n" : "No\n");
+  console_puts("  Controller halted: ");
+  console_puts(result.halted ? "Yes\n" : "No\n");
+}
+
+static void cmd_usb_inspect(void) {
+  pcie_xhci_diagnostic_t pci;
+  xhci_cap_diagnostic_t hc;
+
+  if (!pcie_xhci_diagnose(&pci)) {
+    console_puts("VL805 PCI diagnostics unavailable.\n");
+    return;
+  }
+
+  if (!xhci_diagnose_capabilities(&hc)) {
+    console_puts("xHCI capability diagnostics unavailable.\n");
+    return;
+  }
+  console_puts("VL805 PCI diagnostics:\n");
+  console_puts("  Revision ID    : 0x");
+  console_puthex(pci.class_revision & 0xffU, 2);
+  console_putc('\n');
+  console_puts("  Command/status : 0x");
+  console_puthex(pci.command_status, 8);
+  console_putc('\n');
+  console_puts("  Header         : 0x");
+  console_puthex(pci.header, 8);
+  console_putc('\n');
+  console_puts("  Capabilities   : ");
+  console_puts(pci.capabilities_present ?  "Present\n" : "Absent\n");
+  console_puts("  PM capability  : ");
+  console_puts(pci.pm_present ?  "Present\n" : "Absent\n");
+  if (pci.pm_present) {
+    console_puts("  PM offset      : 0x");
+    console_puthex(pci.pm_offset, 2);
+    console_putc('\n');
+    console_puts("  PM capabilities: 0x");
+    console_puthex(pci.pm_capabilities, 4);
+    console_putc('\n');
+    console_puts("  PMCSR          : 0x");
+    console_puthex(pci.pm_control, 4);
+    console_putc('\n');
+    console_puts("  Power state    : D");
+    console_putu32(pci.pm_control & 3U);
+    console_putc('\n');
+  }
+  console_puts("\nxHCI capability diagnostics:\n");
+  console_puts("  HCSPARAMS1     : 0x");
+  console_puthex(hc.hcsparams1, 8);
+  console_putc('\n');
+  console_puts("  HCSPARAMS2     : 0x");
+  console_puthex(hc.hcsparams2, 8);
+  console_putc('\n');
+  console_puts("  HCSPARAMS3     : 0x");
+  console_puthex(hc.hcsparams3, 8);
+  console_putc('\n');
+  console_puts("  HCCPARAMS1     : 0x");
+  console_puthex(hc.hccparams1, 8);
+  console_putc('\n');
+  console_puts("  Ext cap offset : 0x");
+  console_puthex(hc.ext_cap_offset, 8);
+  console_putc('\n');
+  console_puts("  Ext cap header : 0x");
+  console_puthex(hc.ext_cap_header, 8);
+  console_putc('\n');
+  console_puts("  VL805 firmware : ");
+  uint32_t firmware_version;
+  if (pcie_xhci_get_firmware_version(&firmware_version)) {
+    console_puts("0x");
+    console_puthex(firmware_version, 8);
+    console_putc('\n');
+  } else {
+    console_puts("Unavailable\n");
+  }
+}
+
+static void cmd_usb_reset(void) {
+  xhci_reset_info_t info;
+
+  console_puts("VL805 xHCI software reset:\n");
+  xhci_reset_result_t result = xhci_reset(&info);
+  switch (result) {
+    case XHCI_RESET_UNAVAILABLE:
+      console_puts("  Controller unavailable.\n");
+      return;
+    case XHCI_RESET_BUS_MASTER_ENABLED:
+      console_puts("  REFUSED: PCI bus mastering enabled.\n");
+      return;
+    case XHCI_RESET_NOT_HALTED:
+      console_puts("  REFUSED/FAILED: Controller not halted.\n");
+      return;
+    case XHCI_RESET_ALREADY_ACTIVE:
+      console_puts("  REFUSED: Controller running or resetting.\n");
+      return;
+    default:
+      break;
+  }
+  console_puts("  USBCMD before : 0x");
+  console_puthex(info.command_before, 8);
+  console_putc('\n');
+  console_puts("  USBSTS before : 0x");
+  console_puthex(info.status_before, 8);
+  console_putc('\n');
+  console_puts("  USBCMD after  : 0x");
+  console_puthex(info.command_after, 8);
+  console_putc('\n');
+  console_puts("  USBSTS after  : 0x");
+  console_puthex(info.status_after, 8);
+  console_putc('\n');
+  console_puts("  Reset time    : ");
+  console_putu64(info.reset_elapsed_us);
+  console_puts(" us\n");
+  console_puts("  Ready time    : ");
+  console_putu64(info.ready_elapsed_us);
+  console_puts(" us\n");
+  switch (result) {
+    case XHCI_RESET_OK:
+      console_puts("\nResult: RESET COMPLETE; CONTROLLER READY\n");
+      break;
+    case XHCI_RESET_TIMEOUT:
+      console_puts("\nResult: HCRST DID NOT COMPLETE\n");
+      break;
+    case XHCI_RESET_READY_TIMEOUT:
+      console_puts("\nResult: HCRST COMPLETE; CNR STILL SET\n");
+      break;
+    default:
+      console_puts("\nResult: RESET FAILED\n");
+      break;
+  }
+}
+
 static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
+  if (next_word_is(&args, "reset") && end_of_args(args)) {
+    cmd_usb_reset();
+    return;
+  }
+  if (next_word_is(&args, "inspect") && end_of_args(args)) {
+    cmd_usb_inspect();
+    return;
+  }
+  if (next_word_is(&args, "ready") && end_of_args(args)) {
+    cmd_usb_ready();
+    return;
+  }
+  if (next_word_is(&args, "dma") && end_of_args(args)) {
+    cmd_usb_dma();
+    return;
+  }
   if (next_word_is(&args, "state") && end_of_args(args)) {
     cmd_usb_state();
     return;
   }
 
   if (!end_of_args(args)) {
-    console_puts("Usage: usb [state]\n");
+    console_puts( "Usage: usb [state | dma | ready | inspect | reset]\n");
     return;
   }
 

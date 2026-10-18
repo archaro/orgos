@@ -10,6 +10,7 @@
 #include "mmu.h"
 #include "page.h"
 #include "pcie.h"
+#include "xhci.h"
 #include "uart.h"
 #include "console.h"
 
@@ -88,6 +89,105 @@ bool pcie_subsystem_init(void) {
     return false;
   }
   console_puts("OK.\n");
+
+  // A fundamental PCIe reset may leave the VL805
+  // without its internal firmware. On Raspberry Pi 4,
+  // VideoCore provides a mailbox property to restore it.
+  // Firmware initialisation must take place after PCIe
+  // link establishment and resource configuration, but
+  // before the xHCI controller is started.
+  // Do not request another load if the controller is
+  // already ready, for example when the bootloader has
+  // left the PCIe link operational.
+  xhci_state_t state;
+
+  if (!xhci_get_state(&state)) {
+    console_puts("VL805 state unavailable.\n");
+    return false;
+  }
+
+  bool needs_firmware = (state.status & (1U << 11)) != 0;
+  mailbox_diagnostic_t diagnostic = {0};
+  bool acknowledged = true;
+
+  if (needs_firmware) {
+    console_puts("Initialising VL805 firmware... ");
+    uint16_t command;
+    if (!pcie_xhci_get_command(&command) || (command & (1U << 2))) {
+      console_puts("FAILED (invalid PCI state).\n");
+      return false;
+    }
+
+    // Raspberry Pi 4B: bus 1, device 0, function 0.
+    acknowledged = mailbox_notify_xhci_reset(0x00100000U, &diagnostic);
+    // Firmware initialisation may restore PCI command
+    // bits asynchronously. First establish that the
+    // controller is ready, then revoke bus mastering.
+    xhci_readiness_t readiness;
+    if (!xhci_check_readiness(&readiness) ||
+        !readiness.ready || !readiness.halted) {
+      console_puts("FAILED (controller not ready).\n");
+      return false;
+    }
+    uint32_t version;
+    if (!pcie_xhci_get_firmware_version(&version) || version == 0) {
+      console_puts("FAILED (firmware version).\n");
+      return false;
+    }
+  }
+
+  // Firmware may have modified PCI configuration.
+  // The VL805 must not be permitted to perform DMA
+  // until OrgOS has installed its xHCI DMA structures.
+  if (!pcie_xhci_bar_valid()) {
+    console_puts("FAILED (VL805 BAR mapping).\n");
+    return false;
+  }
+
+  // Diagnostic settling interval. Keep until we
+  // establish whether firmware completion reliably
+  // precedes the ready and version observations.
+  timer_delay_ms(100);
+  if (!pcie_xhci_disable_bus_master()) {
+    console_puts("FAILED (bus mastering).\n");
+    return false;
+  }
+
+  // Verify that the firmware has not subsequently
+  // restored bus mastering.
+  timer_delay_ms(100);
+  uint16_t final_command;
+  if (!pcie_xhci_get_command(&final_command) || (final_command & (1U << 2))) {
+    console_puts("FAILED (bus mastering restored).\n");
+    return false;
+  }
+  if (!pcie_xhci_bar_valid()) {
+    console_puts("FAILED (VL805 BAR mapping changed).\n");
+    return false;
+  }
+  if (needs_firmware) {
+    if (acknowledged) {
+      console_puts("OK.\n");
+    } else {
+      console_puts("OK (mailbox anomaly).\n");
+      console_puts("  Mailbox result : ");
+      console_putu32((uint32_t)diagnostic.result);
+      console_putc('\n');
+      console_puts("  Response seen  : ");
+      console_puts(diagnostic.response_received ?
+          "Yes\n" : "No\n");
+      if (diagnostic.response_received) {
+        console_puts("  Response code  : ");
+        console_putu32(diagnostic.response_code);
+        console_putc('\n');
+        console_puts("  Tag length     : ");
+        console_putu32(diagnostic.tag_length);
+        console_putc('\n');
+      }
+    }
+  } else {
+    console_puts("VL805 firmware already initialised.\n");
+  }
   return true;
 }
 

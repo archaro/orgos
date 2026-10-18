@@ -3,6 +3,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#include "dma.h"
+
 typedef struct {
   uint8_t capability_length;
   uint16_t version;
@@ -25,3 +27,68 @@ typedef struct {
 } xhci_state_t;
 
 bool xhci_get_state(xhci_state_t *state);
+
+typedef struct {
+  uint64_t parameter;
+  uint32_t status;
+  uint32_t control;
+} xhci_trb_t;
+
+typedef struct {
+  uint64_t base;
+  uint32_t size;
+  uint32_t reserved;
+} xhci_erst_entry_t;
+
+typedef struct {
+  dma_buffer_t command_ring;
+  dma_buffer_t event_ring;
+  dma_buffer_t erst;
+  dma_buffer_t dcbaa;
+} xhci_dma_t;
+
+bool xhci_dma_prepare(xhci_dma_t *dma);
+bool xhci_dma_release(xhci_dma_t *dma);
+
+typedef struct {
+  uint32_t hcsparams2;
+  unsigned int scratchpad_buffers;
+  bool ready;
+  bool halted;
+} xhci_readiness_t;
+
+bool xhci_check_readiness(xhci_readiness_t *result);
+
+typedef struct {
+  uint32_t hcsparams1;
+  uint32_t hcsparams2;
+  uint32_t hcsparams3;
+  uint32_t hccparams1;
+  uint32_t hccparams2;
+  uint32_t ext_cap_offset;
+  uint32_t ext_cap_header;
+} xhci_cap_diagnostic_t;
+
+bool xhci_diagnose_capabilities(xhci_cap_diagnostic_t *result);
+
+typedef enum {
+  XHCI_RESET_OK,
+  XHCI_RESET_UNAVAILABLE,
+  XHCI_RESET_BUS_MASTER_ENABLED,
+  XHCI_RESET_NOT_HALTED,
+  XHCI_RESET_ALREADY_ACTIVE,
+  XHCI_RESET_TIMEOUT,
+  XHCI_RESET_READY_TIMEOUT
+} xhci_reset_result_t;
+
+typedef struct {
+  uint32_t command_before;
+  uint32_t status_before;
+  uint32_t command_after;
+  uint32_t status_after;
+  uint64_t reset_elapsed_us;
+  uint64_t ready_elapsed_us;
+} xhci_reset_info_t;
+
+xhci_reset_result_t xhci_reset(xhci_reset_info_t *result);
+

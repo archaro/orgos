@@ -60,3 +60,20 @@ bool pcie_phys_to_dma(uint64_t physical,
 
 bool pcie_xhci_ready(void);
 bool pcie_xhci_get_command(uint16_t *command);
+
+typedef struct {
+  uint32_t class_revision;
+  uint32_t command_status;
+  uint32_t header;
+  uint32_t capability_pointer;
+  bool capabilities_present;
+  bool pm_present;
+  uint8_t pm_offset;
+  uint16_t pm_capabilities;
+  uint16_t pm_control;
+} pcie_xhci_diagnostic_t;
+
+bool pcie_xhci_diagnose(pcie_xhci_diagnostic_t *result);
+bool pcie_xhci_get_firmware_version(uint32_t *version);
+bool pcie_xhci_disable_bus_master(void);
+bool pcie_xhci_bar_valid(void);

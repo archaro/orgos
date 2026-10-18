@@ -564,3 +564,133 @@ bool pcie_xhci_get_command(uint16_t *command) {
   *command = (uint16_t)(value & 0xffffU);
   return true;
 }
+
+bool pcie_xhci_diagnose(pcie_xhci_diagnostic_t *result) {
+  if (!result || !xhci_resources_ready)
+    return false;
+
+  *result = (pcie_xhci_diagnostic_t){0};
+
+  pcie_info_t info;
+  pcie_probe(&info);
+  if (!info.link_up || !info.endpoint_present ||
+      info.endpoint_vendor != 0x1106U ||
+      info.endpoint_device != 0x3483U ||
+      info.endpoint_class != 0x0c0330U)
+    return false;
+
+  uint8_t bus = info.secondary_bus;
+  result->class_revision = device_config_read(bus, 0, 0, 0x08U);
+  result->command_status = device_config_read(bus, 0, 0, 0x04U);
+  result->header = device_config_read(bus, 0, 0, 0x0cU);
+
+  // PCI Status bit 4 indicates the presence
+  // of a standard PCI capability list.
+  uint16_t status = (uint16_t)(result->command_status >> 16);
+  result->capabilities_present = (status & (1U << 4)) != 0;
+  if (!result->capabilities_present)
+    return true;
+
+  result->capability_pointer = device_config_read(bus, 0, 0, 0x34U);
+
+  // Follow the standard PCI capabilities list.
+  // Each entry starts with:
+  // byte 0: capability ID
+  // byte 1: pointer to next capability.
+  //
+  // Bound traversal to avoid loops or corrupt
+  // firmware-provided capability chains.
+  uint8_t offset = (uint8_t)(result->capability_pointer & 0xfcU);
+  for (unsigned int n = 0; n < 48 && offset; n++) {
+    if (offset < 0x40U || offset > 0xfcU)
+      return false;
+    uint32_t entry = device_config_read(bus, 0, 0, offset);
+    uint8_t id = (uint8_t)(entry & 0xffU);
+    uint8_t next = (uint8_t)((entry >> 8) & 0xfcU);
+    if (id == 0x01U) {
+      // Standard PCI Power Management capability:
+      // +0x00: capability ID and next pointer
+      // +0x02: PM capabilities
+      // +0x04: PM control/status.
+      //
+      // PCI config offsets 0x40..0xff are readable
+      // using the existing extended-config mechanism.
+      result->pm_present = true;
+      result->pm_offset = offset;
+      result->pm_capabilities = (uint16_t)(entry >> 16);
+      if (offset > 0xf8U)
+        return false;
+      uint32_t pmcsr = device_config_read(bus, 0, 0, offset + 4U);
+      result->pm_control = (uint16_t)pmcsr;
+      return true;
+    }
+    if (next == offset)
+      return false;
+    offset = next;
+  }
+
+  return true;
+}
+
+bool pcie_xhci_get_firmware_version(uint32_t *version) {
+  if (!version || !xhci_resources_ready)
+    return false;
+
+  pcie_info_t info;
+  pcie_probe(&info);
+
+  if (!info.link_up || !info.endpoint_present ||
+      info.endpoint_vendor != 0x1106U || info.endpoint_device != 0x3483U)
+    return false;
+
+  *version = device_config_read( info.secondary_bus, 0, 0, 0x50U);
+
+  return true;
+}
+
+bool pcie_xhci_disable_bus_master(void) {
+  if (!xhci_resources_ready)
+    return false;
+
+  pcie_info_t info;
+  pcie_probe(&info);
+
+  if (!info.link_up || !info.endpoint_present ||
+      info.endpoint_vendor != 0x1106U ||
+      info.endpoint_device != 0x3483U ||
+      info.endpoint_class != 0x0c0330U)
+    return false;
+
+  uint8_t bus = info.secondary_bus;
+  // Use a 16-bit write. The upper half of this
+  // DWORD is PCI Status, which contains
+  // write-one-to-clear bits.
+  mmio_write(PCIE_CFG_INDEX, (uint32_t)bus << 20);
+  __asm__ volatile("dsb sy" ::: "memory");
+
+  volatile uint16_t *command =
+      (volatile uint16_t *)(PCIE_CFG_DATA + PCI_COMMAND);
+
+  uint16_t value = *command;
+  value &= (uint16_t)~(1U << 2);
+  *command = value;
+  __asm__ volatile("dsb sy" ::: "memory");
+  uint16_t verify;
+  return pcie_xhci_get_command(&verify) && !(verify & (1U << 2));
+}
+
+bool pcie_xhci_bar_valid(void) {
+  if (!xhci_resources_ready)
+    return false;
+
+  pcie_info_t info;
+  pcie_probe(&info);
+  if (!info.link_up || !info.endpoint_present ||
+      info.endpoint_vendor != 0x1106U ||
+      info.endpoint_device != 0x3483U ||
+      info.endpoint_class != 0x0c0330U)
+    return false;
+
+  return (info.endpoint_bar0 & ~0x0fU) ==
+             PCIE_BUS_MMIO_BASE && info.endpoint_bar1 == 0;
+}
