@@ -10,6 +10,7 @@
 #include "physmem.h"
 #include "irq.h"
 #include "mmu.h"
+#include "page.h"
 #include "cache.h"
 #include "pcie.h"
 #include "xhci.h"
@@ -808,6 +809,32 @@ static void cmd_mmu(const char *args) {
   console_putc('\n');
 }
 
+static void cmd_page(const char *args) {
+  if (!end_of_args(args)) {
+    console_puts("Usage: page\n");
+    return;
+  }
+  page_stats_t stats;
+  if (!page_get_stats(&stats)) {
+    console_puts("Page allocator not initialised.\n");
+    return;
+  }
+  console_puts("Physical page allocator:\n");
+  console_puts("  Page size       : 4096 bytes\n");
+  console_puts("  Total pages     : ");
+  console_putu64(stats.total_pages);
+  console_putc('\n');
+  console_puts("  Reserved pages  : ");
+  console_putu64(stats.reserved_pages);
+  console_putc('\n');
+  console_puts("  Allocated pages : ");
+  console_putu64(stats.allocated_pages);
+  console_putc('\n');
+  console_puts("  Free pages      : ");
+  console_putu64(stats.free_pages);
+  console_putc('\n');
+}
+
 static void cmd_cache(const char *args) {
   if (!end_of_args(args)) {
     console_puts("Usage: cache\n");
@@ -994,6 +1021,7 @@ static const console_command_t commands[] = {
   { "fdt", cmd_fdt, "Inspect firmware Device Tree and memory map" },
   { "physmem", cmd_physmem, "Display physical RAM and reservations" },
   { "mmu", cmd_mmu, "Display AArch64 memory management state" },
+  { "page", cmd_page, "Display physical page allocator statistics" },
   { "cache", cmd_cache, "Display CPU cache configuration" },
   { "pci", cmd_pci, "Inspect or initialise PCIe controller" },
   { "usb", cmd_usb, "Inspect VL805 xHCI capabilities" },

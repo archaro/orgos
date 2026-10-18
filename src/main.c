@@ -8,6 +8,7 @@
 #include "gic.h"
 #include "irq.h"
 #include "mmu.h"
+#include "page.h"
 #include "pcie.h"
 #include "uart.h"
 #include "console.h"
@@ -196,6 +197,20 @@ void main(void) {
   console_puts("Initialising MMU... ");
   if (memory_ok && mmu_init(physmem_get_map())) {
     console_puts("Translation enabled.\n");
+  } else {
+    console_puts("FAILED.\n");
+    console_puts("System halted.\n");
+    __asm__ volatile("msr daifset, #0xf" ::: "memory");
+    for (;;) {
+      __asm__ volatile("wfe");
+    }
+  }
+
+  // Now we have the physical memory map and the MMU is configured,
+  // it is time to initialise the physical page allocator.
+  console_puts("Initialising page allocator... ");
+  if (page_init(physmem_get_map())) {
+    console_puts("OK.\n");
   } else {
     console_puts("FAILED.\n");
     console_puts("System halted.\n");
