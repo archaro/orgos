@@ -1264,9 +1264,78 @@ static void cmd_usb_start(void) {
   }
 }
 
+static void cmd_usb_noop(void) {
+  xhci_noop_info_t info;
+  xhci_noop_result_t status = xhci_noop(&info);
+  switch (status) {
+    case XHCI_NOOP_NOT_RUNNING:
+      console_puts(
+          "xHCI is not running. Use usb configure, then usb start.\n");
+      return;
+    case XHCI_NOOP_ALREADY_SUBMITTED:
+      console_puts(
+          "No Op already submitted this boot.\n");
+      return;
+    case XHCI_NOOP_UNAVAILABLE:
+      console_puts("xHCI unavailable.\n");
+      return;
+    default:
+      break;
+  }
+  console_puts("xHCI No Op Command:\n");
+  console_puts("  Command TRB : 0x");
+  console_puthex64(info.command_address);
+  console_putc('\n');
+  console_puts("  Event ptr   : 0x");
+  console_puthex64(info.event_parameter);
+  console_putc('\n');
+  console_puts("  Event status: 0x");
+  console_puthex(info.event_status, 8);
+  console_putc('\n');
+  console_puts("  Event ctrl  : 0x");
+  console_puthex(info.event_control, 8);
+  console_putc('\n');
+  console_puts("  Event type  : ");
+  console_putu32(info.event_type);
+  console_putc('\n');
+  console_puts("  Completion  : ");
+  console_putu32(info.completion_code);
+  console_putc('\n');
+  console_puts("  USBSTS      : 0x");
+  console_puthex(info.controller_status, 8);
+  console_putc('\n');
+  console_puts("  Elapsed     : ");
+  console_putu32((uint32_t)info.elapsed_us);
+  console_puts(" us\n");
+  switch (status) {
+    case XHCI_NOOP_OK:
+      console_puts("\nNo Op Command: PASS\n");
+      break;
+    case XHCI_NOOP_CACHE_FAILED:
+      console_puts("\nFAILED: cache maintenance.\n");
+      break;
+    case XHCI_NOOP_TIMEOUT:
+      console_puts("\nFAILED: completion timeout.\n");
+      break;
+    case XHCI_NOOP_BAD_EVENT:
+      console_puts("\nFAILED: unexpected completion event.\n");
+      break;
+    case XHCI_NOOP_COMMAND_FAILED:
+      console_puts("\nFAILED: command completion error.\n");
+      break;
+    default:
+      console_puts("\nFAILED: unexpected result.\n");
+      break;
+  }
+}
+
 static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
+  if (next_word_is(&args, "noop") && end_of_args(args)) {
+    cmd_usb_noop();
+    return;
+  }
   if (next_word_is(&args, "start") && end_of_args(args)) {
     cmd_usb_start();
     return;
@@ -1298,7 +1367,7 @@ static void cmd_usb(const char *args) {
 
   if (!end_of_args(args)) {
     console_puts(
-    "Usage: usb [state | dma | ready | inspect | reset | configure | start]\n");
+    "Usage: usb [state | dma | ready | inspect | reset | configure | start | noop]\n");
     return;
   }
 

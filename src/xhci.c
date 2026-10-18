@@ -4,6 +4,7 @@
 
 #include "timer.h"
 #include "mmio.h"
+#include "cache.h"
 #include "pcie.h"
 #include "xhci.h"
 #include "dma.h"
@@ -60,6 +61,7 @@ static xhci_dma_t controller_dma;
 static bool controller_configured;
 static bool controller_verified;
 static bool controller_running;
+static bool noop_submitted;
 
 static uint32_t xhci_read(uint32_t offset) {
   return mmio_read((uintptr_t)(XHCI_BASE + offset));
@@ -164,6 +166,10 @@ bool xhci_get_state(xhci_state_t *state) {
 #define XHCI_TRB_TYPE_SHIFT 10U
 #define XHCI_TRB_CYCLE (1U << 0)
 #define XHCI_TRB_TOGGLE_CYCLE (1U << 1)
+#define XHCI_TRB_NOOP_CMD       23U
+#define XHCI_TRB_COMMAND_EVENT  33U
+#define XHCI_COMPLETION_SUCCESS 1U
+#define XHCI_NOOP_TIMEOUT_US    1000000ULL
 
 // The xHCI structures have fixed hardware layouts.
 _Static_assert(sizeof(xhci_trb_t) == 16, "xHCI TRB must be 16 bytes");
@@ -757,3 +763,143 @@ xhci_start_result_t xhci_start(xhci_start_info_t *result) {
   return XHCI_START_OK;
 }
 
+xhci_noop_result_t xhci_noop(xhci_noop_info_t *result) {
+  if (!result)
+    return XHCI_NOOP_UNAVAILABLE;
+
+  *result = (xhci_noop_info_t){0};
+
+  if (!controller_running || !controller_verified)
+    return XHCI_NOOP_NOT_RUNNING;
+
+  if (noop_submitted)
+    return XHCI_NOOP_ALREADY_SUBMITTED;
+
+  if (!pcie_xhci_ready() || !pcie_xhci_bar_valid())
+    return XHCI_NOOP_UNAVAILABLE;
+
+  xhci_info_t info;
+  if (!xhci_probe(&info))
+    return XHCI_NOOP_UNAVAILABLE;
+
+  uint32_t op = info.capability_length;
+  uint32_t status = xhci_read(op + XHCI_USBSTS);
+  uint32_t command = xhci_read(op + XHCI_USBCMD);
+  uint16_t pci_command;
+
+  if (!pcie_xhci_get_command(&pci_command) ||
+      !(pci_command & PCI_CMD_BUS_MASTER) ||
+      !(command & XHCI_CMD_RUN) ||
+      (status & (XHCI_STS_HALTED | XHCI_STS_CNR | XHCI_STS_HOST_ERROR)))
+    return XHCI_NOOP_NOT_RUNNING;
+
+  if (controller_dma.command_ring.owner != DMA_OWNER_DEVICE ||
+      controller_dma.event_ring.owner != DMA_OWNER_DEVICE)
+    return XHCI_NOOP_UNAVAILABLE;
+
+  // The first command-ring entry and first
+  // event-ring entry both occupy 16 bytes.
+  xhci_trb_t *commands = (xhci_trb_t *)controller_dma.command_ring.virtual;
+  xhci_trb_t *events = (xhci_trb_t *)controller_dma.event_ring.virtual;
+
+  cache_info_t cache;
+  if (!cache_get_info(&cache) ||
+      cache.data_line_size == 0 || cache.data_line_size > PAGE_SIZE ||
+      (cache.data_line_size & (cache.data_line_size - 1U)) != 0)
+    return XHCI_NOOP_CACHE_FAILED;
+
+  size_t line = cache.data_line_size;
+  // DMA allocations are page-aligned, and the
+  // first TRB occupies the beginning of a page.
+  if (((uintptr_t)commands & (line - 1U)) ||
+      ((uintptr_t)events & (line - 1U)))
+    return XHCI_NOOP_CACHE_FAILED;
+
+  result->command_address = controller_dma.command_ring.bus;
+
+  // We have not previously submitted a command.
+  // Producer cycle state starts at one.
+  //
+  // Publish the complete TRB to device-visible
+  // memory before ringing the command doorbell.
+  commands[0].parameter = 0;
+  commands[0].status = 0;
+  commands[0].control =
+      (XHCI_TRB_NOOP_CMD << XHCI_TRB_TYPE_SHIFT) | XHCI_TRB_CYCLE;
+
+  if (!cache_clean(commands, line))
+    return XHCI_NOOP_CACHE_FAILED;
+
+  // This event-ring line was invalidated when
+  // ownership passed to the device. OrgOS has
+  // not written to it since.
+  //
+  // Once submitted, never retry the command
+  // automatically: it may still be outstanding.
+  noop_submitted = true;
+
+  uint64_t started = timer_now_us();
+
+  // Doorbell 0 is the host-controller command
+  // doorbell. Target field zero selects the
+  // command ring.
+  xhci_write(info.doorbell_offset, 0U);
+  __asm__ volatile("dsb sy" ::: "memory");
+
+  while (timer_now_us() - started < XHCI_NOOP_TIMEOUT_US) {
+
+    // The VL805 writes the event ring through DMA.
+    // Invalidate the line before the CPU examines
+    // it so we do not observe stale cached data.
+    if (!cache_invalidate(events, line))
+      return XHCI_NOOP_CACHE_FAILED;
+
+    // The event's control DWORD contains the
+    // producer cycle bit. Observe it after
+    // invalidating the cache line.
+    uint32_t control = events[0].control;
+
+    if ((control & XHCI_TRB_CYCLE) != 0) {
+      // Hardware has produced the first event.
+      // No other event-ring entries have been
+      // consumed, so this is the expected slot.
+      result->event_parameter = events[0].parameter;
+      result->event_status = events[0].status;
+      result->event_control = control;
+      result->event_type = (control >> XHCI_TRB_TYPE_SHIFT) & 0x3fU;
+      result->completion_code = (result->event_status >> 24) & 0xffU;
+      result->elapsed_us = timer_now_us() - started;
+      result->controller_status = xhci_read(op + XHCI_USBSTS);
+
+      // Acknowledge consumption of the first event.
+      // ERDP points to the next 16-byte TRB.
+      //
+      // EHB (bit 3) is written as one to clear
+      // the Event Handler Busy flag.
+      uint32_t intr = info.runtime_offset + XHCI_INTR0_OFFSET;
+      xhci_write64(intr + XHCI_ERDP_LO,
+          controller_dma.event_ring.bus + sizeof(xhci_trb_t) + (1ULL << 3));
+
+      __asm__ volatile("dsb sy" ::: "memory");
+
+      if (result->event_type != XHCI_TRB_COMMAND_EVENT ||
+          result->event_parameter != result->command_address)
+        return XHCI_NOOP_BAD_EVENT;
+      if (result->completion_code != XHCI_COMPLETION_SUCCESS)
+        return XHCI_NOOP_COMMAND_FAILED;
+      return XHCI_NOOP_OK;
+    }
+
+    uint32_t current_status = xhci_read(op + XHCI_USBSTS);
+    if (current_status & (XHCI_STS_HALTED | XHCI_STS_HOST_ERROR)) {
+      result->controller_status = current_status;
+      result->elapsed_us = timer_now_us() - started;
+      return XHCI_NOOP_COMMAND_FAILED;
+    }
+  }
+
+  result->elapsed_us = timer_now_us() - started;
+  result->controller_status = xhci_read(op + XHCI_USBSTS);
+
+  return XHCI_NOOP_TIMEOUT;
+}

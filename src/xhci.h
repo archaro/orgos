@@ -121,6 +121,30 @@ typedef struct {
   bool halted;
 } xhci_readiness_t;
 
+typedef enum {
+  XHCI_NOOP_OK,
+  XHCI_NOOP_NOT_RUNNING,
+  XHCI_NOOP_ALREADY_SUBMITTED,
+  XHCI_NOOP_UNAVAILABLE,
+  XHCI_NOOP_CACHE_FAILED,
+  XHCI_NOOP_TIMEOUT,
+  XHCI_NOOP_BAD_EVENT,
+  XHCI_NOOP_COMMAND_FAILED
+} xhci_noop_result_t;
+
+typedef struct {
+  uint64_t command_address;
+  uint64_t event_parameter;
+  uint32_t event_status;
+  uint32_t event_control;
+  uint32_t controller_status;
+  uint32_t completion_code;
+  uint32_t event_type;
+  uint64_t elapsed_us;
+} xhci_noop_info_t;
+
+xhci_noop_result_t xhci_noop( xhci_noop_info_t *result);
+
 bool xhci_check_readiness(xhci_readiness_t *result);
 
 typedef struct {
