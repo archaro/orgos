@@ -35,6 +35,17 @@
 #define XHCI_DCBAAP_HI  0x34U
 #define XHCI_CONFIG     0x38U
 
+// Interrupter registers are relative to the
+// interrupter's runtime register block.
+#define XHCI_INTR0_OFFSET 0x20U
+
+#define XHCI_IMAN        0x00U
+#define XHCI_ERSTSZ      0x08U
+#define XHCI_ERSTBA_LO   0x10U
+#define XHCI_ERSTBA_HI   0x14U
+#define XHCI_ERDP_LO     0x18U
+#define XHCI_ERDP_HI     0x1cU
+
 #define XHCI_STS_HALTED   (1U << 0)
 #define XHCI_STS_CNR      (1U << 11)
 #define XHCI_CMD_RUN      (1U << 0)
@@ -45,8 +56,26 @@
 #define XHCI_RESET_TIMEOUT_US  1000000ULL
 #define XHCI_READY_TIMEOUT_US  1000000ULL
 
+static xhci_dma_t controller_dma;
+static bool controller_configured;
+
 static uint32_t xhci_read(uint32_t offset) {
   return mmio_read((uintptr_t)(XHCI_BASE + offset));
+}
+
+static void xhci_write(uint32_t offset, uint32_t value) {
+  mmio_write((uintptr_t)(XHCI_BASE + offset), value);
+}
+
+static void xhci_write64(uint32_t offset, uint64_t value) {
+  xhci_write(offset, (uint32_t)value);
+  xhci_write(offset + 4U, (uint32_t)(value >> 32));
+}
+
+static uint64_t xhci_read64(uint32_t offset) {
+  uint32_t lo = xhci_read(offset);
+  uint32_t hi = xhci_read(offset + 4U);
+  return ((uint64_t)hi << 32) | lo;
 }
 
 bool xhci_probe(xhci_info_t *info) {
@@ -329,6 +358,9 @@ bool xhci_diagnose_capabilities( xhci_cap_diagnostic_t *result) {
 xhci_reset_result_t xhci_reset(xhci_reset_info_t *result) {
   if (!result)
     return XHCI_RESET_UNAVAILABLE;
+ 
+  if (controller_configured)
+    return XHCI_RESET_ALREADY_ACTIVE; 
 
   *result = (xhci_reset_info_t){0};
 
@@ -414,3 +446,184 @@ xhci_reset_result_t xhci_reset(xhci_reset_info_t *result) {
 
   return XHCI_RESET_OK;
 }
+
+static void xhci_dma_cancel_handoff(xhci_dma_t *dma) {
+  // Safe only before any DMA pointers have been
+  // installed in the hardware registers.
+  for (unsigned int i = 0; i < dma->scratchpad_count; i++) {
+    if (dma->scratchpads[i].owner == DMA_OWNER_DEVICE)
+      dma_end_device(&dma->scratchpads[i]);
+  }
+
+  dma_buffer_t *buffers[] = {
+    &dma->scratchpad_array,
+    &dma->dcbaa,
+    &dma->erst,
+    &dma->event_ring,
+    &dma->command_ring
+  };
+
+  for (unsigned int i = 0;
+      i < sizeof(buffers) / sizeof(buffers[0]); i++) {
+    if (buffers[i]->owner == DMA_OWNER_DEVICE)
+      dma_end_device(buffers[i]);
+  }
+}
+
+static bool xhci_dma_handoff(xhci_dma_t *dma) {
+  // Command ring and static pointer tables are
+  // initially read by the device.
+  if (!dma_begin_device(&dma->command_ring, DMA_TO_DEVICE))
+    goto fail;
+
+  // The event ring will be written by the device.
+  if (!dma_begin_device(&dma->event_ring, DMA_FROM_DEVICE))
+    goto fail;
+
+  if (!dma_begin_device(&dma->erst, DMA_TO_DEVICE))
+    goto fail;
+
+  // The DCBAA initially contains pointers for the
+  // device to read. Later device-context management
+  // will require a more detailed ownership model.
+  if (!dma_begin_device(&dma->dcbaa, DMA_TO_DEVICE))
+    goto fail;
+  if (dma->scratchpad_count != 0) {
+    if (!dma_begin_device(
+            &dma->scratchpad_array, DMA_TO_DEVICE))
+      goto fail;
+    for (unsigned int i = 0;
+        i < dma->scratchpad_count; i++) {
+      if (!dma_begin_device(
+              &dma->scratchpads[i], DMA_BIDIRECTIONAL))
+        goto fail;
+    }
+  }
+  return true;
+
+fail:
+  xhci_dma_cancel_handoff(dma);
+  return false;
+}
+
+xhci_configure_result_t xhci_configure(xhci_configure_info_t *result) {
+  if (!result)
+    return XHCI_CONFIGURE_UNAVAILABLE;
+
+  *result = (xhci_configure_info_t){0};
+
+  if (controller_configured)
+    return XHCI_CONFIGURE_ALREADY;
+
+  if (!pcie_xhci_ready() || !pcie_xhci_bar_valid())
+    return XHCI_CONFIGURE_UNAVAILABLE;
+
+  uint16_t pci_command;
+
+  if (!pcie_xhci_get_command(&pci_command))
+    return XHCI_CONFIGURE_UNAVAILABLE;
+
+  // No controller DMA may be active.
+  if (pci_command & PCI_CMD_BUS_MASTER)
+    return XHCI_CONFIGURE_UNSAFE_STATE;
+
+  xhci_info_t info;
+  xhci_state_t state;
+
+  if (!xhci_probe(&info) || !xhci_get_state(&state))
+    return XHCI_CONFIGURE_UNAVAILABLE;
+
+  if (!(state.status & XHCI_STS_HALTED) ||
+      (state.status & XHCI_STS_CNR) ||
+      (state.command & (XHCI_CMD_RUN | XHCI_CMD_HCRST)) ||
+      !(state.pagesize & 1U) ||
+      info.max_interrupters == 0 ||
+      info.max_slots == 0)
+    return XHCI_CONFIGURE_UNSAFE_STATE;
+
+  if (!xhci_dma_prepare(&controller_dma))
+    return XHCI_CONFIGURE_ALLOCATION_FAILED;
+
+  if (!xhci_dma_handoff(&controller_dma)) {
+    xhci_dma_release(&controller_dma);
+    return XHCI_CONFIGURE_DMA_FAILED;
+  }
+
+  // These addresses must remain valid until the
+  // controller has been safely decommissioned.
+  //
+  // From this point onwards, even a failed
+  // verification must not release the allocations.
+  controller_configured = true;
+
+  uint32_t op = info.capability_length;
+  uint32_t intr = info.runtime_offset + XHCI_INTR0_OFFSET;
+
+  // Disable interrupter 0. Interrupts are not
+  // required for this halted-only test.
+  xhci_write(intr + XHCI_IMAN, 0);
+
+  // Device Context Base Address Array.
+  xhci_write64(op + XHCI_DCBAAP_LO, controller_dma.dcbaa.bus);
+
+  // Command Ring Control Register.
+  // Bit 0 is the initial Ring Cycle State.
+  xhci_write64(op + XHCI_CRCR_LO, controller_dma.command_ring.bus | 1ULL);
+
+  // Enable the controller's advertised slot capacity.
+  xhci_write(op + XHCI_CONFIG, info.max_slots);
+
+  // Configure interrupter 0's event ring.
+  //
+  // One event-ring segment, 256 TRBs.
+  // Initialise its table and dequeue pointer while
+  // the controller is still halted.
+  xhci_write(intr + XHCI_ERSTSZ, 1U);
+  xhci_write64(intr + XHCI_ERSTBA_LO, controller_dma.erst.bus);
+  xhci_write64(intr + XHCI_ERDP_LO, controller_dma.event_ring.bus);
+  __asm__ volatile("dsb sy" ::: "memory");
+
+  // Record the programmed bus addresses.
+  result->command_ring = controller_dma.command_ring.bus;
+  result->event_ring = controller_dma.event_ring.bus;
+  result->erst = controller_dma.erst.bus;
+  result->dcbaa = controller_dma.dcbaa.bus;
+  result->scratchpad_array = controller_dma.scratchpad_array.bus;
+  result->scratchpads = controller_dma.scratchpad_count;
+
+  // Read back the operational registers.
+  result->command = xhci_read(op + XHCI_USBCMD);
+  result->status = xhci_read(op + XHCI_USBSTS);
+  result->config = xhci_read(op + XHCI_CONFIG);
+  result->crcr = xhci_read64(op + XHCI_CRCR_LO);
+  result->dcbaap = xhci_read64(op + XHCI_DCBAAP_LO);
+
+  // Read back interrupter 0.
+  result->iman = xhci_read(intr + XHCI_IMAN);
+  result->erstsz = xhci_read(intr + XHCI_ERSTSZ);
+  result->erstba = xhci_read64(intr + XHCI_ERSTBA_LO);
+  result->erdp = xhci_read64(intr + XHCI_ERDP_LO);
+
+  // Some low register bits contain flags rather
+  // than address bits. Compare pointer fields.
+  // CRCR's command-ring pointer and Ring Cycle State
+  // are write-only from software's perspective.
+  // Reading those fields returns zero.
+  //
+  // CRR (bit 3) must remain clear while the command
+  // ring is stopped. Verify that instead.
+  if ((result->crcr & (1ULL << 3)) != 0 ||
+      (result->dcbaap & ~0x3fULL) != controller_dma.dcbaa.bus ||
+      (result->config & 0xffU) != info.max_slots ||
+      (result->erstsz & 0xffffU) != 1U ||
+      (result->erstba & ~0x3fULL) != controller_dma.erst.bus ||
+      (result->erdp & ~0xfULL) != controller_dma.event_ring.bus ||
+      (result->iman & (1U << 1)) != 0 ||
+      !(result->status & XHCI_STS_HALTED) ||
+      (result->status & XHCI_STS_CNR) ||
+      (result->command & XHCI_CMD_RUN))
+    return XHCI_CONFIGURE_VERIFY_FAILED;
+
+  return XHCI_CONFIGURE_OK;
+}
+

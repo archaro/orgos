@@ -59,6 +59,38 @@ typedef struct {
 bool xhci_dma_prepare(xhci_dma_t *dma);
 bool xhci_dma_release(xhci_dma_t *dma);
 
+typedef enum {
+  XHCI_CONFIGURE_OK,
+  XHCI_CONFIGURE_ALREADY,
+  XHCI_CONFIGURE_UNAVAILABLE,
+  XHCI_CONFIGURE_UNSAFE_STATE,
+  XHCI_CONFIGURE_ALLOCATION_FAILED,
+  XHCI_CONFIGURE_DMA_FAILED,
+  XHCI_CONFIGURE_VERIFY_FAILED
+} xhci_configure_result_t;
+
+typedef struct {
+  uint64_t command_ring;
+  uint64_t event_ring;
+  uint64_t erst;
+  uint64_t dcbaa;
+  uint64_t scratchpad_array;
+  unsigned int scratchpads;
+
+  uint32_t command;
+  uint32_t status;
+  uint32_t config;
+  uint64_t crcr;
+  uint64_t dcbaap;
+
+  uint32_t erstsz;
+  uint64_t erstba;
+  uint64_t erdp;
+  uint32_t iman;
+} xhci_configure_info_t;
+
+xhci_configure_result_t xhci_configure(xhci_configure_info_t *result);
+
 typedef struct {
   uint32_t hcsparams2;
   unsigned int scratchpad_buffers;

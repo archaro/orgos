@@ -1132,9 +1132,85 @@ static void cmd_usb_reset(void) {
   }
 }
 
+static void cmd_usb_configure(void) {
+  xhci_configure_info_t info;
+  xhci_configure_result_t status = xhci_configure(&info);
+
+  switch (status) {
+    case XHCI_CONFIGURE_ALREADY:
+      console_puts("xHCI already configured.\n");
+      return;
+    case XHCI_CONFIGURE_UNAVAILABLE:
+      console_puts("xHCI controller unavailable.\n");
+      return;
+    case XHCI_CONFIGURE_UNSAFE_STATE:
+      console_puts("xHCI is not safely halted.\n");
+      return;
+    case XHCI_CONFIGURE_ALLOCATION_FAILED:
+      console_puts("xHCI DMA allocation failed.\n");
+      return;
+    case XHCI_CONFIGURE_DMA_FAILED:
+      console_puts("xHCI DMA ownership handoff failed.\n");
+      return;
+    default:
+      break;
+  }
+  console_puts("xHCI persistent DMA configuration:\n");
+  console_puts("  Command ring : 0x");
+  console_puthex64(info.command_ring);
+  console_putc('\n');
+  console_puts("  Event ring   : 0x");
+  console_puthex64(info.event_ring);
+  console_putc('\n');
+  console_puts("  ERST         : 0x");
+  console_puthex64(info.erst);
+  console_putc('\n');
+  console_puts("  DCBAA        : 0x");
+  console_puthex64(info.dcbaa);
+  console_putc('\n');
+  console_puts("  Scratchpads  : ");
+  console_putu32(info.scratchpads);
+  console_putc('\n');
+  console_puts("  USBCMD       : 0x");
+  console_puthex(info.command, 8);
+  console_putc('\n');
+  console_puts("  USBSTS       : 0x");
+  console_puthex(info.status, 8);
+  console_putc('\n');
+  console_puts("  CONFIG       : 0x");
+  console_puthex(info.config, 8);
+  console_putc('\n');
+  console_puts("  CRCR readback: 0x");
+  console_puthex64(info.crcr);
+  console_puts(" (pointer and RCS read as zero)\n");
+  console_puts("  DCBAAP       : 0x");
+  console_puthex64(info.dcbaap);
+  console_putc('\n');
+  console_puts("  ERSTSZ       : ");
+  console_putu32(info.erstsz);
+  console_putc('\n');
+  console_puts("  ERSTBA       : 0x");
+  console_puthex64(info.erstba);
+  console_putc('\n');
+  console_puts("  ERDP         : 0x");
+  console_puthex64(info.erdp);
+  console_putc('\n');
+  console_puts("  IMAN         : 0x");
+  console_puthex(info.iman, 8);
+  console_putc('\n');
+  if (status == XHCI_CONFIGURE_OK)
+    console_puts("\nConfiguration: PASS\n");
+  else
+    console_puts( "\nConfiguration: VERIFY FAILED; buffers retained\n");
+}
+
 static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
+  if (next_word_is(&args, "configure") && end_of_args(args)) {
+    cmd_usb_configure();
+    return;
+  }
   if (next_word_is(&args, "reset") && end_of_args(args)) {
     cmd_usb_reset();
     return;
@@ -1157,7 +1233,8 @@ static void cmd_usb(const char *args) {
   }
 
   if (!end_of_args(args)) {
-    console_puts( "Usage: usb [state | dma | ready | inspect | reset]\n");
+    console_puts(
+    "Usage: usb [state | dma | ready | inspect | reset | configure]\n");
     return;
   }
 
