@@ -59,3 +59,4 @@ bool pcie_phys_to_dma(uint64_t physical,
     uint64_t length, uint64_t *dma_address);
 
 bool pcie_xhci_ready(void);
+bool pcie_xhci_get_command(uint16_t *command);

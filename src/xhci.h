@@ -14,3 +14,14 @@ typedef struct {
 } xhci_info_t;
 
 bool xhci_probe(xhci_info_t *info);
+
+typedef struct {
+  uint32_t command;
+  uint32_t status;
+  uint32_t pagesize;
+  uint32_t config;
+  uint64_t command_ring;
+  uint64_t dcbaa;
+} xhci_state_t;
+
+bool xhci_get_state(xhci_state_t *state);

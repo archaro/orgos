@@ -547,3 +547,20 @@ bool pcie_phys_to_dma(uint64_t physical,
   *dma_address = PCIE_DMA_BUS_BASE + physical;
   return true;
 }
+
+bool pcie_xhci_get_command(uint16_t *command) {
+  if (!command || !xhci_resources_ready)
+    return false;
+
+  pcie_info_t info;
+  pcie_probe(&info);
+  if (!info.link_up || !info.endpoint_present ||
+      info.endpoint_vendor != 0x1106U ||
+      info.endpoint_device != 0x3483U ||
+      info.endpoint_class != 0x0c0330U)
+    return false;
+
+  uint32_t value = device_config_read( info.secondary_bus, 0, 0, PCI_COMMAND);
+  *command = (uint16_t)(value & 0xffffU);
+  return true;
+}

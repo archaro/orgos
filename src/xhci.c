@@ -16,6 +16,16 @@
 #define XHCI_DBOFF               0x14
 #define XHCI_RTSOFF              0x18
 
+// Operational registers are relative to CAPLENGTH.
+#define XHCI_USBCMD     0x00U
+#define XHCI_USBSTS     0x04U
+#define XHCI_PAGESIZE   0x08U
+#define XHCI_CRCR_LO    0x18U
+#define XHCI_CRCR_HI    0x1cU
+#define XHCI_DCBAAP_LO  0x30U
+#define XHCI_DCBAAP_HI  0x34U
+#define XHCI_CONFIG     0x38U
+
 static uint32_t xhci_read(uint32_t offset) {
   return mmio_read((uintptr_t)(XHCI_BASE + offset));
 }
@@ -61,3 +71,30 @@ bool xhci_probe(xhci_info_t *info) {
   return true;
 }
 
+bool xhci_get_state(xhci_state_t *state) {
+  if (!state)
+    return false;
+
+  xhci_info_t info;
+  if (!xhci_probe(&info))
+    return false;
+
+  // We expect an xHCI operational-register
+  // block beginning at the reported CAPLENGTH.
+  if (info.capability_length < 0x20U || (info.capability_length & 3U) != 0)
+    return false;
+
+  uint32_t base = info.capability_length;
+  state->command = xhci_read(base + XHCI_USBCMD);
+  state->status = xhci_read(base + XHCI_USBSTS);
+  state->pagesize = xhci_read(base + XHCI_PAGESIZE);
+  state->config = xhci_read(base + XHCI_CONFIG);
+
+  uint32_t lo = xhci_read(base + XHCI_CRCR_LO);
+  uint32_t hi = xhci_read(base + XHCI_CRCR_HI);
+  state->command_ring = ((uint64_t)hi << 32) | lo;
+  lo = xhci_read(base + XHCI_DCBAAP_LO);
+  hi = xhci_read(base + XHCI_DCBAAP_HI);
+  state->dcbaa = ((uint64_t)hi << 32) | lo;
+  return true;
+}

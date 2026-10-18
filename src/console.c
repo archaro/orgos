@@ -799,10 +799,66 @@ static void cmd_dma(const char *args) {
   console_puts("Usage: dma [test | owner | cache | edge]\n");
 }
 
+static void cmd_usb_state(void) {
+  uint16_t pci_command;
+  xhci_state_t state;
+
+  if (!pcie_xhci_get_command(&pci_command)) {
+    console_puts("Cannot read VL805 PCI command register.\n");
+    return;
+  }
+
+  if (!xhci_get_state(&state)) {
+    console_puts("Cannot read xHCI operational registers.\n");
+    return;
+ }
+
+  console_puts("VL805 PCI configuration:\n");
+  console_puts("  PCI command    : 0x");
+  console_puthex(pci_command, 4);
+  console_putc('\n');
+  console_puts("  Memory decode  : ");
+  console_puts((pci_command & (1U << 1)) ?  "Enabled\n" : "Disabled\n");
+  console_puts("  Bus mastering  : ");
+  console_puts((pci_command & (1U << 2)) ?  "Enabled\n" : "Disabled\n");
+  console_puts("\nxHCI operational state:\n");
+  console_puts("  USBCMD         : 0x");
+  console_puthex(state.command, 8);
+  console_putc('\n');
+  console_puts("  USBSTS         : 0x");
+  console_puthex(state.status, 8);
+  console_putc('\n');
+  console_puts("  Controller     : ");
+  console_puts((state.status & 1U) ?  "Halted\n" : "Running\n");
+  console_puts("  Not ready      : ");
+  console_puts((state.status & (1U << 11)) ?  "Yes\n" : "No\n");
+  console_puts("  Page size bits : 0x");
+  console_puthex(state.pagesize, 8);
+  console_putc('\n');
+  console_puts("  CONFIG         : 0x");
+  console_puthex(state.config, 8);
+  console_putc('\n');
+  console_puts("  CRCR           : 0x");
+  console_puthex64(state.command_ring);
+  console_putc('\n');
+  console_puts("  DCBAAP         : 0x");
+  console_puthex64(state.dcbaa);
+  console_putc('\n');
+}
+
 static void cmd_usb(const char *args) {
-  (void)args;
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
+  if (next_word_is(&args, "state") && end_of_args(args)) {
+    cmd_usb_state();
+    return;
+  }
+
+  if (!end_of_args(args)) {
+    console_puts("Usage: usb [state]\n");
+    return;
+  }
+
   if (!pcie_xhci_ready()) {
     console_puts("VL805 PCI resources are not configured.\n");
     return;
