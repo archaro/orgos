@@ -16,6 +16,10 @@ typedef struct {
 } page_bank_t;
 
 static uint8_t unavailable[PAGE_BITMAP_BYTES];
+// Tracks ownership separately from reservations.
+// A set bit identifies a page allocated by page_alloc().
+static uint8_t allocated[PAGE_BITMAP_BYTES];
+static uint64_t next_page;
 static page_bank_t banks[FDT_MAX_MEMORY_BANKS];
 static unsigned int bank_count;
 static page_stats_t statistics;
@@ -56,6 +60,7 @@ bool page_init(const physmem_map_t *map) {
   ready = false;
   bank_count = 0;
   statistics = (page_stats_t){0};
+  next_page = 0;
 
   if (!map || map->bank_count == 0 ||
       map->bank_count > FDT_MAX_MEMORY_BANKS ||
@@ -98,8 +103,10 @@ bool page_init(const physmem_map_t *map) {
   }
 
   // Start with every discovered RAM page available.
-  for (uint64_t i = 0; i < (statistics.total_pages + 7U) / 8U; i++)
+  for (uint64_t i = 0; i < (statistics.total_pages + 7U) / 8U; i++) {
     unavailable[i] = 0;
+    allocated[i] = 0;
+  }
 
   // Reserve all intersected pages; overlapping reservations
   // are counted only once.
@@ -123,3 +130,110 @@ bool page_get_stats(page_stats_t *stats) {
   return true;
 }
 
+static void bitmap_set(uint8_t *bitmap, uint64_t index) {
+  bitmap[index >> 3] |= (uint8_t)(1U << (index & 7U));
+}
+
+static void bitmap_clear(uint8_t *bitmap, uint64_t index) {
+  bitmap[index >> 3] &= (uint8_t)~(1U << (index & 7U));
+}
+
+static bool bitmap_test(const uint8_t *bitmap, uint64_t index) {
+  return (bitmap[index >> 3] & (uint8_t)(1U << (index & 7U))) != 0;
+}
+
+// Convert a bitmap index into a physical address.
+static bool index_to_address(uint64_t index, paddr_t *address) {
+  for (unsigned int i = 0; i < bank_count; i++) {
+    const page_bank_t *bank = &banks[i];
+    uint64_t count = (bank->end - bank->start) / PAGE_SIZE;
+
+    if (index >= bank->first_bit &&
+        index - bank->first_bit < count) {
+      *address = bank->start +
+          (index - bank->first_bit) * PAGE_SIZE;
+      return true;
+    }
+  }
+
+  return false;
+}
+
+// Convert a physical address into its bitmap index.
+static bool address_to_index(paddr_t address, uint64_t *index) {
+  if (address & (PAGE_SIZE - 1U))
+    return false;
+
+  for (unsigned int i = 0; i < bank_count; i++) {
+    const page_bank_t *bank = &banks[i];
+
+    if (address >= bank->start && address < bank->end) {
+      *index = bank->first_bit +
+          (address - bank->start) / PAGE_SIZE;
+      return true;
+    }
+  }
+
+  return false;
+}
+
+bool page_alloc(paddr_t *address) {
+  if (!ready || !address || statistics.free_pages == 0)
+    return false;
+
+  uint64_t total = statistics.total_pages;
+
+  // Begin after the previous allocation, wrapping
+  // around when we reach the end of the bitmap.
+  for (uint64_t n = 0; n < total; n++) {
+    uint64_t index = next_page + n;
+
+    if (index >= total)
+      index -= total;
+
+    if (page_is_set(index))
+      continue;
+
+    paddr_t result;
+    if (!index_to_address(index, &result))
+      return false;
+
+    bitmap_set(unavailable, index);
+    bitmap_set(allocated, index);
+    statistics.allocated_pages++;
+    statistics.free_pages--;
+
+    next_page = index + 1;
+    if (next_page == total)
+      next_page = 0;
+
+    *address = result;
+    return true;
+  }
+
+  return false;
+}
+
+bool page_free(paddr_t address) {
+  if (!ready)
+    return false;
+
+  uint64_t index;
+  if (!address_to_index(address, &index))
+    return false;
+
+  // Reject reserved pages, pages never allocated,
+  // and pages which have already been released.
+  if (!bitmap_test(allocated, index))
+    return false;
+
+  bitmap_clear(allocated, index);
+  bitmap_clear(unavailable, index);
+  statistics.allocated_pages--;
+  statistics.free_pages++;
+
+  // Prefer recently freed pages for subsequent use.
+  next_page = index;
+
+  return true;
+}

@@ -810,8 +810,36 @@ static void cmd_mmu(const char *args) {
 }
 
 static void cmd_page(const char *args) {
+  if (next_word_is(&args, "alloc") && end_of_args(args)) {
+    paddr_t address;
+    if (!page_alloc(&address)) {
+      console_puts("Page allocation failed.\n");
+      return;
+    }
+    console_puts("Allocated physical page: 0x");
+    console_puthex64(address);
+    console_putc('\n');
+    return;
+  }
+
+  if (next_word_is(&args, "free")) {
+    uint64_t address;
+    if (!next_hex64(&args, &address) ||
+        !end_of_args(args)) {
+      console_puts("Usage: page free <hex-address>\n");
+      return;
+    }
+    if (!page_free(address)) {
+      console_puts("Page release rejected.\n");
+      return;
+    }
+    console_puts("Released physical page: 0x");
+    console_puthex64(address);
+    console_putc('\n');
+    return;
+  }
   if (!end_of_args(args)) {
-    console_puts("Usage: page\n");
+    console_puts("Usage: page [alloc | free <hex-address>]\n");
     return;
   }
   page_stats_t stats;
@@ -1021,7 +1049,7 @@ static const console_command_t commands[] = {
   { "fdt", cmd_fdt, "Inspect firmware Device Tree and memory map" },
   { "physmem", cmd_physmem, "Display physical RAM and reservations" },
   { "mmu", cmd_mmu, "Display AArch64 memory management state" },
-  { "page", cmd_page, "Display physical page allocator statistics" },
+  { "page", cmd_page, "Inspect, allocate or release physical pages" },
   { "cache", cmd_cache, "Display CPU cache configuration" },
   { "pci", cmd_pci, "Inspect or initialise PCIe controller" },
   { "usb", cmd_usb, "Inspect VL805 xHCI capabilities" },

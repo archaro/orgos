@@ -18,4 +18,6 @@ typedef struct {
 
 bool page_init(const physmem_map_t *map);
 bool page_get_stats(page_stats_t *stats);
+bool page_alloc(paddr_t *address);
+bool page_free(paddr_t address);
 
