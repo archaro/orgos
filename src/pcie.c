@@ -679,6 +679,51 @@ bool pcie_xhci_disable_bus_master(void) {
   return pcie_xhci_get_command(&verify) && !(verify & (1U << 2));
 }
 
+bool pcie_xhci_enable_bus_master(void) {
+  if (!xhci_resources_ready)
+    return false;
+
+  pcie_info_t info;
+  pcie_probe(&info);
+
+  if (!info.link_up || !info.endpoint_present ||
+      info.endpoint_vendor != 0x1106U ||
+      info.endpoint_device != 0x3483U ||
+      info.endpoint_class != 0x0c0330U)
+    return false;
+
+  if (!pcie_xhci_bar_valid())
+    return false;
+
+  // Select the VL805's PCI configuration space.
+  mmio_write(PCIE_CFG_INDEX, (uint32_t)info.secondary_bus << 20);
+
+  __asm__ volatile("dsb sy" ::: "memory");
+
+  // PCI Command occupies the lower 16 bits.
+  // Avoid writing the upper PCI Status field,
+  // which contains write-one-to-clear flags.
+  volatile uint16_t *command =
+      (volatile uint16_t *)(PCIE_CFG_DATA + PCI_COMMAND);
+
+  uint16_t value = *command;
+
+  // Memory decoding must already be enabled.
+  if (!(value & (1U << 1)))
+    return false;
+
+  // Enable bus mastering without changing
+  // any other PCI Command bits.
+  value |= (1U << 2);
+  *command = value;
+
+  __asm__ volatile("dsb sy" ::: "memory");
+
+  uint16_t verify;
+  return pcie_xhci_get_command(&verify) &&
+      (verify & (1U << 2)) != 0 && (verify & (1U << 1)) != 0;
+}
+
 bool pcie_xhci_bar_valid(void) {
   if (!xhci_resources_ready)
     return false;

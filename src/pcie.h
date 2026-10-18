@@ -76,4 +76,5 @@ typedef struct {
 bool pcie_xhci_diagnose(pcie_xhci_diagnostic_t *result);
 bool pcie_xhci_get_firmware_version(uint32_t *version);
 bool pcie_xhci_disable_bus_master(void);
+bool pcie_xhci_enable_bus_master(void);
 bool pcie_xhci_bar_valid(void);

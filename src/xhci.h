@@ -91,6 +91,29 @@ typedef struct {
 
 xhci_configure_result_t xhci_configure(xhci_configure_info_t *result);
 
+typedef enum {
+  XHCI_START_OK,
+  XHCI_START_NOT_CONFIGURED,
+  XHCI_START_ALREADY_RUNNING,
+  XHCI_START_UNAVAILABLE,
+  XHCI_START_UNSAFE_STATE,
+  XHCI_START_PCI_FAILED,
+  XHCI_START_TIMEOUT,
+  XHCI_START_CONTROLLER_ERROR
+} xhci_start_result_t;
+
+typedef struct {
+  uint16_t pci_command_before;
+  uint16_t pci_command_after;
+  uint32_t command_before;
+  uint32_t command_after;
+  uint32_t status_before;
+  uint32_t status_after;
+  uint64_t elapsed_us;
+} xhci_start_info_t;
+
+xhci_start_result_t xhci_start(xhci_start_info_t *result);
+
 typedef struct {
   uint32_t hcsparams2;
   unsigned int scratchpad_buffers;

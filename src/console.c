@@ -1204,9 +1204,73 @@ static void cmd_usb_configure(void) {
     console_puts( "\nConfiguration: VERIFY FAILED; buffers retained\n");
 }
 
+static void cmd_usb_start(void) {
+  xhci_start_info_t info;
+  xhci_start_result_t status = xhci_start(&info);
+  console_puts("xHCI controller start:\n");
+  switch (status) {
+    case XHCI_START_NOT_CONFIGURED:
+      console_puts("  FAILED: run usb configure first.\n");
+      return;
+    case XHCI_START_ALREADY_RUNNING:
+      console_puts("  Controller already running.\n");
+      return;
+    case XHCI_START_UNAVAILABLE:
+      console_puts("  FAILED: controller unavailable.\n");
+      return;
+    case XHCI_START_UNSAFE_STATE:
+      console_puts("  FAILED: unsafe controller state.\n");
+      return;
+    default:
+      break;
+  }
+  console_puts("  PCI before   : 0x");
+  console_puthex(info.pci_command_before, 4);
+  console_putc('\n');
+  console_puts("  PCI after    : 0x");
+  console_puthex(info.pci_command_after, 4);
+  console_putc('\n');
+  console_puts("  USBCMD before: 0x");
+  console_puthex(info.command_before, 8);
+  console_putc('\n');
+  console_puts("  USBCMD after : 0x");
+  console_puthex(info.command_after, 8);
+  console_putc('\n');
+  console_puts("  USBSTS before: 0x");
+  console_puthex(info.status_before, 8);
+  console_putc('\n');
+  console_puts("  USBSTS after : 0x");
+  console_puthex(info.status_after, 8);
+  console_putc('\n');
+  console_puts("  Elapsed      : ");
+  console_putu32((uint32_t)info.elapsed_us);
+  console_puts(" us\n");
+  switch (status) {
+    case XHCI_START_OK:
+      console_puts("\nController: RUNNING\n");
+      break;
+    case XHCI_START_PCI_FAILED:
+      console_puts("\nFAILED: PCI bus-master enable.\n");
+      break;
+    case XHCI_START_TIMEOUT:
+      console_puts("\nFAILED: controller start timeout.\n");
+      break;
+    case XHCI_START_CONTROLLER_ERROR:
+      console_puts("\nFAILED: host-controller error.\n");
+      break;
+    default:
+      console_puts("\nFAILED: unexpected status.\n");
+      break;
+  }
+}
+
 static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
+  if (next_word_is(&args, "start") && end_of_args(args)) {
+    cmd_usb_start();
+    return;
+  }
   if (next_word_is(&args, "configure") && end_of_args(args)) {
     cmd_usb_configure();
     return;
@@ -1234,7 +1298,7 @@ static void cmd_usb(const char *args) {
 
   if (!end_of_args(args)) {
     console_puts(
-    "Usage: usb [state | dma | ready | inspect | reset | configure]\n");
+    "Usage: usb [state | dma | ready | inspect | reset | configure | start]\n");
     return;
   }
 

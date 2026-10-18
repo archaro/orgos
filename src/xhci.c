@@ -58,6 +58,8 @@
 
 static xhci_dma_t controller_dma;
 static bool controller_configured;
+static bool controller_verified;
+static bool controller_running;
 
 static uint32_t xhci_read(uint32_t offset) {
   return mmio_read((uintptr_t)(XHCI_BASE + offset));
@@ -624,6 +626,134 @@ xhci_configure_result_t xhci_configure(xhci_configure_info_t *result) {
       (result->command & XHCI_CMD_RUN))
     return XHCI_CONFIGURE_VERIFY_FAILED;
 
+  controller_verified = true;
   return XHCI_CONFIGURE_OK;
+}
+
+#define XHCI_STS_HOST_ERROR (1U << 2)
+#define XHCI_START_TIMEOUT_US 1000000ULL
+
+xhci_start_result_t xhci_start(xhci_start_info_t *result) {
+
+  if (!result)
+    return XHCI_START_UNAVAILABLE;
+
+  *result = (xhci_start_info_t){0};
+
+  if (controller_running)
+    return XHCI_START_ALREADY_RUNNING;
+
+  if (!controller_configured || !controller_verified)
+    return XHCI_START_NOT_CONFIGURED;
+
+  if (!pcie_xhci_ready() || !pcie_xhci_bar_valid())
+    return XHCI_START_UNAVAILABLE;
+
+  xhci_info_t info;
+  if (!xhci_probe(&info))
+    return XHCI_START_UNAVAILABLE;
+
+  uint32_t op = info.capability_length;
+  result->command_before = xhci_read(op + XHCI_USBCMD);
+  result->status_before = xhci_read(op + XHCI_USBSTS);
+
+  if (!pcie_xhci_get_command( &result->pci_command_before))
+    return XHCI_START_UNAVAILABLE;
+
+  // The controller must still be in the exact
+  // halted state established by usb configure.
+  if (!(result->status_before & XHCI_STS_HALTED) ||
+      (result->status_before & XHCI_STS_CNR) ||
+      (result->status_before & XHCI_STS_HOST_ERROR) ||
+      (result->command_before & (XHCI_CMD_RUN | XHCI_CMD_HCRST)) ||
+      (result->pci_command_before & PCI_CMD_BUS_MASTER))
+    return XHCI_START_UNSAFE_STATE;
+
+  // Verify the persistent configuration has not
+  // disappeared since usb configure.
+  if ((xhci_read64(op + XHCI_DCBAAP_LO) & ~0x3fULL) !=
+          controller_dma.dcbaa.bus ||
+      (xhci_read(op + XHCI_CONFIG) & 0xffU) != info.max_slots)
+    return XHCI_START_UNSAFE_STATE;
+
+  uint32_t intr = info.runtime_offset + XHCI_INTR0_OFFSET;
+  if ((xhci_read(intr + XHCI_ERSTSZ) & 0xffffU) != 1U ||
+      (xhci_read64(intr + XHCI_ERSTBA_LO) & ~0x3fULL) !=
+          controller_dma.erst.bus ||
+      (xhci_read64(intr + XHCI_ERDP_LO) & ~0xfULL) !=
+          controller_dma.event_ring.bus ||
+      (xhci_read(intr + XHCI_IMAN) & (1U << 1)))
+    return XHCI_START_UNSAFE_STATE;
+
+  // Check that the DMA buffers remain device-owned.
+  if (controller_dma.command_ring.owner != DMA_OWNER_DEVICE ||
+      controller_dma.event_ring.owner != DMA_OWNER_DEVICE ||
+      controller_dma.erst.owner != DMA_OWNER_DEVICE ||
+      controller_dma.dcbaa.owner != DMA_OWNER_DEVICE)
+    return XHCI_START_UNSAFE_STATE;
+
+  if (controller_dma.scratchpad_count != 0) {
+    if (controller_dma.scratchpad_array.owner != DMA_OWNER_DEVICE)
+      return XHCI_START_UNSAFE_STATE;
+
+    for (unsigned int i = 0;
+        i < controller_dma.scratchpad_count; i++) {
+      if (controller_dma.scratchpads[i].owner != DMA_OWNER_DEVICE)
+        return XHCI_START_UNSAFE_STATE;
+    }
+  }
+
+  // Establish ordering before allowing the VL805
+  // to access the prepared DMA memory.
+  __asm__ volatile("dsb sy" ::: "memory");
+
+  if (!pcie_xhci_enable_bus_master()) {
+    // RS has not yet been asserted. Try to restore
+    // the safe PCI state before reporting failure.
+    pcie_xhci_disable_bus_master();
+    pcie_xhci_get_command(&result->pci_command_after);
+    return XHCI_START_PCI_FAILED;
+  }
+
+  // Bus mastering is now enabled, but the
+  // controller is still halted.
+  if (!pcie_xhci_get_command( &result->pci_command_after))
+    return XHCI_START_PCI_FAILED;
+
+  // Start the host controller. Keep interrupts
+  // disabled; completion handling comes later.
+  uint64_t started = timer_now_us();
+
+  xhci_write(op + XHCI_USBCMD, result->command_before | XHCI_CMD_RUN);
+
+  __asm__ volatile("dsb sy" ::: "memory");
+
+  uint64_t deadline = started + XHCI_START_TIMEOUT_US;
+  do {
+    result->status_after = xhci_read(op + XHCI_USBSTS);
+    if (result->status_after & XHCI_STS_HOST_ERROR)
+      break;
+    if (!(result->status_after & XHCI_STS_HALTED))
+      break;
+    timer_delay_ms(1);
+  } while (timer_now_us() < deadline);
+
+  result->elapsed_us = timer_now_us() - started;
+  result->command_after = xhci_read(op + XHCI_USBCMD);
+
+  // Capture the latest state before making
+  // our final decision.
+  result->status_after = xhci_read(op + XHCI_USBSTS);
+  pcie_xhci_get_command(&result->pci_command_after);
+
+  if (result->status_after & XHCI_STS_HOST_ERROR)
+    return XHCI_START_CONTROLLER_ERROR;
+
+  if ((result->status_after & XHCI_STS_HALTED) ||
+      !(result->command_after & XHCI_CMD_RUN))
+    return XHCI_START_TIMEOUT;
+
+  controller_running = true;
+  return XHCI_START_OK;
 }
 
