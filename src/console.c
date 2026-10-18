@@ -931,7 +931,103 @@ cleanup:
   console_puts(passed ? "ALL TESTS PASSED\n" : "TEST FAILED\n");
 }
 
+static void cmd_page_run_test(void) {
+  const unsigned int count = 4;
+  const unsigned int alignment = 16;
+
+  page_stats_t before, after;
+  paddr_t address;
+  bool passed = true;
+
+  if (!page_get_stats(&before) ||
+      before.free_pages < count) {
+    console_puts("Insufficient free pages.\n");
+    return;
+  }
+
+  console_puts("Contiguous page allocation test:\n");
+
+  if (!page_alloc_run(count, alignment, &address)) {
+    console_puts("FAIL: Allocation failed.\n");
+    return;
+  }
+
+  console_puts("  Physical address : 0x");
+  console_puthex64(address);
+  console_putc('\n');
+
+  console_puts("  Size             : ");
+  console_putu32(count * PAGE_SIZE);
+  console_puts(" bytes\n");
+
+  if (address % (alignment * PAGE_SIZE) != 0) {
+    console_puts("FAIL: Incorrect alignment.\n");
+    passed = false;
+  } else {
+    console_puts("  Alignment        : PASS\n");
+  }
+
+  // Current OrgOS mappings are identity mappings.
+  volatile uint8_t *memory =
+      (volatile uint8_t *)(uintptr_t)address;
+
+  // Write across the entire contiguous allocation.
+  for (unsigned int i = 0; i < count * PAGE_SIZE; i++)
+    memory[i] = (uint8_t)((i ^ (i >> 8) ^ 0xA5U) & 0xFFU);
+
+  // Verify every byte.
+  for (unsigned int i = 0; i < count * PAGE_SIZE; i++) {
+    uint8_t expected = (uint8_t)((i ^ (i >> 8) ^ 0xA5U) & 0xFFU);
+
+    if (memory[i] != expected) {
+      console_puts("FAIL: Memory corruption at 0x");
+      console_puthex64(address + i);
+      console_putc('\n');
+      passed = false;
+      break;
+    }
+  }
+
+  if (passed)
+    console_puts("  Memory integrity : PASS\n");
+
+  // An oversized free must fail without changing
+  // the ownership of any of our pages.
+  if (page_free_run(address + 1U, count)) {
+    console_puts("FAIL: Invalid run release accepted.\n");
+    passed = false;
+  }
+
+  if (!page_free_run(address, count)) {
+    console_puts("FAIL: Release failed.\n");
+    passed = false;
+  } else if (page_free_run(address, count)) {
+    console_puts("FAIL: Double release accepted.\n");
+    passed = false;
+  } else {
+    console_puts("  Release checks   : PASS\n");
+  }
+
+  if (!page_get_stats(&after) ||
+      before.total_pages != after.total_pages ||
+      before.reserved_pages != after.reserved_pages ||
+      before.allocated_pages != after.allocated_pages ||
+      before.free_pages != after.free_pages) {
+    console_puts("FAIL: Accounting mismatch.\n");
+    passed = false;
+  } else {
+    console_puts("  Page accounting  : PASS\n");
+  }
+
+  console_puts("\nResult: ");
+  console_puts(passed ? "ALL TESTS PASSED\n" : "TEST FAILED\n");
+}
+
 static void cmd_page(const char *args) {
+  if (next_word_is(&args, "runtest") && end_of_args(args)) {
+    cmd_page_run_test();
+    return;
+  }
   if (next_word_is(&args, "test") && end_of_args(args)) {
     cmd_page_test();
     return;
@@ -965,7 +1061,8 @@ static void cmd_page(const char *args) {
     return;
   }
   if (!end_of_args(args)) {
-    console_puts("Usage: page [alloc | free <hex-address> | test]\n");
+    console_puts(
+        "Usage: page [alloc | free <hex-address> | test | runtest]\n");
     return;
   }
   page_stats_t stats;

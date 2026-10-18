@@ -237,3 +237,123 @@ bool page_free(paddr_t address) {
 
   return true;
 }
+
+// Allocate consecutive physical pages within a single
+// RAM bank, satisfying the requested address alignment.
+bool page_alloc_run(unsigned int count,
+    unsigned int alignment_pages, paddr_t *address) {
+
+  if (!ready || !address || count == 0 ||
+      alignment_pages == 0 ||
+      (alignment_pages & (alignment_pages - 1U)) != 0 ||
+      count > statistics.free_pages)
+    return false;
+
+  uint64_t alignment = (uint64_t)alignment_pages * PAGE_SIZE;
+
+  for (unsigned int b = 0; b < bank_count; b++) {
+    const page_bank_t *bank = &banks[b];
+    uint64_t bank_pages = (bank->end - bank->start) / PAGE_SIZE;
+    if (count > bank_pages)
+      continue;
+
+    // Start at the first aligned physical address
+    // in this RAM bank.
+    uint64_t remainder = bank->start % alignment;
+    uint64_t start = bank->start;
+
+    if (remainder != 0)
+      start += alignment - remainder;
+
+    if (start >= bank->end)
+      continue;
+
+    uint64_t first = (start - bank->start) / PAGE_SIZE;
+
+    while (first <= bank_pages - count) {
+      uint64_t index = bank->first_bit + first;
+      unsigned int n;
+
+      // Check that the entire candidate run is free.
+      for (n = 0; n < count; n++) {
+        if (page_is_set(index + n))
+          break;
+      }
+
+      if (n == count) {
+        // Every page is free. Commit the allocation.
+        for (n = 0; n < count; n++) {
+          bitmap_set(unavailable, index + n);
+          bitmap_set(allocated, index + n);
+        }
+
+        statistics.allocated_pages += count;
+        statistics.free_pages -= count;
+
+        next_page = index + count;
+        if (next_page >= statistics.total_pages)
+          next_page = 0;
+
+        *address = bank->start + first * PAGE_SIZE;
+        return true;
+      }
+
+      // Skip beyond the occupied page, then round
+      // upwards to the next alignment boundary.
+      uint64_t next = first + n + 1U;
+      uint64_t mask = (uint64_t)alignment_pages - 1U;
+      uint64_t physical_page = bank->start / PAGE_SIZE;
+      uint64_t absolute = physical_page + next;
+      absolute = (absolute + mask) & ~mask;
+      first = absolute - physical_page;
+    }
+  }
+
+  return false;
+}
+
+// Release a contiguous allocation, validating the
+// entire run before changing any ownership bits.
+bool page_free_run(paddr_t address, unsigned int count) {
+  if (!ready || count == 0)
+    return false;
+
+  uint64_t index;
+  if (!address_to_index(address, &index))
+    return false;
+
+  // Find the bank containing the starting address.
+  const page_bank_t *bank = NULL;
+  for (unsigned int i = 0; i < bank_count; i++) {
+    if (address >= banks[i].start && address < banks[i].end) {
+      bank = &banks[i];
+      break;
+    }
+  }
+
+  if (!bank)
+    return false;
+
+  // The run must not extend beyond the bank.
+  if ((uint64_t)count > (bank->end - address) / PAGE_SIZE)
+    return false;
+
+  // All pages must currently be allocated.
+  // No state changes until validation completes.
+  for (unsigned int i = 0; i < count; i++) {
+    if (!bitmap_test(allocated, index + i))
+      return false;
+  }
+
+  for (unsigned int i = 0; i < count; i++) {
+    bitmap_clear(allocated, index + i);
+    bitmap_clear(unavailable, index + i);
+  }
+
+  statistics.allocated_pages -= count;
+  statistics.free_pages += count;
+  next_page = index;
+
+  return true;
+}
+
