@@ -809,7 +809,133 @@ static void cmd_mmu(const char *args) {
   console_putc('\n');
 }
 
+#define PAGE_TEST_COUNT 32U
+
+// Give each byte a predictable value depending on
+// its page number and its offset within that page.
+static uint8_t page_test_pattern(unsigned int page, unsigned int offset) {
+  return (uint8_t)(
+      (page * 37U) ^
+      offset ^
+      (offset >> 5) ^
+      (offset >> 9) ^
+      0xA5U);
+}
+
+static void cmd_page_test(void) {
+  // Static storage avoids unnecessarily enlarging
+  // the kernel stack.
+  static paddr_t addresses[PAGE_TEST_COUNT];
+  unsigned int count = 0;
+  bool passed = true;
+  page_stats_t before, after;
+  if (!page_get_stats(&before)) {
+    console_puts("Page allocator not initialised.\n");
+    return;
+  }
+  if (before.free_pages < PAGE_TEST_COUNT) {
+    console_puts("Insufficient free pages for test.\n");
+    return;
+  }
+  console_puts("Physical page allocator self-test:\n");
+  // 1. Allocate pages and check their addresses.
+  for (unsigned int i = 0; i < PAGE_TEST_COUNT; i++) {
+    paddr_t address;
+    if (!page_alloc(&address)) {
+      console_puts("FAIL: Allocation failed.\n");
+      passed = false;
+      goto cleanup;
+    }
+    // Record immediately so that cleanup owns
+    // this page even if a later check fails.
+    addresses[count++] = address;
+
+    if (address & (PAGE_SIZE - 1U)) {
+      console_puts("FAIL: Unaligned page address.\n");
+      passed = false;
+      goto cleanup;
+    }
+
+    for (unsigned int j = 0; j < i; j++) {
+      if (addresses[j] == address) {
+        console_puts("FAIL: Duplicate allocation.\n");
+        passed = false;
+        goto cleanup;
+      }
+    }
+  }
+  console_puts("  Allocation and uniqueness : PASS\n");
+  // 2. Write a distinctive pattern to each page.
+  // OrgOS currently identity-maps physical RAM.
+  for (unsigned int i = 0; i < count; i++) {
+    volatile uint8_t *memory =
+        (volatile uint8_t *)(uintptr_t)addresses[i];
+
+    for (unsigned int offset = 0; offset < PAGE_SIZE; offset++)
+      memory[offset] = page_test_pattern(i, offset);
+  }
+  // 3. Verify everything after all writes finish.
+  // This detects both corruption and overlapping pages.
+  for (unsigned int i = 0; i < count; i++) {
+    volatile const uint8_t *memory =
+        (volatile const uint8_t *)(uintptr_t)addresses[i];
+    for (unsigned int offset = 0; offset < PAGE_SIZE; offset++) {
+      if (memory[offset] != page_test_pattern(i, offset)) {
+        console_puts("FAIL: Memory corruption at 0x");
+        console_puthex64(addresses[i] + offset);
+        console_putc('\n');
+        passed = false;
+        goto cleanup;
+      }
+    }
+  }
+  console_puts("  Memory integrity          : PASS\n");
+  // 4. Test invalid releases without changing ownership.
+  if (page_free(addresses[0] + 1U) ||
+      page_free(0)) {
+    console_puts("FAIL: Invalid release accepted.\n");
+    passed = false;
+    goto cleanup;
+  }
+  console_puts("  Invalid release rejection : PASS\n");
+
+cleanup:
+  // Release all pages owned by this test.
+  for (unsigned int i = 0; i < count; i++) {
+    if (!page_free(addresses[i])) {
+      console_puts("FAIL: Cleanup release failed.\n");
+      passed = false;
+    }
+  }
+  // 5. A released page must not be releasable again.
+  if (count > 0 && page_free(addresses[0])) {
+    console_puts("FAIL: Double free accepted.\n");
+    passed = false;
+  } else if (count > 0) {
+    console_puts("  Double free rejection     : PASS\n");
+  }
+  if (!page_get_stats(&after)) {
+    console_puts("FAIL: Cannot read final statistics.\n");
+    return;
+  }
+  if (after.total_pages != before.total_pages ||
+      after.reserved_pages != before.reserved_pages ||
+      after.allocated_pages != before.allocated_pages ||
+      after.free_pages != before.free_pages) {
+    console_puts("FAIL: Page accounting mismatch.\n");
+    passed = false;
+  } else {
+    console_puts("  Page accounting           : PASS\n");
+  }
+  console_puts("\nResult: ");
+  console_puts(passed ? "ALL TESTS PASSED\n" : "TEST FAILED\n");
+}
+
 static void cmd_page(const char *args) {
+  if (next_word_is(&args, "test") && end_of_args(args)) {
+    cmd_page_test();
+    return;
+  }
   if (next_word_is(&args, "alloc") && end_of_args(args)) {
     paddr_t address;
     if (!page_alloc(&address)) {
@@ -839,7 +965,7 @@ static void cmd_page(const char *args) {
     return;
   }
   if (!end_of_args(args)) {
-    console_puts("Usage: page [alloc | free <hex-address>]\n");
+    console_puts("Usage: page [alloc | free <hex-address> | test]\n");
     return;
   }
   page_stats_t stats;
