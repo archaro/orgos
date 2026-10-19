@@ -49,6 +49,7 @@
 
 #define XHCI_STS_HALTED   (1U << 0)
 #define XHCI_STS_CNR      (1U << 11)
+#define XHCI_STS_HOST_ERROR (1U << 2)
 #define XHCI_CMD_RUN      (1U << 0)
 #define XHCI_CMD_HCRST    (1U << 1)
 
@@ -56,6 +57,7 @@
 
 #define XHCI_RESET_TIMEOUT_US  1000000ULL
 #define XHCI_READY_TIMEOUT_US  1000000ULL
+#define XHCI_START_TIMEOUT_US 1000000ULL
 
 static xhci_dma_t controller_dma;
 static bool controller_configured;
@@ -177,7 +179,7 @@ bool xhci_get_state(xhci_state_t *state) {
 #define XHCI_TRB_NOOP_CMD       23U
 #define XHCI_TRB_COMMAND_EVENT  33U
 #define XHCI_COMPLETION_SUCCESS 1U
-#define XHCI_NOOP_TIMEOUT_US    1000000ULL
+#define XHCI_COMMAND_TIMEOUT_US    1000000ULL
 
 // The xHCI structures have fixed hardware layouts.
 _Static_assert(sizeof(xhci_trb_t) == 16, "xHCI TRB must be 16 bytes");
@@ -671,8 +673,6 @@ static bool xhci_command_link_cycle(unsigned int cycle) {
       cache.data_line_size);
 }
 
-#define XHCI_STS_HOST_ERROR (1U << 2)
-#define XHCI_START_TIMEOUT_US 1000000ULL
 
 xhci_start_result_t xhci_start(xhci_start_info_t *result) {
 
@@ -697,7 +697,6 @@ xhci_start_result_t xhci_start(xhci_start_info_t *result) {
   uint32_t op = info.capability_length;
   result->command_before = xhci_read(op + XHCI_USBCMD);
   result->status_before = xhci_read(op + XHCI_USBSTS);
-
   if (!pcie_xhci_get_command( &result->pci_command_before))
     return XHCI_START_UNAVAILABLE;
 
@@ -737,8 +736,7 @@ xhci_start_result_t xhci_start(xhci_start_info_t *result) {
     if (controller_dma.scratchpad_array.owner != DMA_OWNER_DEVICE)
       return XHCI_START_UNSAFE_STATE;
 
-    for (unsigned int i = 0;
-        i < controller_dma.scratchpad_count; i++) {
+    for (unsigned int i = 0; i < controller_dma.scratchpad_count; i++) {
       if (controller_dma.scratchpads[i].owner != DMA_OWNER_DEVICE)
         return XHCI_START_UNSAFE_STATE;
     }
@@ -764,7 +762,6 @@ xhci_start_result_t xhci_start(xhci_start_info_t *result) {
   // Start the host controller. Keep interrupts
   // disabled; completion handling comes later.
   uint64_t started = timer_now_us();
-
   xhci_write(op + XHCI_USBCMD, result->command_before | XHCI_CMD_RUN);
 
   __asm__ volatile("dsb sy" ::: "memory");
@@ -798,84 +795,81 @@ xhci_start_result_t xhci_start(xhci_start_info_t *result) {
   return XHCI_START_OK;
 }
 
-xhci_noop_result_t xhci_noop(xhci_noop_info_t *result) {
-  if (!result)
-    return XHCI_NOOP_UNAVAILABLE;
+xhci_command_result_t xhci_command_submit(const xhci_trb_t *command,
+    xhci_command_completion_t *result) {
 
-  *result = (xhci_noop_info_t){0};
+  if (!command || !result)
+    return XHCI_COMMAND_UNAVAILABLE;
+
+  *result = (xhci_command_completion_t){0};
 
   if (!controller_running || !controller_verified)
-    return XHCI_NOOP_NOT_RUNNING;
+    return XHCI_COMMAND_NOT_RUNNING;
 
   if (command_outstanding || command_ring_failed)
-    return XHCI_NOOP_ALREADY_SUBMITTED;
+    return XHCI_COMMAND_BUSY;
 
   if (!pcie_xhci_ready() || !pcie_xhci_bar_valid())
-    return XHCI_NOOP_UNAVAILABLE;
+    return XHCI_COMMAND_UNAVAILABLE;
 
   xhci_info_t info;
   if (!xhci_probe(&info))
-    return XHCI_NOOP_UNAVAILABLE;
+    return XHCI_COMMAND_UNAVAILABLE;
 
   uint32_t op = info.capability_length;
   uint32_t status = xhci_read(op + XHCI_USBSTS);
-  uint32_t command = xhci_read(op + XHCI_USBCMD);
+  uint32_t usbcmd = xhci_read(op + XHCI_USBCMD);
   uint16_t pci_command;
   if (!pcie_xhci_get_command(&pci_command) ||
-      !(pci_command & PCI_CMD_BUS_MASTER) || !(command & XHCI_CMD_RUN) ||
+      !(pci_command & PCI_CMD_BUS_MASTER) ||
+      !(usbcmd & XHCI_CMD_RUN) ||
       (status & (XHCI_STS_HALTED | XHCI_STS_CNR | XHCI_STS_HOST_ERROR)))
-    return XHCI_NOOP_NOT_RUNNING;
+    return XHCI_COMMAND_NOT_RUNNING;
 
   if (controller_dma.command_ring.owner != DMA_OWNER_DEVICE ||
       controller_dma.event_ring.owner != DMA_OWNER_DEVICE)
-    return XHCI_NOOP_UNAVAILABLE;
+    return XHCI_COMMAND_UNAVAILABLE;
 
+  // Validate the controller's cache-line geometry.
   cache_info_t cache;
-  if (!cache_get_info(&cache) ||
-      cache.data_line_size == 0 ||
+  if (!cache_get_info(&cache) || cache.data_line_size == 0 ||
       cache.data_line_size > PAGE_SIZE ||
       (cache.data_line_size & (cache.data_line_size - 1U)))
-    return XHCI_NOOP_CACHE_FAILED;
+    return XHCI_COMMAND_CACHE_ERROR;
 
   size_t line = cache.data_line_size;
   xhci_trb_t *commands = (xhci_trb_t *)controller_dma.command_ring.virtual;
   xhci_trb_t *events = (xhci_trb_t *)controller_dma.event_ring.virtual;
   xhci_trb_t *trb = &commands[command_index];
   xhci_trb_t *event = &events[event_index];
-
   uint64_t command_address = controller_dma.command_ring.bus +
       (uint64_t)command_index * sizeof(xhci_trb_t);
   uintptr_t command_line = (uintptr_t)trb & ~(uintptr_t)(line - 1U);
   uintptr_t event_line = (uintptr_t)event & ~(uintptr_t)(line - 1U);
   result->command_address = command_address;
 
-  // There is no outstanding command at this point.
-  // Construct a complete No Op Command TRB.
-  trb->parameter = 0;
-  trb->status = 0;
-  trb->control = (XHCI_TRB_NOOP_CMD << XHCI_TRB_TYPE_SHIFT) |
+  // Copy the caller's command into the ring.
+  // The transport, not the caller, controls the cycle bit.
+  trb->parameter = command->parameter;
+  trb->status = command->status;
+  trb->control = (command->control & ~XHCI_TRB_CYCLE) |
       (command_cycle ? XHCI_TRB_CYCLE : 0U);
 
-  // Publish the modified cache line before
-  // notifying the controller.
+  // Make the complete TRB visible before ringing the doorbell.
   if (!cache_clean((const void *)command_line, line))
-    return XHCI_NOOP_CACHE_FAILED;
+    return XHCI_COMMAND_CACHE_ERROR;
 
   command_outstanding = true;
   uint64_t started = timer_now_us();
-  // Command doorbell, target zero.
+  // Doorbell 0 selects the host-controller command ring.
   xhci_write(info.doorbell_offset, 0U);
   __asm__ volatile("dsb sy" ::: "memory");
-
-  while (timer_now_us() - started < XHCI_NOOP_TIMEOUT_US) {
-
-    // The event ring is device-written.
-    // Never dirty any of its cache lines.
+  while (timer_now_us() - started < XHCI_COMMAND_TIMEOUT_US) {
+    // The event ring belongs to the device. Never write to it.
     if (!cache_invalidate((const void *)event_line, line)) {
       command_ring_failed = true;
-      return XHCI_NOOP_CACHE_FAILED;
+      return XHCI_COMMAND_CACHE_ERROR;
     }
-
     uint32_t control = event->control;
     if ((control & XHCI_TRB_CYCLE) == event_cycle) {
       result->event_parameter = event->parameter;
@@ -885,77 +879,110 @@ xhci_noop_result_t xhci_noop(xhci_noop_info_t *result) {
       result->completion_code = (result->event_status >> 24) & 0xffU;
       result->elapsed_us = timer_now_us() - started;
       result->controller_status = xhci_read(op + XHCI_USBSTS);
-
-      // Advance the event consumer position.
+      // Consume the event and advance the dequeue pointer.
       event_index++;
-
       if (event_index == XHCI_RING_TRBS) {
         event_index = 0;
         event_cycle ^= 1U;
       }
-
       uint64_t next_event = controller_dma.event_ring.bus +
           (uint64_t)event_index * sizeof(xhci_trb_t);
-      // Update ERDP. Bit 3 clears Event Handler Busy.
       uint32_t intr = info.runtime_offset + XHCI_INTR0_OFFSET;
+      // Bit 3 acknowledges Event Handler Busy.
       xhci_write64(intr + XHCI_ERDP_LO, next_event | (1ULL << 3));
 
       __asm__ volatile("dsb sy" ::: "memory");
 
-      // The event must identify our command.
+      // A synchronous command must receive its own
+      // Command Completion Event.
       if (result->event_type != XHCI_TRB_COMMAND_EVENT ||
           result->event_parameter != command_address) {
         command_ring_failed = true;
-        return XHCI_NOOP_BAD_EVENT;
+        return XHCI_COMMAND_BAD_EVENT;
       }
-
       if (result->completion_code != XHCI_COMPLETION_SUCCESS) {
         command_ring_failed = true;
-        return XHCI_NOOP_COMMAND_FAILED;
+        return XHCI_COMMAND_FAILED;
       }
-
-      // The command has completed successfully.
       command_outstanding = false;
-
-      // If this is the first command following
-      // a command-ring wrap, the controller has
-      // necessarily traversed the Link TRB.
-      //
-      // It is now safe to prepare the Link TRB
-      // for its next traversal.
+      // The first completion after a wrap proves the
+      // controller has traversed the Link TRB.
       if (command_index == 0 && completed_commands != 0) {
         if (!xhci_command_link_cycle(command_cycle)) {
           command_ring_failed = true;
-          return XHCI_NOOP_CACHE_FAILED;
+          return XHCI_COMMAND_CACHE_ERROR;
         }
       }
-
-      // Advance the command producer position.
       command_index++;
       if (command_index == XHCI_RING_TRBS - 1U) {
-        // Entry 255 is the Link TRB.
         command_index = 0;
         command_cycle ^= 1U;
       }
-
       completed_commands++;
       result->command_number = completed_commands;
-
-      return XHCI_NOOP_OK;
+      return XHCI_COMMAND_OK;
     }
-
     uint32_t current_status = xhci_read(op + XHCI_USBSTS);
-    if (current_status & (XHCI_STS_HALTED | XHCI_STS_HOST_ERROR)) {
+    if (current_status &
+        (XHCI_STS_HALTED | XHCI_STS_HOST_ERROR)) {
       result->controller_status = current_status;
       result->elapsed_us = timer_now_us() - started;
       command_ring_failed = true;
-      return XHCI_NOOP_COMMAND_FAILED;
+      return XHCI_COMMAND_FAILED;
     }
   }
 
   result->elapsed_us = timer_now_us() - started;
   result->controller_status = xhci_read(op + XHCI_USBSTS);
-
+  // A timed-out command might still be in progress.
+  // Never reuse its ring entry without recovery.
   command_ring_failed = true;
-  return XHCI_NOOP_TIMEOUT;
+  return XHCI_COMMAND_TIMEOUT;
+}
+
+xhci_noop_result_t xhci_noop(xhci_noop_info_t *result) {
+  if (!result)
+    return XHCI_NOOP_UNAVAILABLE;
+
+  *result = (xhci_noop_info_t){0};
+
+  xhci_trb_t command = {
+    .parameter = 0,
+    .status = 0,
+    .control = XHCI_TRB_NOOP_CMD << XHCI_TRB_TYPE_SHIFT
+  };
+
+  xhci_command_completion_t completion;
+  xhci_command_result_t status = xhci_command_submit(&command, &completion);
+
+  // Preserve all existing diagnostic information.
+  result->command_address = completion.command_address;
+  result->event_parameter = completion.event_parameter;
+  result->event_status = completion.event_status;
+  result->event_control = completion.event_control;
+  result->controller_status = completion.controller_status;
+  result->completion_code = completion.completion_code;
+  result->event_type = completion.event_type;
+  result->elapsed_us = completion.elapsed_us;
+  result->command_number = completion.command_number;
+  switch (status) {
+    case XHCI_COMMAND_OK:
+      return XHCI_NOOP_OK;
+    case XHCI_COMMAND_NOT_RUNNING:
+      return XHCI_NOOP_NOT_RUNNING;
+    case XHCI_COMMAND_BUSY:
+      return XHCI_NOOP_ALREADY_SUBMITTED;
+    case XHCI_COMMAND_UNAVAILABLE:
+      return XHCI_NOOP_UNAVAILABLE;
+    case XHCI_COMMAND_CACHE_ERROR:
+      return XHCI_NOOP_CACHE_FAILED;
+    case XHCI_COMMAND_TIMEOUT:
+      return XHCI_NOOP_TIMEOUT;
+    case XHCI_COMMAND_BAD_EVENT:
+      return XHCI_NOOP_BAD_EVENT;
+    case XHCI_COMMAND_FAILED:
+      return XHCI_NOOP_COMMAND_FAILED;
+  }
+
+  return XHCI_NOOP_UNAVAILABLE;
 }

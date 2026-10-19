@@ -122,6 +122,32 @@ typedef struct {
 } xhci_readiness_t;
 
 typedef enum {
+  XHCI_COMMAND_OK,
+  XHCI_COMMAND_NOT_RUNNING,
+  XHCI_COMMAND_BUSY,
+  XHCI_COMMAND_UNAVAILABLE,
+  XHCI_COMMAND_CACHE_ERROR,
+  XHCI_COMMAND_TIMEOUT,
+  XHCI_COMMAND_BAD_EVENT,
+  XHCI_COMMAND_FAILED
+} xhci_command_result_t;
+
+typedef struct {
+  uint64_t command_address;
+  uint64_t event_parameter;
+  uint32_t event_status;
+  uint32_t event_control;
+  uint32_t controller_status;
+  uint32_t completion_code;
+  uint32_t event_type;
+  uint64_t elapsed_us;
+  uint32_t command_number;
+} xhci_command_completion_t;
+
+xhci_command_result_t xhci_command_submit(
+    const xhci_trb_t *command, xhci_command_completion_t *completion);
+
+typedef enum {
   XHCI_NOOP_OK,
   XHCI_NOOP_NOT_RUNNING,
   XHCI_NOOP_ALREADY_SUBMITTED,
