@@ -1100,9 +1100,176 @@ static void cmd_usb_noops(void) {
   console_puts("All 600 commands completed successfully.\n");
 }
 
+static const char *usb_speed_name(uint8_t speed) {
+  switch (speed) {
+    case 1: return "Full (12 Mb/s)";
+    case 2: return "Low (1.5 Mb/s)";
+    case 3: return "High (480 Mb/s)";
+    case 4: return "Super (5 Gb/s)";
+    case 5: return "SuperSpeedPlus";
+    default: return "Unknown or not negotiated";
+  }
+}
+
+static const char *usb_link_name(uint8_t state) {
+  switch (state) {
+    case 0: return "U0";
+    case 1: return "U1";
+    case 2: return "U2";
+    case 3: return "U3";
+    case 4: return "Disabled";
+    case 5: return "RxDetect";
+    case 6: return "Inactive";
+    case 7: return "Polling";
+    case 8: return "Recovery";
+    case 9: return "Hot Reset";
+    case 10: return "Compliance";
+    case 11: return "Test";
+    case 15: return "Resume";
+    default: return "Reserved";
+  }
+}
+
+static void cmd_usb_ports(void) {
+  uint8_t count;
+  if (!xhci_port_count(&count)) {
+    console_puts("USB root ports unavailable.\n");
+    return;
+  }
+  console_puts("xHCI root ports: ");
+  console_putu32(count);
+  console_putc('\n');
+  for (uint8_t n = 1; n <= count; n++) {
+    xhci_port_t port;
+    if (!xhci_port_read(n, &port)) {
+      console_puts("Unable to inspect port ");
+      console_putu32(n);
+      console_puts(".\n");
+      return;
+    }
+    console_puts("\nPort ");
+    console_putu32(n);
+    console_puts(":\n");
+    console_puts("  PORTSC       : 0x");
+    console_puthex(port.portsc, 8);
+    console_putc('\n');
+    console_puts("  Connected    : ");
+    console_puts(port.connected ? "Yes\n" : "No\n");
+    console_puts("  Enabled      : ");
+    console_puts(port.enabled ? "Yes\n" : "No\n");
+    console_puts("  Powered      : ");
+    console_puts(port.powered ? "Yes\n" : "No\n");
+    console_puts("  Overcurrent  : ");
+    console_puts(port.overcurrent ? "Yes\n" : "No\n");
+    console_puts("  Reset active : ");
+    console_puts(port.resetting ? "Yes\n" : "No\n");
+    console_puts("  Speed        : ");
+    console_puts(usb_speed_name(port.speed));
+    console_putc('\n');
+    console_puts("  Link state   : ");
+    console_puts(usb_link_name(port.link_state));
+    console_putc('\n');
+    console_puts("  Change flags :");
+    bool changed = false;
+#define PRINT_CHANGE(flag, name)                   \
+    if (port.flag) {                               \
+      console_puts(" " name);                      \
+      changed = true;                              \
+    }
+    PRINT_CHANGE(connect_change, "CSC")
+    PRINT_CHANGE(enable_change, "PEC")
+    PRINT_CHANGE(warm_reset_change, "WRC")
+    PRINT_CHANGE(overcurrent_change, "OCC")
+    PRINT_CHANGE(reset_change, "PRC")
+    PRINT_CHANGE(link_change, "PLC")
+    PRINT_CHANGE(config_error_change, "CEC")
+#undef PRINT_CHANGE
+    if (!changed)
+      console_puts(" None");
+    console_putc('\n');
+  }
+}
+
+static void cmd_usb_protocols(void) {
+  xhci_state_t state;
+  if (!xhci_get_state(&state)) {
+    console_puts("Unable to read xHCI controller state.\n");
+    return;
+  }
+  console_puts("xHCI Supported Protocol Capabilities\n");
+  console_puts("  USBCMD : 0x");
+  console_puthex(state.command, 8);
+  console_putc('\n');
+  console_puts("  USBSTS : 0x");
+  console_puthex(state.status, 8);
+  console_putc('\n');
+  unsigned int count = 0;
+  for (unsigned int i = 0; i <= 8U; i++) {
+    xhci_protocol_t protocol;
+    bool found;
+    if (!xhci_protocol_get(i, &protocol, &found)) {
+      console_puts("Extended capability traversal failed.\n");
+      return;
+    }
+    if (!found)
+      break;
+    if (i == 8U) {
+      console_puts("More than eight protocol records found.\n");
+      return;
+    }
+    count++;
+    console_puts("\nProtocol ");
+    console_putu32(count);
+    console_puts(":\n");
+    console_puts("  Offset       : 0x");
+    console_puthex(protocol.offset, 4);
+    console_putc('\n');
+    console_puts("  Header       : 0x");
+    console_puthex(protocol.header, 8);
+    console_putc('\n');
+    console_puts("  Name         : ");
+    for (unsigned int c = 0; c < 4U; c++) {
+      uint8_t ch = (uint8_t)(protocol.name >> (c * 8U));
+      console_putc(ch >= 32U && ch <= 126U ? (char)ch : '.');
+    }
+    console_putc('\n');
+    console_puts("  Revision     : ");
+    console_putu32(protocol.major);
+    console_putc('.');
+    console_puthex(protocol.minor, 2);
+    console_putc('\n');
+    console_puts("  First port   : ");
+    console_putu32(protocol.first_port);
+    console_putc('\n');
+    console_puts("  Port count   : ");
+    console_putu32(protocol.port_count);
+    console_putc('\n');
+    console_puts("  Speed IDs    : ");
+    console_putu32(protocol.speed_id_count);
+    console_putc('\n');
+    console_puts("  Slot type    : ");
+    console_putu32(protocol.slot_type);
+    console_putc('\n');
+    console_puts("  Raw ports    : 0x");
+    console_puthex(protocol.ports, 8);
+    console_putc('\n');
+  }
+  console_puts("\nSupported protocols found: ");
+  console_putu32(count);
+  console_putc('\n');
+}
+
 static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
+  if (next_word_is(&args, "protocols") && end_of_args(args)) {
+    cmd_usb_protocols();
+    return;
+  }
+  if (next_word_is(&args, "ports") && end_of_args(args)) {
+    cmd_usb_ports();
+    return;
+  }
   if (next_word_is(&args, "noops") && end_of_args(args)) {
     cmd_usb_noops();
     return;
@@ -1126,7 +1293,7 @@ static void cmd_usb(const char *args) {
 
   if (!end_of_args(args)) {
     console_puts(
-    "Usage: usb [state | dma | ready | inspect | noops]\n");
+    "Usage: usb [state | dma | ready | inspect | noops | ports | protocols]\n");
     return;
   }
 

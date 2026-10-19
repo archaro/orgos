@@ -25,6 +25,9 @@
 #define XHCI_HCCPARAMS2           0x1cU
 #define XHCI_DBOFF                0x14U
 #define XHCI_RTSOFF               0x18U
+#define XHCI_EXT_CAP_PROTOCOL     2U
+#define XHCI_EXT_CAP_LIMIT        0x1000U
+#define XHCI_EXT_CAP_MAX_HOPS     64U
 
 // Operational registers are relative to CAPLENGTH.
 #define XHCI_USBCMD     0x00U
@@ -35,6 +38,8 @@
 #define XHCI_DCBAAP_LO  0x30U
 #define XHCI_DCBAAP_HI  0x34U
 #define XHCI_CONFIG     0x38U
+#define XHCI_PORTSC_BASE  0x400U
+#define XHCI_PORT_STRIDE  0x10U
 
 // Interrupter registers are relative to the
 // interrupter's runtime register block.
@@ -54,6 +59,19 @@
 #define XHCI_CMD_HCRST    (1U << 1)
 
 #define PCI_CMD_BUS_MASTER (1U << 2)
+
+#define XHCI_PORT_CCS     (1U << 0)
+#define XHCI_PORT_PED     (1U << 1)
+#define XHCI_PORT_OCA     (1U << 3)
+#define XHCI_PORT_PR      (1U << 4)
+#define XHCI_PORT_PP      (1U << 9)
+#define XHCI_PORT_CSC     (1U << 17)
+#define XHCI_PORT_PEC     (1U << 18)
+#define XHCI_PORT_WRC     (1U << 19)
+#define XHCI_PORT_OCC     (1U << 20)
+#define XHCI_PORT_PRC     (1U << 21)
+#define XHCI_PORT_PLC     (1U << 22)
+#define XHCI_PORT_CEC     (1U << 23)
 
 #define XHCI_RESET_TIMEOUT_US  1000000ULL
 #define XHCI_READY_TIMEOUT_US  1000000ULL
@@ -168,6 +186,57 @@ bool xhci_get_state(xhci_state_t *state) {
   lo = xhci_read(base + XHCI_DCBAAP_LO);
   hi = xhci_read(base + XHCI_DCBAAP_HI);
   state->dcbaa = ((uint64_t)hi << 32) | lo;
+  return true;
+}
+
+bool xhci_port_count(uint8_t *count) {
+  if (!count || !controller_running || !pcie_xhci_ready())
+    return false;
+
+  xhci_info_t info;
+  if (!xhci_probe(&info) || info.max_ports == 0)
+    return false;
+
+  *count = info.max_ports;
+  return true;
+}
+
+bool xhci_port_read(uint8_t number, xhci_port_t *port) {
+  if (!port)
+    return false;
+
+  *port = (xhci_port_t){0};
+
+  uint8_t count;
+  if (!xhci_port_count(&count) || number == 0 || number > count)
+    return false;
+
+  xhci_info_t info;
+  if (!xhci_probe(&info))
+    return false;
+
+  uint32_t offset = info.capability_length + XHCI_PORTSC_BASE +
+      (uint32_t)(number - 1U) * XHCI_PORT_STRIDE;
+
+  uint32_t value = xhci_read(offset);
+  port->number = number;
+  port->portsc = value;
+  port->connected = (value & XHCI_PORT_CCS) != 0;
+  port->enabled = (value & XHCI_PORT_PED) != 0;
+  port->overcurrent = (value & XHCI_PORT_OCA) != 0;
+  port->resetting = (value & XHCI_PORT_PR) != 0;
+  port->powered = (value & XHCI_PORT_PP) != 0;
+  port->link_state = (uint8_t)((value >> 5) & 0x0fU);
+  port->speed = (uint8_t)((value >> 10) & 0x0fU);
+  port->indicator = (uint8_t)((value >> 14) & 0x03U);
+  port->connect_change = (value & XHCI_PORT_CSC) != 0;
+  port->enable_change = (value & XHCI_PORT_PEC) != 0;
+  port->warm_reset_change = (value & XHCI_PORT_WRC) != 0;
+  port->overcurrent_change = (value & XHCI_PORT_OCC) != 0;
+  port->reset_change = (value & XHCI_PORT_PRC) != 0;
+  port->link_change = (value & XHCI_PORT_PLC) != 0;
+  port->config_error_change = (value & XHCI_PORT_CEC) != 0;
+
   return true;
 }
 
@@ -371,6 +440,66 @@ bool xhci_diagnose_capabilities( xhci_cap_diagnostic_t *result) {
   }
 
   return true;
+}
+
+bool xhci_protocol_get(unsigned int index, xhci_protocol_t *protocol,
+    bool *found) {
+  if (!protocol || !found)
+    return false;
+
+  *protocol = (xhci_protocol_t){0};
+  *found = false;
+
+  if (!pcie_xhci_ready() || !pcie_xhci_bar_valid())
+    return false;
+
+  xhci_info_t info;
+  if (!xhci_probe(&info))
+    return false;
+
+  uint32_t hccparams = xhci_read(XHCI_HCCPARAMS1);
+  uint32_t offset = ((hccparams >> 16) & 0xffffU) * 4U;
+  if (offset == 0)
+    return true;
+
+  unsigned int protocol_index = 0;
+  for (unsigned int hop = 0; hop < XHCI_EXT_CAP_MAX_HOPS; hop++) {
+    if (offset < 0x20U || offset > XHCI_EXT_CAP_LIMIT - 4U)
+      return false;
+
+    uint32_t header = xhci_read(offset);
+    uint8_t id = (uint8_t)(header & 0xffU);
+    uint8_t next = (uint8_t)((header >> 8) & 0xffU);
+    if (id == XHCI_EXT_CAP_PROTOCOL) {
+      if (offset > XHCI_EXT_CAP_LIMIT - 16U)
+        return false;
+
+      if (protocol_index == index) {
+        protocol->offset = offset;
+        protocol->header = header;
+        protocol->name = xhci_read(offset + 4U);
+        protocol->ports = xhci_read(offset + 8U);
+        protocol->slot = xhci_read(offset + 12U);
+        protocol->major = (uint8_t)(header >> 24);
+        protocol->minor = (uint8_t)((header >> 16) & 0xffU);
+        protocol->first_port = (uint8_t)(protocol->ports & 0xffU);
+        protocol->port_count = (uint8_t)((protocol->ports >> 8) & 0xffU);
+        protocol->speed_id_count = (uint8_t)((protocol->ports >> 28) & 0x0fU);
+        protocol->slot_type = (uint8_t)(protocol->slot & 0x1fU);
+        *found = true;
+        return true;
+      }
+      protocol_index++;
+    }
+    if (next == 0)
+      return true;
+    // Next pointers are positive DWORD offsets from the
+    // current capability, not absolute BAR offsets.
+    offset += (uint32_t)next * 4U;
+  }
+
+  // Reject an unexpectedly long or malformed chain.
+  return false;
 }
 
 xhci_reset_result_t xhci_reset(xhci_reset_info_t *result) {
@@ -986,3 +1115,5 @@ xhci_noop_result_t xhci_noop(xhci_noop_info_t *result) {
 
   return XHCI_NOOP_UNAVAILABLE;
 }
+
+

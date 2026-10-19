@@ -29,6 +29,29 @@ typedef struct {
 bool xhci_get_state(xhci_state_t *state);
 
 typedef struct {
+  uint8_t number;
+  uint32_t portsc;
+  uint8_t speed;
+  uint8_t link_state;
+  uint8_t indicator;
+  bool connected;
+  bool enabled;
+  bool overcurrent;
+  bool resetting;
+  bool powered;
+  bool connect_change;
+  bool enable_change;
+  bool warm_reset_change;
+  bool overcurrent_change;
+  bool reset_change;
+  bool link_change;
+  bool config_error_change;
+} xhci_port_t;
+
+bool xhci_port_count(uint8_t *count);
+bool xhci_port_read(uint8_t number, xhci_port_t *port);
+
+typedef struct {
   uint64_t parameter;
   uint32_t status;
   uint32_t control;
@@ -183,6 +206,23 @@ typedef struct {
   uint32_t ext_cap_offset;
   uint32_t ext_cap_header;
 } xhci_cap_diagnostic_t;
+
+typedef struct {
+  uint32_t offset;
+  uint32_t header;
+  uint32_t name;
+  uint32_t ports;
+  uint32_t slot;
+  uint8_t major;
+  uint8_t minor;
+  uint8_t first_port;
+  uint8_t port_count;
+  uint8_t speed_id_count;
+  uint8_t slot_type;
+} xhci_protocol_t;
+
+bool xhci_protocol_get(unsigned int index, xhci_protocol_t *protocol,
+    bool *found);
 
 bool xhci_diagnose_capabilities(xhci_cap_diagnostic_t *result);
 
