@@ -350,9 +350,44 @@ void main(void) {
   // Other exception masks remain unchanged.
   __asm__ volatile("msr daifclr, #2\nisb" ::: "memory");
 
-  if (!pcie_subsystem_init())
+  if (!pcie_subsystem_init()) {
     console_puts("\nUNABLE TO INITIALISE PCIE BUS!\n");
+  } else {
+    // PCIe and VL805 firmware are ready.
+    // Install the persistent xHCI DMA structures.
+    console_puts("Configuring USB subsystem... ");
 
+    xhci_configure_info_t configure_info;
+    xhci_configure_result_t configure_result =
+        xhci_configure(&configure_info);
+
+    if (configure_result != XHCI_CONFIGURE_OK) {
+      console_puts("FAILED (configuration result ");
+      console_putu32((uint32_t)configure_result);
+      console_puts(").\n");
+    } else {
+      console_puts("OK.\n");
+
+      // Enable PCI bus mastering and start xHCI.
+      // This operation verifies that the controller
+      // transitions from halted to running.
+      console_puts("Starting USB subsystem... ");
+
+      xhci_start_info_t start_info;
+      xhci_start_result_t start_result = xhci_start(&start_info);
+
+      if (start_result != XHCI_START_OK) {
+        console_puts("FAILED (start result ");
+        console_putu32((uint32_t)start_result);
+        console_puts(").\n");
+      } else {
+        console_puts("OK.\n");
+      }
+    }
+  }
+
+  // USB failure is non-fatal. Retain the diagnostic
+  // console even if the controller cannot start.
   console_puts("\nOrgOS interactive console.\n");
   console_run();
 }
