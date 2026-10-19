@@ -1259,9 +1259,57 @@ static void cmd_usb_protocols(void) {
   console_putc('\n');
 }
 
+static void cmd_usb_portreset(void) {
+  xhci_port_reset_info_t info;
+  console_puts("Resetting USB 2.0 root port 1...\n");
+  xhci_port_reset_result_t status = xhci_port_reset(1U, &info);
+  console_puts("  PORTSC before : 0x");
+  console_puthex(info.before, 8);
+  console_putc('\n');
+  console_puts("  PORTSC after  : 0x");
+  console_puthex(info.after, 8);
+  console_putc('\n');
+  console_puts("  USBSTS        : 0x");
+  console_puthex(info.controller_status, 8);
+  console_putc('\n');
+  console_puts("  Elapsed       : ");
+  console_putu32((uint32_t)info.elapsed_us);
+  console_puts(" us\n");
+  switch (status) {
+    case XHCI_PORT_RESET_OK:
+      console_puts("USB port reset: PASS\n");
+      break;
+    case XHCI_PORT_RESET_NOT_RUNNING:
+      console_puts("FAILED: xHCI controller is not running.\n");
+      break;
+    case XHCI_PORT_RESET_UNAVAILABLE:
+      console_puts("FAILED: root port unavailable.\n");
+      break;
+    case XHCI_PORT_RESET_DISCONNECTED:
+      console_puts("FAILED: no device connected.\n");
+      break;
+    case XHCI_PORT_RESET_NOT_POWERED:
+      console_puts("FAILED: port power disabled.\n");
+      break;
+    case XHCI_PORT_RESET_ALREADY_ENABLED:
+      console_puts("Port already enabled; reset not required.\n");
+      break;
+    case XHCI_PORT_RESET_TIMEOUT:
+      console_puts("FAILED: port reset timed out.\n");
+      break;
+    case XHCI_PORT_RESET_FAILED:
+      console_puts("FAILED: port did not become enabled.\n");
+      break;
+  }
+}
+
 static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
+  if (next_word_is(&args, "portreset") && end_of_args(args)) {
+    cmd_usb_portreset();
+    return;
+  }
   if (next_word_is(&args, "protocols") && end_of_args(args)) {
     cmd_usb_protocols();
     return;
@@ -1293,7 +1341,8 @@ static void cmd_usb(const char *args) {
 
   if (!end_of_args(args)) {
     console_puts(
-    "Usage: usb [state | dma | ready | inspect | noops | ports | protocols]\n");
+    "Usage: usb [state | dma | ready | inspect | noops | ports | protocols |"
+    " portreset]\n");
     return;
   }
 

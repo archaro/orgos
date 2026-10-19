@@ -76,6 +76,7 @@
 #define XHCI_RESET_TIMEOUT_US  1000000ULL
 #define XHCI_READY_TIMEOUT_US  1000000ULL
 #define XHCI_START_TIMEOUT_US 1000000ULL
+#define XHCI_PORT_RESET_TIMEOUT_US 1000000ULL
 
 static xhci_dma_t controller_dma;
 static bool controller_configured;
@@ -238,6 +239,87 @@ bool xhci_port_read(uint8_t number, xhci_port_t *port) {
   port->config_error_change = (value & XHCI_PORT_CEC) != 0;
 
   return true;
+}
+
+xhci_port_reset_result_t xhci_port_reset(
+    uint8_t number, xhci_port_reset_info_t *result) {
+
+  if (!result)
+    return XHCI_PORT_RESET_UNAVAILABLE;
+
+  *result = (xhci_port_reset_info_t){0};
+
+  if (!controller_running || !controller_verified)
+    return XHCI_PORT_RESET_NOT_RUNNING;
+
+  if (!pcie_xhci_ready() || !pcie_xhci_bar_valid())
+    return XHCI_PORT_RESET_UNAVAILABLE;
+
+  xhci_info_t info;
+  if (!xhci_probe(&info))
+    return XHCI_PORT_RESET_UNAVAILABLE;
+
+  // Initially support only the internal USB 2.0 hub on Port 1.
+  // We will generalise port reset once enumeration is working.
+  if (number != 1U || number > info.max_ports)
+    return XHCI_PORT_RESET_UNAVAILABLE;
+
+  uint32_t op = info.capability_length;
+  uint32_t usbcmd = xhci_read(op + XHCI_USBCMD);
+  uint32_t usbsts = xhci_read(op + XHCI_USBSTS);
+  if (!(usbcmd & XHCI_CMD_RUN) ||
+      (usbsts & (XHCI_STS_HALTED | XHCI_STS_CNR | XHCI_STS_HOST_ERROR)))
+    return XHCI_PORT_RESET_NOT_RUNNING;
+
+  uint32_t offset = op + XHCI_PORTSC_BASE +
+      (uint32_t)(number - 1U) * XHCI_PORT_STRIDE;
+
+  result->before = xhci_read(offset);
+  result->after = result->before;
+  result->controller_status = usbsts;
+
+  if (!(result->before & XHCI_PORT_CCS))
+    return XHCI_PORT_RESET_DISCONNECTED;
+
+  if (!(result->before & XHCI_PORT_PP))
+    return XHCI_PORT_RESET_NOT_POWERED;
+
+  if (result->before & XHCI_PORT_PED)
+    return XHCI_PORT_RESET_ALREADY_ENABLED;
+
+  // Preserve writable configuration fields only. Status-change
+  // bits are write-one-to-clear and must not be copied back.
+  // LWS remains zero, so the existing link state is not written.
+  uint32_t writable = XHCI_PORT_PP | (3U << 14) | (7U << 25);
+  uint32_t value = (result->before & writable) | XHCI_PORT_PR;
+  uint64_t started = timer_now_us();
+
+  // Set Port Reset. Hardware clears PR when reset completes.
+  xhci_write(offset, value);
+  __asm__ volatile("dsb sy" ::: "memory");
+
+  while (timer_now_us() - started < XHCI_PORT_RESET_TIMEOUT_US) {
+    uint32_t current = xhci_read(offset);
+    uint32_t status = xhci_read(op + XHCI_USBSTS);
+    result->after = current;
+    result->controller_status = status;
+    result->elapsed_us = timer_now_us() - started;
+    if (status & (XHCI_STS_HALTED | XHCI_STS_HOST_ERROR))
+      return XHCI_PORT_RESET_FAILED;
+    if (!(current & XHCI_PORT_CCS))
+      return XHCI_PORT_RESET_DISCONNECTED;
+    if (!(current & XHCI_PORT_PR)) {
+      if (current & XHCI_PORT_PED)
+        return XHCI_PORT_RESET_OK;
+      return XHCI_PORT_RESET_FAILED;
+    }
+    timer_delay_ms(1);
+  }
+  result->after = xhci_read(offset);
+  result->controller_status = xhci_read(op + XHCI_USBSTS);
+  result->elapsed_us = timer_now_us() - started;
+
+  return XHCI_PORT_RESET_TIMEOUT;
 }
 
 #define XHCI_RING_TRBS 256U

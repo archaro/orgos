@@ -51,6 +51,27 @@ typedef struct {
 bool xhci_port_count(uint8_t *count);
 bool xhci_port_read(uint8_t number, xhci_port_t *port);
 
+typedef enum {
+  XHCI_PORT_RESET_OK,
+  XHCI_PORT_RESET_NOT_RUNNING,
+  XHCI_PORT_RESET_UNAVAILABLE,
+  XHCI_PORT_RESET_DISCONNECTED,
+  XHCI_PORT_RESET_NOT_POWERED,
+  XHCI_PORT_RESET_ALREADY_ENABLED,
+  XHCI_PORT_RESET_TIMEOUT,
+  XHCI_PORT_RESET_FAILED
+} xhci_port_reset_result_t;
+
+typedef struct {
+  uint32_t before;
+  uint32_t after;
+  uint32_t controller_status;
+  uint64_t elapsed_us;
+} xhci_port_reset_info_t;
+
+xhci_port_reset_result_t xhci_port_reset(
+    uint8_t number, xhci_port_reset_info_t *result);
+
 typedef struct {
   uint64_t parameter;
   uint32_t status;
