@@ -1274,7 +1274,7 @@ static void cmd_usb_noop(void) {
       return;
     case XHCI_NOOP_ALREADY_SUBMITTED:
       console_puts(
-          "No Op already submitted this boot.\n");
+          "Command ring blocked by an outstanding or failed command.\n");
       return;
     case XHCI_NOOP_UNAVAILABLE:
       console_puts("xHCI unavailable.\n");
@@ -1309,7 +1309,9 @@ static void cmd_usb_noop(void) {
   console_puts(" us\n");
   switch (status) {
     case XHCI_NOOP_OK:
-      console_puts("\nNo Op Command: PASS\n");
+      console_puts("\nNo Op Command: PASS (");
+      console_putu32(info.command_number);
+      console_puts(")\n");
       break;
     case XHCI_NOOP_CACHE_FAILED:
       console_puts("\nFAILED: cache maintenance.\n");
@@ -1329,9 +1331,36 @@ static void cmd_usb_noop(void) {
   }
 }
 
+static void cmd_usb_noops(void) {
+  const unsigned int count = 600U;
+  console_puts("Executing 600 sequential No Op commands...\n");
+  for (unsigned int i = 0; i < count; i++) {
+    xhci_noop_info_t info;
+    xhci_noop_result_t status = xhci_noop(&info);
+    if (status != XHCI_NOOP_OK) {
+      console_puts("FAILED at command ");
+      console_putu32(i + 1U);
+      console_puts(" (result ");
+      console_putu32((uint32_t)status);
+      console_puts(").\n");
+      return;
+    }
+    if ((i + 1U) % 100U == 0) {
+      console_puts("  Completed ");
+      console_putu32(i + 1U);
+      console_putc('\n');
+    }
+  }
+  console_puts("All 600 commands completed successfully.\n");
+}
+
 static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
+  if (next_word_is(&args, "noops") && end_of_args(args)) {
+    cmd_usb_noops();
+    return;
+  }
   if (next_word_is(&args, "noop") && end_of_args(args)) {
     cmd_usb_noop();
     return;
@@ -1367,7 +1396,7 @@ static void cmd_usb(const char *args) {
 
   if (!end_of_args(args)) {
     console_puts(
-    "Usage: usb [state | dma | ready | inspect | reset | configure | start | noop]\n");
+    "Usage: usb [state | dma | ready | inspect | reset | configure | start | noop | noops]\n");
     return;
   }
 

@@ -141,6 +141,7 @@ typedef struct {
   uint32_t completion_code;
   uint32_t event_type;
   uint64_t elapsed_us;
+  uint32_t command_number;
 } xhci_noop_info_t;
 
 xhci_noop_result_t xhci_noop( xhci_noop_info_t *result);
