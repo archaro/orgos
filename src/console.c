@@ -1544,9 +1544,230 @@ static void cmd_usb_descriptor(void) {
   console_puts("Device descriptor read: PASS\n");
 }
 
+static uint16_t usb_u16(const uint8_t *data) {
+  return (uint16_t)data[0] | ((uint16_t)data[1] << 8);
+}
+
+static bool usb_show_configuration(const uint8_t *data,
+    unsigned int length) {
+  unsigned int offset = 0;
+
+  while (offset < length) {
+    if (length - offset < 2U)
+      return false;
+    uint8_t size = data[offset];
+    uint8_t type = data[offset + 1U];
+    if (size < 2U || size > length - offset)
+      return false;
+    const uint8_t *d = &data[offset];
+    console_puts("  Descriptor at ");
+    console_putu32(offset);
+    console_puts(": type 0x");
+    console_puthex(type, 2);
+    console_puts(", length ");
+    console_putu32(size);
+    console_putc('\n');
+    switch (type) {
+      case 0x02U:  // Configuration
+        if (size < 9U)
+          return false;
+        console_puts("    Total length : ");
+        console_putu32(usb_u16(&d[2]));
+        console_putc('\n');
+        console_puts("    Interfaces   : ");
+        console_putu32(d[4]);
+        console_putc('\n');
+        console_puts("    Config value : ");
+        console_putu32(d[5]);
+        console_putc('\n');
+        console_puts("    Attributes   : 0x");
+        console_puthex(d[7], 2);
+        console_putc('\n');
+        console_puts("    Max power    : ");
+        console_putu32((uint32_t)d[8] * 2U);
+        console_puts(" mA\n");
+        break;
+      case 0x04U:  // Interface
+        if (size < 9U)
+          return false;
+        console_puts("    Interface    : ");
+        console_putu32(d[2]);
+        console_putc('\n');
+        console_puts("    Alternate    : ");
+        console_putu32(d[3]);
+        console_putc('\n');
+        console_puts("    Endpoints    : ");
+        console_putu32(d[4]);
+        console_putc('\n');
+        console_puts("    Class        : 0x");
+        console_puthex(d[5], 2);
+        console_putc('\n');
+        console_puts("    Subclass     : 0x");
+        console_puthex(d[6], 2);
+        console_putc('\n');
+        console_puts("    Protocol     : 0x");
+        console_puthex(d[7], 2);
+        console_putc('\n');
+        break;
+      case 0x05U:  // Endpoint
+        if (size < 7U)
+          return false;
+        console_puts("    Address      : 0x");
+        console_puthex(d[2], 2);
+        console_putc('\n');
+        console_puts("    Attributes   : 0x");
+        console_puthex(d[3], 2);
+        console_putc('\n');
+        console_puts("    Max packet   : ");
+        console_putu32(usb_u16(&d[4]) & 0x07ffU);
+        console_putc('\n');
+        console_puts("    Interval     : ");
+        console_putu32(d[6]);
+        console_putc('\n');
+        break;
+      default:
+        // Unknown descriptors are not malformed merely
+        // because this diagnostic does not decode them.
+        break;
+    }
+    offset += size;
+  }
+  return offset == length;
+}
+
+static void cmd_usb_hubinfo(void) {
+  xhci_control_info_t info;
+  xhci_setup_packet_t setup = {
+    .request_type = 0x80U,
+    .request = 0x06U,
+    .value = 0x0200U,
+    .index = 0U,
+    .length = 9U
+  };
+
+  console_puts("Reading USB configuration header...\n");
+  xhci_control_result_t status = xhci_control_in(&setup, &info);
+  if (status != XHCI_CONTROL_OK) {
+    console_puts("FAILED (transfer result ");
+    console_putu32((uint32_t)status);
+    console_puts(", completion ");
+    console_putu32(info.completion_code);
+    console_puts(").\n");
+    return;
+  }
+  if (info.length != 9U || info.data[0] < 9U ||
+      info.data[1] != 0x02U) {
+    console_puts("FAILED (invalid configuration header).\n");
+    return;
+  }
+  uint16_t total = usb_u16(&info.data[2]);
+  console_puts("  Configuration length: ");
+  console_putu32(total);
+  console_putc('\n');
+  if (total < 9U || total > XHCI_CONTROL_MAX_DATA) {
+    console_puts("Configuration exceeds supported transfer size.\n");
+    return;
+  }
+  // Request precisely the number of bytes reported
+  // by the Configuration Descriptor's wTotalLength.
+  setup.length = total;
+  console_puts("Reading complete configuration...\n");
+  status = xhci_control_in(&setup, &info);
+  if (status != XHCI_CONTROL_OK) {
+    console_puts("FAILED (transfer result ");
+    console_putu32((uint32_t)status);
+    console_puts(", completion ");
+    console_putu32(info.completion_code);
+    console_puts(").\n");
+    return;
+  }
+  if (info.length != total ||
+      !usb_show_configuration(info.data, info.length)) {
+    console_puts("FAILED (invalid configuration tree).\n");
+    return;
+  }
+  // Class-specific GET_DESCRIPTOR(Hub).
+  // bmRequestType A0 = Device-to-host, Class, Device.
+  // Descriptor type 29 = USB 2.0 Hub Descriptor.
+  setup.request_type = 0xa0U;
+  setup.value = 0x2900U;
+  setup.index = 0U;
+  setup.length = 9U;
+  console_puts("Reading USB 2.0 hub descriptor...\n");
+  status = xhci_control_in(&setup, &info);
+  if (status != XHCI_CONTROL_OK) {
+    console_puts("FAILED (transfer result ");
+    console_putu32((uint32_t)status);
+    console_puts(", completion ");
+    console_putu32(info.completion_code);
+    console_puts(").\n");
+    return;
+  }
+  const uint8_t *d = info.data;
+  if (info.length != 9U || d[0] != 9U || d[1] != 0x29U || d[2] == 0U) {
+    console_puts("FAILED (unexpected hub descriptor layout).\n");
+    return;
+  }
+  uint16_t characteristics = usb_u16(&d[3]);
+  console_puts("USB 2.0 Hub Descriptor:\n");
+  console_puts("  Raw bytes       :");
+  for (unsigned int i = 0; i < info.length; i++) {
+    console_putc(' ');
+    console_puthex(d[i], 2);
+  }
+  console_putc('\n');
+  console_puts("  Downstream ports: ");
+  console_putu32(d[2]);
+  console_putc('\n');
+  console_puts("  Characteristics : 0x");
+  console_puthex(characteristics, 4);
+  console_putc('\n');
+  console_puts("  Power switching : ");
+  switch (characteristics & 3U) {
+    case 0U:
+      console_puts("Ganged\n");
+      break;
+    case 1U:
+      console_puts("Individual ports\n");
+      break;
+    default:
+      console_puts("No power switching / reserved\n");
+      break;
+  }
+  console_puts("  Overcurrent     : ");
+  switch ((characteristics >> 3) & 3U) {
+    case 0U:
+      console_puts("Global\n");
+      break;
+    case 1U:
+      console_puts("Per-port\n");
+      break;
+    default:
+      console_puts("Not reported / reserved\n");
+      break;
+  }
+  console_puts("  Power-on delay  : ");
+  console_putu32((uint32_t)d[5] * 2U);
+  console_puts(" ms\n");
+  console_puts("  Hub controller  : ");
+  console_putu32(d[6]);
+  console_puts(" mA\n");
+  console_puts("  Removable bitmap: 0x");
+  console_puthex(d[7], 2);
+  console_putc('\n');
+  console_puts("  Power-mask byte : 0x");
+  console_puthex(d[8], 2);
+  console_putc('\n');
+  console_puts("Hub descriptor read: PASS\n");
+}
+
 static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
+  if (next_word_is(&args, "hubinfo") && end_of_args(args)) {
+    cmd_usb_hubinfo();
+    return;
+  }
   if (next_word_is(&args, "descriptor") && end_of_args(args)) {
     cmd_usb_descriptor();
     return;
