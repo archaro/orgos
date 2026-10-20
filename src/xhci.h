@@ -255,6 +255,36 @@ typedef struct {
 xhci_slot_result_t xhci_enable_slot(xhci_slot_info_t *result);
 
 typedef enum {
+  XHCI_DEVICE_OK,
+  XHCI_DEVICE_NOT_READY,
+  XHCI_DEVICE_ALREADY_PREPARED,
+  XHCI_DEVICE_ALLOCATION_FAILED,
+  XHCI_DEVICE_DMA_FAILED,
+  XHCI_DEVICE_VERIFY_FAILED
+} xhci_device_result_t;
+
+typedef struct {
+  uint8_t slot_id;
+  uint8_t root_port;
+  uint8_t speed;
+  uint8_t context_size;
+  uint16_t max_packet_size;
+  uint64_t input_context;
+  uint64_t output_context;
+  uint64_t ep0_ring;
+  uint64_t dcbaa_entry;
+  uint32_t input_add_flags;
+  uint32_t slot_dword0;
+  uint32_t slot_dword1;
+  uint32_t ep0_dword1;
+  uint32_t ep0_dword2;
+  uint32_t ep0_dword3;
+} xhci_device_info_t;
+
+xhci_device_result_t xhci_device_prepare(xhci_device_info_t *result);
+bool xhci_device_get_info(xhci_device_info_t *result);
+
+typedef enum {
   XHCI_NOOP_OK,
   XHCI_NOOP_NOT_RUNNING,
   XHCI_NOOP_ALREADY_SUBMITTED,

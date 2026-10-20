@@ -78,6 +78,15 @@
 #define XHCI_START_TIMEOUT_US 1000000ULL
 #define XHCI_PORT_RESET_TIMEOUT_US 1000000ULL
 
+typedef struct {
+  dma_buffer_t input;
+  dma_buffer_t output;
+  dma_buffer_t ep0_ring;
+  bool prepared;
+  xhci_device_info_t info;
+} xhci_device_t;
+
+static xhci_device_t internal_hub;
 static xhci_dma_t controller_dma;
 static bool controller_configured;
 static bool controller_verified;
@@ -1346,6 +1355,169 @@ xhci_slot_result_t xhci_enable_slot(xhci_slot_info_t *result) {
 
   internal_hub_slot = completion.slot_id;
   return XHCI_SLOT_OK;
+}
+
+#define XHCI_CONTEXT_SIZE_FLAG (1U << 2)
+#define XHCI_EP0_TYPE_CONTROL 4U
+#define XHCI_EP0_MAX_PACKET 64U
+
+static void xhci_device_release_partial(void) {
+  if (internal_hub.ep0_ring.pages)
+    dma_free(&internal_hub.ep0_ring);
+
+  if (internal_hub.output.pages)
+    dma_free(&internal_hub.output);
+
+  if (internal_hub.input.pages)
+    dma_free(&internal_hub.input);
+}
+
+bool xhci_device_get_info(xhci_device_info_t *result) {
+  if (!result || !internal_hub.prepared)
+    return false;
+
+  *result = internal_hub.info;
+  return true;
+}
+
+xhci_device_result_t xhci_device_prepare(xhci_device_info_t *result) {
+  if (!result)
+    return XHCI_DEVICE_NOT_READY;
+
+  *result = (xhci_device_info_t){0};
+
+  if (internal_hub.prepared)
+    return XHCI_DEVICE_ALREADY_PREPARED;
+
+  if (!controller_running || !controller_verified ||
+      internal_hub_slot == 0)
+    return XHCI_DEVICE_NOT_READY;
+
+  xhci_info_t controller;
+  xhci_port_t port;
+  if (!xhci_probe(&controller) ||
+      !xhci_port_read(1U, &port) ||
+      !port.connected || !port.enabled || !port.powered ||
+      port.resetting || port.speed != 3U ||
+      internal_hub_slot > controller.max_slots)
+    return XHCI_DEVICE_NOT_READY;
+
+  uint32_t hccparams = xhci_read(XHCI_HCCPARAMS1);
+  uint32_t context_size =
+      (hccparams & XHCI_CONTEXT_SIZE_FLAG) ? 64U : 32U;
+  // The input context has an additional control context.
+  uint32_t input_size = 34U * context_size;
+  uint32_t output_size = 33U * context_size;
+
+  if (!dma_alloc(input_size, 64U, &internal_hub.input))
+    goto allocation_failed;
+
+  if (!dma_alloc(output_size, 64U, &internal_hub.output))
+    goto allocation_failed;
+
+  if (!dma_alloc(PAGE_SIZE, 64U, &internal_hub.ep0_ring))
+    goto allocation_failed;
+
+  // Endpoint 0 uses the same 256-TRB ring format
+  // as the controller's command ring.
+  xhci_trb_t *ring = internal_hub.ep0_ring.virtual;
+  xhci_trb_t *link = &ring[XHCI_RING_TRBS - 1U];
+  link->parameter = internal_hub.ep0_ring.bus;
+  link->status = 0;
+  link->control = (XHCI_TRB_LINK << XHCI_TRB_TYPE_SHIFT) |
+      XHCI_TRB_TOGGLE_CYCLE | XHCI_TRB_CYCLE;
+
+  // Context offsets are measured in context entries,
+  // not necessarily in 32-byte units.
+  uint32_t *control = internal_hub.input.virtual;
+  uint32_t *slot = (uint32_t *)((uint8_t *)control + context_size);
+  uint32_t *ep0 = (uint32_t *)((uint8_t *)slot + context_size);
+  // Input Control Context:
+  // Add Context flags: A0 (Slot) and A1 (EP0).
+  control[1] = 0x00000003U;
+  // Slot Context DW0:
+  // Context Entries = 1, Speed = High Speed (3).
+  slot[0] = (1U << 27) | (3U << 20);
+  // Slot Context DW1:
+  // Root Hub Port Number = 1.
+  slot[1] = 1U << 16;
+  // Endpoint 0 Context DW1:
+  // Maximum Packet Size = 64.
+  // Endpoint Type = 4 (Control).
+  // Error Count = 3.
+  ep0[1] = (XHCI_EP0_MAX_PACKET << 16) |
+      (XHCI_EP0_TYPE_CONTROL << 3) | (3U << 1);
+  // Endpoint 0 Context DW2/DW3:
+  // Dequeue pointer and initial DCS = 1.
+  uint64_t dequeue = internal_hub.ep0_ring.bus | 1ULL;
+  ep0[2] = (uint32_t)dequeue;
+  ep0[3] = (uint32_t)(dequeue >> 32);
+  // Endpoint 0 Context DW4: Average TRB Length.
+  // Control endpoints use 8 bytes (xHCI section 6.2.3).
+  ep0[4] = 8U;
+  // Return inspection values before transferring DMA ownership.
+  result->slot_id = internal_hub_slot;
+  result->root_port = 1U;
+  result->speed = port.speed;
+  result->context_size = (uint8_t)context_size;
+  result->max_packet_size = XHCI_EP0_MAX_PACKET;
+  result->input_context = internal_hub.input.bus;
+  result->output_context = internal_hub.output.bus;
+  result->ep0_ring = internal_hub.ep0_ring.bus;
+  result->input_add_flags = control[1];
+  result->slot_dword0 = slot[0];
+  result->slot_dword1 = slot[1];
+  result->ep0_dword1 = ep0[1];
+  result->ep0_dword2 = ep0[2];
+  result->ep0_dword3 = ep0[3];
+
+  // The input context and ring will be read by the controller.
+  // The output context will be written by the controller.
+  if (!dma_begin_device(&internal_hub.input, DMA_TO_DEVICE))
+    goto dma_failed;
+
+  if (!dma_begin_device(&internal_hub.output, DMA_BIDIRECTIONAL))
+    goto dma_failed;
+
+  if (!dma_begin_device(&internal_hub.ep0_ring, DMA_BIDIRECTIONAL))
+    goto dma_failed;
+
+  // DCBAA is already device-owned. Update only the relevant
+  // entry, then clean its cache line for PCIe visibility.
+  uint64_t *dcbaa = controller_dma.dcbaa.virtual;
+  dcbaa[internal_hub_slot] = internal_hub.output.bus;
+
+  cache_info_t cache;
+  if (!cache_get_info(&cache) || cache.data_line_size == 0 ||
+      cache.data_line_size > PAGE_SIZE ||
+      (cache.data_line_size & (cache.data_line_size - 1U)))
+    goto published_failed;
+
+  uintptr_t address = (uintptr_t)&dcbaa[internal_hub_slot];
+  address &= ~(uintptr_t)(cache.data_line_size - 1U);
+  if (!cache_clean((const void *)address, cache.data_line_size))
+    goto published_failed;
+
+  __asm__ volatile("dsb sy" ::: "memory");
+
+  result->dcbaa_entry = dcbaa[internal_hub_slot];
+  internal_hub.info = *result;
+  internal_hub.prepared = true;
+  return XHCI_DEVICE_OK;
+
+published_failed:
+  // The DCBAA entry may already be visible to the controller.
+  // Preserve all DMA allocations for safe diagnosis.
+  return XHCI_DEVICE_DMA_FAILED;
+
+dma_failed:
+  // Keep handed-off allocations alive. This is conservative;
+  // cleanup can be generalised with the device lifecycle.
+  return XHCI_DEVICE_DMA_FAILED;
+
+allocation_failed:
+  xhci_device_release_partial();
+  return XHCI_DEVICE_ALLOCATION_FAILED;
 }
 
 xhci_noop_result_t xhci_noop(xhci_noop_info_t *result) {

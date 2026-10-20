@@ -1357,9 +1357,69 @@ static void cmd_usb_enableslot(void) {
   }
 }
 
+static void cmd_usb_contexts(void) {
+  xhci_device_info_t info;
+
+  if (!xhci_device_get_info(&info)) {
+    xhci_device_result_t status = xhci_device_prepare(&info);
+    if (status != XHCI_DEVICE_OK) {
+      console_puts("Device context preparation failed: ");
+      console_putu32((uint32_t)status);
+      console_putc('\n');
+      return;
+    }
+  }
+  console_puts("Internal USB hub device contexts:\n");
+  console_puts("  Slot ID          : ");
+  console_putu32(info.slot_id);
+  console_putc('\n');
+  console_puts("  Root port        : ");
+  console_putu32(info.root_port);
+  console_putc('\n');
+  console_puts("  Context size     : ");
+  console_putu32(info.context_size);
+  console_puts(" bytes\n");
+  console_puts("  EP0 max packet   : ");
+  console_putu32(info.max_packet_size);
+  console_puts(" bytes\n");
+  console_puts("  Input context    : 0x");
+  console_puthex64(info.input_context);
+  console_putc('\n');
+  console_puts("  Output context   : 0x");
+  console_puthex64(info.output_context);
+  console_putc('\n');
+  console_puts("  EP0 transfer ring: 0x");
+  console_puthex64(info.ep0_ring);
+  console_putc('\n');
+  console_puts("  DCBAA slot entry : 0x");
+  console_puthex64(info.dcbaa_entry);
+  console_putc('\n');
+  console_puts("  Add flags        : 0x");
+  console_puthex(info.input_add_flags, 8);
+  console_putc('\n');
+  console_puts("  Slot DW0         : 0x");
+  console_puthex(info.slot_dword0, 8);
+  console_putc('\n');
+  console_puts("  Slot DW1         : 0x");
+  console_puthex(info.slot_dword1, 8);
+  console_putc('\n');
+  console_puts("  EP0 DW1          : 0x");
+  console_puthex(info.ep0_dword1, 8);
+  console_putc('\n');
+  console_puts("  EP0 dequeue      : 0x");
+  uint64_t dequeue = ((uint64_t)info.ep0_dword3 << 32) | info.ep0_dword2;
+  console_puthex64(dequeue);
+  console_putc('\n');
+  console_puts("Device contexts: PREPARED\n");
+}
+
 static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
+  if (next_word_is(&args, "contexts") && end_of_args(args)) {
+    cmd_usb_contexts();
+    return;
+  }
   if (next_word_is(&args, "enableslot") && end_of_args(args)) {
     cmd_usb_enableslot();
     return;
@@ -1400,7 +1460,7 @@ static void cmd_usb(const char *args) {
   if (!end_of_args(args)) {
     console_puts(
     "Usage: usb [state | dma | ready | inspect | noops | ports | protocols |"
-    " events | enableslot]\n");
+    " events | enableslot | contexts]\n");
     return;
   }
 
