@@ -228,12 +228,31 @@ typedef struct {
   uint32_t controller_status;
   uint32_t completion_code;
   uint32_t event_type;
-  uint64_t elapsed_us;
   uint32_t command_number;
+  uint64_t elapsed_us;
+  uint8_t slot_id;
 } xhci_command_completion_t;
 
 xhci_command_result_t xhci_command_submit(
     const xhci_trb_t *command, xhci_command_completion_t *completion);
+
+typedef enum {
+  XHCI_SLOT_OK,
+  XHCI_SLOT_ALREADY_REQUESTED,
+  XHCI_SLOT_NOT_READY,
+  XHCI_SLOT_COMMAND_FAILED,
+  XHCI_SLOT_INVALID_ID
+} xhci_slot_result_t;
+
+typedef struct {
+  uint8_t slot_id;
+  uint8_t root_port;
+  uint32_t completion_code;
+  uint32_t controller_status;
+  xhci_command_result_t command_result;
+} xhci_slot_info_t;
+
+xhci_slot_result_t xhci_enable_slot(xhci_slot_info_t *result);
 
 typedef enum {
   XHCI_NOOP_OK,

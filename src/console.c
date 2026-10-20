@@ -1389,9 +1389,57 @@ static void cmd_usb_portclear(void) {
   }
 }
 
+static void cmd_usb_enableslot(void) {
+  xhci_slot_info_t info;
+  xhci_slot_result_t status = xhci_enable_slot(&info);
+  console_puts("xHCI Enable Slot:\n");
+  switch (status) {
+    case XHCI_SLOT_OK:
+      console_puts("  Root port       : ");
+      console_putu32(info.root_port);
+      console_putc('\n');
+      console_puts("  Allocated slot  : ");
+      console_putu32(info.slot_id);
+      console_putc('\n');
+      console_puts("  Completion code : ");
+      console_putu32(info.completion_code);
+      console_putc('\n');
+      console_puts("Enable Slot: PASS\n");
+      break;
+    case XHCI_SLOT_ALREADY_REQUESTED:
+      console_puts("Enable Slot already attempted this boot.\n");
+      break;
+    case XHCI_SLOT_NOT_READY:
+      console_puts("Root port or controller is not ready.\n");
+      break;
+    case XHCI_SLOT_COMMAND_FAILED:
+      console_puts("Enable Slot command failed.\n");
+      console_puts("  Transport result: ");
+      console_putu32((uint32_t)info.command_result);
+      console_putc('\n');
+      console_puts("  Completion code : ");
+      console_putu32(info.completion_code);
+      console_putc('\n');
+      console_puts("  Controller status: 0x");
+      console_puthex(info.controller_status, 8);
+      console_putc('\n');
+      break;
+    case XHCI_SLOT_INVALID_ID:
+      console_puts("Enable Slot returned an invalid Slot ID.\n");
+      console_puts("  Slot ID: ");
+      console_putu32(info.slot_id);
+      console_putc('\n');
+      break;
+  }
+}
+
 static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
+  if (next_word_is(&args, "enableslot") && end_of_args(args)) {
+    cmd_usb_enableslot();
+    return;
+  }
   if (next_word_is(&args, "portclear") && end_of_args(args)) {
     cmd_usb_portclear();
     return;
@@ -1436,7 +1484,7 @@ static void cmd_usb(const char *args) {
   if (!end_of_args(args)) {
     console_puts(
     "Usage: usb [state | dma | ready | inspect | noops | ports | protocols |"
-    " portreset | portclear | events]\n");
+    " portreset | portclear | events | enableslot]\n");
     return;
   }
 

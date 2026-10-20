@@ -92,6 +92,8 @@ static uint32_t completed_commands;
 static bool command_outstanding;
 static bool command_ring_failed;
 static xhci_event_stats_t event_stats;
+static bool slot_requested;
+static uint8_t internal_hub_slot;
 
 static uint32_t xhci_read(uint32_t offset) {
   return mmio_read((uintptr_t)(XHCI_BASE + offset));
@@ -386,10 +388,11 @@ xhci_port_reset_result_t xhci_port_reset(
 }
 
 #define XHCI_RING_TRBS 256U
-#define XHCI_TRB_LINK  6U
-#define XHCI_TRB_TYPE_SHIFT 10U
 #define XHCI_TRB_CYCLE (1U << 0)
 #define XHCI_TRB_TOGGLE_CYCLE (1U << 1)
+#define XHCI_TRB_LINK  6U
+#define XHCI_TRB_ENABLE_SLOT 9U
+#define XHCI_TRB_TYPE_SHIFT 10U
 #define XHCI_TRB_NOOP_CMD       23U
 #define XHCI_TRB_COMMAND_EVENT  33U
 #define XHCI_TRB_PORT_STATUS_EVENT 34U
@@ -1242,6 +1245,7 @@ xhci_command_result_t xhci_command_submit(const xhci_trb_t *command,
       result->event_control = event.control;
       result->event_type = event.type;
       result->completion_code = event.completion_code;
+      result->slot_id = event.slot_id;
       result->elapsed_us = timer_now_us() - started;
       result->controller_status = xhci_read(op + XHCI_USBSTS);
 
@@ -1289,6 +1293,59 @@ xhci_command_result_t xhci_command_submit(const xhci_trb_t *command,
   result->controller_status = xhci_read(op + XHCI_USBSTS);
   command_ring_failed = true;
   return XHCI_COMMAND_TIMEOUT;
+}
+
+xhci_slot_result_t xhci_enable_slot(xhci_slot_info_t *result) {
+  if (!result)
+    return XHCI_SLOT_NOT_READY;
+
+  *result = (xhci_slot_info_t){0};
+  result->root_port = 1U;
+  result->command_result = XHCI_COMMAND_UNAVAILABLE;
+
+  if (slot_requested)
+    return XHCI_SLOT_ALREADY_REQUESTED;
+
+  if (!controller_running || !controller_verified ||
+      command_outstanding || command_ring_failed)
+    return XHCI_SLOT_NOT_READY;
+
+  xhci_port_t port;
+  if (!xhci_port_read(1U, &port) || !port.connected || !port.enabled ||
+      !port.powered || port.resetting || port.speed != 3U)
+    return XHCI_SLOT_NOT_READY;
+
+  xhci_info_t controller;
+  if (!xhci_probe(&controller) || controller.max_slots == 0)
+    return XHCI_SLOT_NOT_READY;
+
+  // The USB 2.0 Supported Protocol capability reports Slot Type 0.
+  // All other Enable Slot command fields are zero.
+  xhci_trb_t command = {
+    .parameter = 0,
+    .status = 0,
+    .control = XHCI_TRB_ENABLE_SLOT << XHCI_TRB_TYPE_SHIFT
+  };
+
+  // Conservatively reserve this attempt. If completion is lost,
+  // another Enable Slot could allocate an additional device slot.
+  slot_requested = true;
+
+  xhci_command_completion_t completion;
+  xhci_command_result_t status = xhci_command_submit(&command, &completion);
+  result->command_result = status;
+  result->completion_code = completion.completion_code;
+  result->controller_status = completion.controller_status;
+  result->slot_id = completion.slot_id;
+
+  if (status != XHCI_COMMAND_OK)
+    return XHCI_SLOT_COMMAND_FAILED;
+
+  if (completion.slot_id == 0 || completion.slot_id > controller.max_slots)
+    return XHCI_SLOT_INVALID_ID;
+
+  internal_hub_slot = completion.slot_id;
+  return XHCI_SLOT_OK;
 }
 
 xhci_noop_result_t xhci_noop(xhci_noop_info_t *result) {
