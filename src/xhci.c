@@ -91,6 +91,7 @@ static unsigned int event_cycle = 1U;
 static uint32_t completed_commands;
 static bool command_outstanding;
 static bool command_ring_failed;
+static xhci_event_stats_t event_stats;
 
 static uint32_t xhci_read(uint32_t offset) {
   return mmio_read((uintptr_t)(XHCI_BASE + offset));
@@ -241,6 +242,68 @@ bool xhci_port_read(uint8_t number, xhci_port_t *port) {
   return true;
 }
 
+xhci_port_clear_result_t xhci_port_clear(
+    uint8_t number, xhci_port_clear_info_t *result) {
+
+  if (!result)
+    return XHCI_PORT_CLEAR_UNAVAILABLE;
+
+  *result = (xhci_port_clear_info_t){0};
+
+  if (!controller_running || !controller_verified)
+    return XHCI_PORT_CLEAR_NOT_RUNNING;
+
+  if (!pcie_xhci_ready() || !pcie_xhci_bar_valid())
+    return XHCI_PORT_CLEAR_UNAVAILABLE;
+
+  xhci_info_t info;
+  if (!xhci_probe(&info) || number != 1U || number > info.max_ports)
+    return XHCI_PORT_CLEAR_UNAVAILABLE;
+
+  uint32_t op = info.capability_length;
+  uint32_t usbcmd = xhci_read(op + XHCI_USBCMD);
+  uint32_t usbsts = xhci_read(op + XHCI_USBSTS);
+  if (!(usbcmd & XHCI_CMD_RUN) ||
+      (usbsts & (XHCI_STS_HALTED | XHCI_STS_CNR | XHCI_STS_HOST_ERROR)))
+    return XHCI_PORT_CLEAR_NOT_RUNNING;
+
+  uint32_t offset = op + XHCI_PORTSC_BASE +
+      (uint32_t)(number - 1U) * XHCI_PORT_STRIDE;
+
+  result->before = xhci_read(offset);
+  result->after = result->before;
+
+  if (result->before & XHCI_PORT_PR)
+    return XHCI_PORT_CLEAR_RESET_ACTIVE;
+
+  // The seven change flags occupy bits 17-23.
+  // Only bits currently set will be acknowledged.
+  const uint32_t changes = XHCI_PORT_CSC | XHCI_PORT_PEC |
+      XHCI_PORT_WRC | XHCI_PORT_OCC | XHCI_PORT_PRC |
+      XHCI_PORT_PLC | XHCI_PORT_CEC;
+
+  result->acknowledged = result->before & changes;
+
+  if (result->acknowledged == 0)
+    return XHCI_PORT_CLEAR_OK;
+
+  // Preserve ordinary RW fields. Never write back PED, PR,
+  // LWS or WPR; those bits have control side effects.
+  const uint32_t preserve = XHCI_PORT_PP | (3U << 14) | (7U << 25);
+  uint32_t value = (result->before & preserve) | result->acknowledged;
+
+  xhci_write(offset, value);
+  __asm__ volatile("dsb sy" ::: "memory");
+
+  result->after = xhci_read(offset);
+  // A concurrent hardware change could set a new flag here.
+  // Report the actual result rather than silently retrying.
+  if (result->after & result->acknowledged)
+    return XHCI_PORT_CLEAR_FAILED;
+
+  return XHCI_PORT_CLEAR_OK;
+}
+
 xhci_port_reset_result_t xhci_port_reset(
     uint8_t number, xhci_port_reset_info_t *result) {
 
@@ -329,6 +392,7 @@ xhci_port_reset_result_t xhci_port_reset(
 #define XHCI_TRB_TOGGLE_CYCLE (1U << 1)
 #define XHCI_TRB_NOOP_CMD       23U
 #define XHCI_TRB_COMMAND_EVENT  33U
+#define XHCI_TRB_PORT_STATUS_EVENT 34U
 #define XHCI_COMPLETION_SUCCESS 1U
 #define XHCI_COMMAND_TIMEOUT_US    1000000ULL
 
@@ -1006,6 +1070,87 @@ xhci_start_result_t xhci_start(xhci_start_info_t *result) {
   return XHCI_START_OK;
 }
 
+xhci_event_result_t xhci_event_poll(xhci_event_t *result) {
+  if (!result || !controller_running || !controller_verified)
+    return XHCI_EVENT_ERROR;
+
+  *result = (xhci_event_t){0};
+
+  if (controller_dma.event_ring.owner != DMA_OWNER_DEVICE)
+    return XHCI_EVENT_ERROR;
+
+  xhci_info_t info;
+  if (!xhci_probe(&info))
+    return XHCI_EVENT_ERROR;
+
+  cache_info_t cache;
+  if (!cache_get_info(&cache) || cache.data_line_size == 0 ||
+      cache.data_line_size > PAGE_SIZE ||
+      (cache.data_line_size & (cache.data_line_size - 1U)))
+    return XHCI_EVENT_ERROR;
+
+  xhci_trb_t *ring = (xhci_trb_t *)controller_dma.event_ring.virtual;
+  xhci_trb_t *trb = &ring[event_index];
+
+  size_t line = cache.data_line_size;
+  uintptr_t address = (uintptr_t)trb & ~(uintptr_t)(line - 1U);
+  if (!cache_invalidate((const void *)address, line))
+    return XHCI_EVENT_ERROR;
+
+  uint32_t control = trb->control;
+  if ((control & XHCI_TRB_CYCLE) != event_cycle)
+    return XHCI_EVENT_NONE;
+
+  result->parameter = trb->parameter;
+  result->status = trb->status;
+  result->control = control;
+  result->type = (uint8_t)((control >> XHCI_TRB_TYPE_SHIFT) & 0x3fU);
+  result->completion_code = (uint8_t)(result->status >> 24);
+  result->slot_id = (uint8_t)(control >> 24);
+
+  // Port Status Change Events report the port in parameter[31:24].
+  if (result->type == XHCI_TRB_PORT_STATUS_EVENT)
+    result->port_id = (uint8_t)(result->parameter >> 24);
+
+  event_index++;
+
+  if (event_index == XHCI_RING_TRBS) {
+    event_index = 0;
+    event_cycle ^= 1U;
+  }
+
+  uint64_t next = controller_dma.event_ring.bus +
+      (uint64_t)event_index * sizeof(xhci_trb_t);
+  uint32_t intr = info.runtime_offset + XHCI_INTR0_OFFSET;
+
+  // EHB is write-one-to-clear. The other ERDP reserved
+  // bits remain zero because the ring is TRB-aligned.
+  xhci_write64(intr + XHCI_ERDP_LO, next | (1ULL << 3));
+  __asm__ volatile("dsb sy" ::: "memory");
+
+  return XHCI_EVENT_READY;
+}
+
+bool xhci_event_record(const xhci_event_t *event) {
+  if (!event || event->type != XHCI_TRB_PORT_STATUS_EVENT)
+    return false;
+
+  event_stats.port_changes++;
+  event_stats.last_port = event->port_id;
+  event_stats.last_status = event->status;
+  event_stats.last_control = event->control;
+
+  return true;
+}
+
+bool xhci_event_get_stats(xhci_event_stats_t *stats) {
+  if (!stats)
+    return false;
+
+  *stats = event_stats;
+  return true;
+}
+
 xhci_command_result_t xhci_command_submit(const xhci_trb_t *command,
     xhci_command_completion_t *result) {
 
@@ -1050,13 +1195,10 @@ xhci_command_result_t xhci_command_submit(const xhci_trb_t *command,
 
   size_t line = cache.data_line_size;
   xhci_trb_t *commands = (xhci_trb_t *)controller_dma.command_ring.virtual;
-  xhci_trb_t *events = (xhci_trb_t *)controller_dma.event_ring.virtual;
   xhci_trb_t *trb = &commands[command_index];
-  xhci_trb_t *event = &events[event_index];
   uint64_t command_address = controller_dma.command_ring.bus +
       (uint64_t)command_index * sizeof(xhci_trb_t);
   uintptr_t command_line = (uintptr_t)trb & ~(uintptr_t)(line - 1U);
-  uintptr_t event_line = (uintptr_t)event & ~(uintptr_t)(line - 1U);
   result->command_address = command_address;
 
   // Copy the caller's command into the ring.
@@ -1074,68 +1216,68 @@ xhci_command_result_t xhci_command_submit(const xhci_trb_t *command,
   uint64_t started = timer_now_us();
   // Doorbell 0 selects the host-controller command ring.
   xhci_write(info.doorbell_offset, 0U);
+
   __asm__ volatile("dsb sy" ::: "memory");
-  while (timer_now_us() - started < XHCI_COMMAND_TIMEOUT_US) {
-    // The event ring belongs to the device. Never write to it.
-    if (!cache_invalidate((const void *)event_line, line)) {
+
+    while (timer_now_us() - started < XHCI_COMMAND_TIMEOUT_US) {
+    xhci_event_t event;
+    xhci_event_result_t status = xhci_event_poll(&event);
+
+    if (status == XHCI_EVENT_ERROR) {
       command_ring_failed = true;
       return XHCI_COMMAND_CACHE_ERROR;
     }
-    uint32_t control = event->control;
-    if ((control & XHCI_TRB_CYCLE) == event_cycle) {
-      result->event_parameter = event->parameter;
-      result->event_status = event->status;
-      result->event_control = control;
-      result->event_type = (control >> XHCI_TRB_TYPE_SHIFT) & 0x3fU;
-      result->completion_code = (result->event_status >> 24) & 0xffU;
+
+    if (status == XHCI_EVENT_READY) {
+      if (event.type == XHCI_TRB_PORT_STATUS_EVENT) {
+        if (!xhci_event_record(&event)) {
+          command_ring_failed = true;
+          return XHCI_COMMAND_BAD_EVENT;
+        }
+        continue;
+      }
+
+      result->event_parameter = event.parameter;
+      result->event_status = event.status;
+      result->event_control = event.control;
+      result->event_type = event.type;
+      result->completion_code = event.completion_code;
       result->elapsed_us = timer_now_us() - started;
       result->controller_status = xhci_read(op + XHCI_USBSTS);
-      // Consume the event and advance the dequeue pointer.
-      event_index++;
-      if (event_index == XHCI_RING_TRBS) {
-        event_index = 0;
-        event_cycle ^= 1U;
-      }
-      uint64_t next_event = controller_dma.event_ring.bus +
-          (uint64_t)event_index * sizeof(xhci_trb_t);
-      uint32_t intr = info.runtime_offset + XHCI_INTR0_OFFSET;
-      // Bit 3 acknowledges Event Handler Busy.
-      xhci_write64(intr + XHCI_ERDP_LO, next_event | (1ULL << 3));
 
-      __asm__ volatile("dsb sy" ::: "memory");
-
-      // A synchronous command must receive its own
-      // Command Completion Event.
-      if (result->event_type != XHCI_TRB_COMMAND_EVENT ||
-          result->event_parameter != command_address) {
+      if (event.type != XHCI_TRB_COMMAND_EVENT ||
+          event.parameter != command_address) {
         command_ring_failed = true;
         return XHCI_COMMAND_BAD_EVENT;
       }
-      if (result->completion_code != XHCI_COMPLETION_SUCCESS) {
+
+      if (event.completion_code != XHCI_COMPLETION_SUCCESS) {
         command_ring_failed = true;
         return XHCI_COMMAND_FAILED;
       }
+
       command_outstanding = false;
-      // The first completion after a wrap proves the
-      // controller has traversed the Link TRB.
+
       if (command_index == 0 && completed_commands != 0) {
         if (!xhci_command_link_cycle(command_cycle)) {
           command_ring_failed = true;
           return XHCI_COMMAND_CACHE_ERROR;
         }
       }
+
       command_index++;
       if (command_index == XHCI_RING_TRBS - 1U) {
         command_index = 0;
         command_cycle ^= 1U;
       }
+
       completed_commands++;
       result->command_number = completed_commands;
       return XHCI_COMMAND_OK;
     }
+
     uint32_t current_status = xhci_read(op + XHCI_USBSTS);
-    if (current_status &
-        (XHCI_STS_HALTED | XHCI_STS_HOST_ERROR)) {
+    if (current_status & (XHCI_STS_HALTED | XHCI_STS_HOST_ERROR)) {
       result->controller_status = current_status;
       result->elapsed_us = timer_now_us() - started;
       command_ring_failed = true;
@@ -1145,8 +1287,6 @@ xhci_command_result_t xhci_command_submit(const xhci_trb_t *command,
 
   result->elapsed_us = timer_now_us() - started;
   result->controller_status = xhci_read(op + XHCI_USBSTS);
-  // A timed-out command might still be in progress.
-  // Never reuse its ring entry without recovery.
   command_ring_failed = true;
   return XHCI_COMMAND_TIMEOUT;
 }

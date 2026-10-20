@@ -1303,9 +1303,103 @@ static void cmd_usb_portreset(void) {
   }
 }
 
+static void cmd_usb_events(void) {
+  unsigned int consumed = 0;
+
+  for (unsigned int i = 0; i < 256U; i++) {
+    xhci_event_t event;
+    xhci_event_result_t status = xhci_event_poll(&event);
+
+    if (status == XHCI_EVENT_ERROR) {
+      console_puts("Event ring read failed.\n");
+      return;
+    }
+
+    if (status == XHCI_EVENT_NONE)
+      break;
+
+    consumed++;
+
+    console_puts("Event type ");
+    console_putu32(event.type);
+    console_puts(", completion ");
+    console_putu32(event.completion_code);
+
+    if (event.type == 34U) {
+      console_puts(", port ");
+      console_putu32(event.port_id);
+    }
+
+    console_putc('\n');
+
+    if (!xhci_event_record(&event)) {
+      console_puts("Unhandled event encountered; stopping.\n");
+      return;
+    }
+  }
+
+  xhci_event_stats_t stats;
+  if (!xhci_event_get_stats(&stats)) {
+    console_puts("Unable to read event statistics.\n");
+    return;
+  }
+
+  console_puts("Events consumed: ");
+  console_putu32(consumed);
+  console_putc('\n');
+
+  console_puts("Port change events recorded: ");
+  console_putu32(stats.port_changes);
+  console_putc('\n');
+
+  console_puts("Last changed port: ");
+  console_putu32(stats.last_port);
+  console_putc('\n');
+}
+
+static void cmd_usb_portclear(void) {
+  xhci_port_clear_info_t info;
+  xhci_port_clear_result_t status = xhci_port_clear(1U, &info);
+  console_puts("USB root port 1 change acknowledgement:\n");
+  console_puts("  PORTSC before : 0x");
+  console_puthex(info.before, 8);
+  console_putc('\n');
+  console_puts("  Acknowledged  : 0x");
+  console_puthex(info.acknowledged, 8);
+  console_putc('\n');
+  console_puts("  PORTSC after  : 0x");
+  console_puthex(info.after, 8);
+  console_putc('\n');
+  switch (status) {
+    case XHCI_PORT_CLEAR_OK:
+      console_puts("Port change acknowledgement: PASS\n");
+      break;
+    case XHCI_PORT_CLEAR_NOT_RUNNING:
+      console_puts("FAILED: xHCI controller is not running.\n");
+      break;
+    case XHCI_PORT_CLEAR_UNAVAILABLE:
+      console_puts("FAILED: port unavailable.\n");
+      break;
+    case XHCI_PORT_CLEAR_RESET_ACTIVE:
+      console_puts("FAILED: port reset is active.\n");
+      break;
+    case XHCI_PORT_CLEAR_FAILED:
+      console_puts("FAILED: change flags remain set.\n");
+      break;
+  }
+}
+
 static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
+  if (next_word_is(&args, "portclear") && end_of_args(args)) {
+    cmd_usb_portclear();
+    return;
+  }
+  if (next_word_is(&args, "events") && end_of_args(args)) {
+    cmd_usb_events();
+    return;
+  }
   if (next_word_is(&args, "portreset") && end_of_args(args)) {
     cmd_usb_portreset();
     return;
@@ -1342,7 +1436,7 @@ static void cmd_usb(const char *args) {
   if (!end_of_args(args)) {
     console_puts(
     "Usage: usb [state | dma | ready | inspect | noops | ports | protocols |"
-    " portreset]\n");
+    " portreset | portclear | events]\n");
     return;
   }
 

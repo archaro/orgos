@@ -52,6 +52,23 @@ bool xhci_port_count(uint8_t *count);
 bool xhci_port_read(uint8_t number, xhci_port_t *port);
 
 typedef enum {
+  XHCI_PORT_CLEAR_OK,
+  XHCI_PORT_CLEAR_NOT_RUNNING,
+  XHCI_PORT_CLEAR_UNAVAILABLE,
+  XHCI_PORT_CLEAR_RESET_ACTIVE,
+  XHCI_PORT_CLEAR_FAILED
+} xhci_port_clear_result_t;
+
+typedef struct {
+  uint32_t before;
+  uint32_t after;
+  uint32_t acknowledged;
+} xhci_port_clear_info_t;
+
+xhci_port_clear_result_t xhci_port_clear(
+    uint8_t number, xhci_port_clear_info_t *result);
+
+typedef enum {
   XHCI_PORT_RESET_OK,
   XHCI_PORT_RESET_NOT_RUNNING,
   XHCI_PORT_RESET_UNAVAILABLE,
@@ -83,6 +100,33 @@ typedef struct {
   uint32_t size;
   uint32_t reserved;
 } xhci_erst_entry_t;
+
+typedef enum {
+  XHCI_EVENT_NONE,
+  XHCI_EVENT_READY,
+  XHCI_EVENT_ERROR
+} xhci_event_result_t;
+
+typedef struct {
+  uint64_t parameter;
+  uint32_t status;
+  uint32_t control;
+  uint8_t type;
+  uint8_t completion_code;
+  uint8_t slot_id;
+  uint8_t port_id;
+} xhci_event_t;
+
+typedef struct {
+  uint32_t port_changes;
+  uint8_t last_port;
+  uint32_t last_status;
+  uint32_t last_control;
+} xhci_event_stats_t;
+
+xhci_event_result_t xhci_event_poll(xhci_event_t *event);
+bool xhci_event_record(const xhci_event_t *event);
+bool xhci_event_get_stats(xhci_event_stats_t *stats);
 
 // Current implementation supports the 31 scratchpad
 // buffers reported by the Raspberry Pi 4B's VL805.
