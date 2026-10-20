@@ -14,8 +14,9 @@
 #include "cache.h"
 #include "dma.h"
 #include "pcie.h"
-#include "usb.h"
 #include "xhci.h"
+#include "usb.h"
+#include "usb_hub.h"
 #include "midi.h"
 
 #define CONSOLE_LINE_SIZE 256
@@ -1709,9 +1710,80 @@ static void cmd_usb_configure(void) {
     console_puts("Hub configuration: FAILED\n");
 }
 
+static void cmd_usb_hubports(void) {
+  console_puts("Internal USB hub downstream ports:\n");
+
+  for (uint8_t port = 1U; port <= 4U; port++) {
+    usb_hub_port_t info;
+    usb_hub_result_t result = usb_hub_port_status(port, &info);
+    console_puts("  Port ");
+    console_putu32(port);
+    console_puts(":\n");
+    if (result != USB_HUB_OK) {
+      console_puts("    FAILED (hub result ");
+      console_putu32((uint32_t)result);
+      console_puts(", transfer ");
+      console_putu32((uint32_t)info.transfer_result);
+      console_puts(", completion ");
+      console_putu32(info.completion_code);
+      console_puts(")\n");
+      continue;
+    }
+    uint16_t status = info.status;
+    uint16_t change = info.change;
+    console_puts("    Status     : 0x");
+    console_puthex(status, 4);
+    console_putc('\n');
+    console_puts("    Change     : 0x");
+    console_puthex(change, 4);
+    console_putc('\n');
+    console_puts("    Connected  : ");
+    console_puts((status & (1U << 0)) ? "Yes\n" : "No\n");
+    console_puts("    Enabled    : ");
+    console_puts((status & (1U << 1)) ? "Yes\n" : "No\n");
+    console_puts("    Suspended  : ");
+    console_puts((status & (1U << 2)) ? "Yes\n" : "No\n");
+    console_puts("    Overcurrent: ");
+    console_puts((status & (1U << 3)) ? "Yes\n" : "No\n");
+    console_puts("    Resetting  : ");
+    console_puts((status & (1U << 4)) ? "Yes\n" : "No\n");
+    console_puts("    Powered    : ");
+    console_puts((status & (1U << 8)) ? "Yes\n" : "No\n");
+    console_puts("    Speed      : ");
+    if (status & (1U << 10))
+      console_puts("High Speed\n");
+    else if (status & (1U << 9))
+      console_puts("Low Speed\n");
+    else if (status & (1U << 0))
+      console_puts("Full Speed or not yet established\n");
+    else
+      console_puts("No device\n");
+    console_puts("    Changes    :");
+    if (change == 0U) {
+      console_puts(" None");
+    } else {
+      if (change & (1U << 0))
+        console_puts(" Connection");
+      if (change & (1U << 1))
+        console_puts(" Enable");
+      if (change & (1U << 2))
+        console_puts(" Suspend");
+      if (change & (1U << 3))
+        console_puts(" Overcurrent");
+      if (change & (1U << 4))
+        console_puts(" Reset");
+    }
+    console_putc('\n');
+  }
+}
+
 static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
+  if (next_word_is(&args, "hubports") && end_of_args(args)) {
+    cmd_usb_hubports();
+    return;
+  }
   if (next_word_is(&args, "configure") && end_of_args(args)) {
     cmd_usb_configure();
     return;
@@ -1764,7 +1836,7 @@ static void cmd_usb(const char *args) {
   if (!end_of_args(args)) {
     console_puts(
     "Usage: usb [state | dma | ready | inspect | noops | ports | protocols |"
-    " events | devices | descriptor | hubinfo | configure]\n");
+    " events | devices | descriptor | hubinfo | configure | hubports]\n");
     return;
   }
 
