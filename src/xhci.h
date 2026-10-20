@@ -309,6 +309,34 @@ typedef struct {
 xhci_address_result_t xhci_address_device(xhci_address_info_t *result);
 
 typedef enum {
+  XHCI_DESCRIPTOR_OK,
+  XHCI_DESCRIPTOR_NOT_READY,
+  XHCI_DESCRIPTOR_ALREADY_ATTEMPTED,
+  XHCI_DESCRIPTOR_ALLOCATION_FAILED,
+  XHCI_DESCRIPTOR_DMA_FAILED,
+  XHCI_DESCRIPTOR_EVENT_FAILED,
+  XHCI_DESCRIPTOR_TIMEOUT,
+  XHCI_DESCRIPTOR_TRANSFER_FAILED,
+  XHCI_DESCRIPTOR_INVALID_DATA
+} xhci_descriptor_result_t;
+
+typedef struct {
+  uint8_t slot_id;
+  uint8_t completion_code;
+  uint8_t event_type;
+  uint8_t endpoint_id;
+  uint8_t bytes[8];
+  uint32_t event_status;
+  uint32_t controller_status;
+  uint64_t event_parameter;
+  uint64_t status_trb;
+  uint64_t elapsed_us;
+} xhci_descriptor_info_t;
+
+xhci_descriptor_result_t xhci_descriptor_first8(
+    xhci_descriptor_info_t *result);
+
+typedef enum {
   XHCI_NOOP_OK,
   XHCI_NOOP_NOT_RUNNING,
   XHCI_NOOP_ALREADY_SUBMITTED,

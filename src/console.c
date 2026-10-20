@@ -1470,9 +1470,83 @@ static void cmd_usb_address(void) {
   }
 }
 
+static void cmd_usb_descriptor(void) {
+  xhci_descriptor_info_t info;
+  xhci_descriptor_result_t status = xhci_descriptor_first8(&info);
+
+  console_puts("USB Device Descriptor (first 8 bytes):\n");
+  console_puts("  Slot ID         : ");
+  console_putu32(info.slot_id);
+  console_putc('\n');
+  console_puts("  Result          : ");
+  console_putu32((uint32_t)status);
+  console_putc('\n');
+  console_puts("  Event type      : ");
+  console_putu32(info.event_type);
+  console_putc('\n');
+  console_puts("  Completion code : ");
+  console_putu32(info.completion_code);
+  console_putc('\n');
+  console_puts("  Endpoint ID     : ");
+  console_putu32(info.endpoint_id);
+  console_putc('\n');
+  console_puts("  Event parameter : 0x");
+  console_puthex64(info.event_parameter);
+  console_putc('\n');
+  console_puts("  Expected TRB    : 0x");
+  console_puthex64(info.status_trb);
+  console_putc('\n');
+  console_puts("  Event status    : 0x");
+  console_puthex(info.event_status, 8);
+  console_putc('\n');
+  console_puts("  USBSTS          : 0x");
+  console_puthex(info.controller_status, 8);
+  console_putc('\n');
+  console_puts("  Elapsed         : ");
+  console_putu32((uint32_t)info.elapsed_us);
+  console_puts(" us\n");
+  if (status != XHCI_DESCRIPTOR_OK) {
+    console_puts("Device descriptor read: FAILED\n");
+    return;
+  }
+  console_puts("  Raw bytes       :");
+  for (unsigned int i = 0; i < 8U; i++) {
+    console_putc(' ');
+    console_puthex(info.bytes[i], 2);
+  }
+  console_putc('\n');
+  console_puts("  Descriptor length: ");
+  console_putu32(info.bytes[0]);
+  console_putc('\n');
+  console_puts("  Descriptor type  : ");
+  console_putu32(info.bytes[1]);
+  console_putc('\n');
+  console_puts("  USB version      : 0x");
+  uint16_t version = (uint16_t)info.bytes[2] | ((uint16_t)info.bytes[3] << 8);
+  console_puthex(version, 4);
+  console_putc('\n');
+  console_puts("  Device class     : 0x");
+  console_puthex(info.bytes[4], 2);
+  console_putc('\n');
+  console_puts("  Device subclass  : 0x");
+  console_puthex(info.bytes[5], 2);
+  console_putc('\n');
+  console_puts("  Device protocol  : 0x");
+  console_puthex(info.bytes[6], 2);
+  console_putc('\n');
+  console_puts("  EP0 max packet   : ");
+  console_putu32(info.bytes[7]);
+  console_putc('\n');
+  console_puts("Device descriptor read: PASS\n");
+}
+
 static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
+  if (next_word_is(&args, "descriptor") && end_of_args(args)) {
+    cmd_usb_descriptor();
+    return;
+  }
   if (next_word_is(&args, "address") && end_of_args(args)) {
     cmd_usb_address();
     return;
@@ -1521,7 +1595,7 @@ static void cmd_usb(const char *args) {
   if (!end_of_args(args)) {
     console_puts(
     "Usage: usb [state | dma | ready | inspect | noops | ports | protocols |"
-    " events | enableslot | contexts | address]\n");
+    " events | enableslot | contexts | address | descriptor]\n");
     return;
   }
 

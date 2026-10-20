@@ -86,6 +86,8 @@ typedef struct {
   xhci_device_info_t info;
 } xhci_device_t;
 
+static dma_buffer_t descriptor_buffer;
+static bool descriptor_attempted;
 static xhci_device_t internal_hub;
 static bool address_attempted;
 static bool device_addressed;
@@ -402,13 +404,23 @@ xhci_port_reset_result_t xhci_port_reset(
 #define XHCI_RING_TRBS 256U
 #define XHCI_TRB_CYCLE (1U << 0)
 #define XHCI_TRB_TOGGLE_CYCLE (1U << 1)
+#define XHCI_TRB_IOC          (1U << 5)
+#define XHCI_TRB_IDT          (1U << 6)
+#define XHCI_TRB_DIR_IN       (1U << 16)
+#define XHCI_TRB_SETUP_STAGE   2U
+#define XHCI_TRB_DATA_STAGE    3U
+#define XHCI_TRB_TRT_IN       (3U << 16)
+#define XHCI_TRB_STATUS_STAGE  4U
 #define XHCI_TRB_LINK  6U
 #define XHCI_TRB_ENABLE_SLOT 9U
 #define XHCI_TRB_TYPE_SHIFT 10U
 #define XHCI_TRB_ADDRESS_DEVICE 11U
 #define XHCI_TRB_NOOP_CMD       23U
+#define XHCI_TRB_TRANSFER_EVENT 32U
 #define XHCI_TRB_COMMAND_EVENT  33U
 #define XHCI_TRB_PORT_STATUS_EVENT 34U
+
+#define XHCI_TRANSFER_TIMEOUT_US 1000000ULL
 #define XHCI_COMPLETION_SUCCESS 1U
 #define XHCI_COMMAND_TIMEOUT_US    1000000ULL
 
@@ -1618,6 +1630,156 @@ xhci_address_result_t xhci_address_device(
   address_info = *result;
   device_addressed = true;
   return XHCI_ADDRESS_OK;
+}
+
+xhci_descriptor_result_t xhci_descriptor_first8(
+    xhci_descriptor_info_t *result) {
+
+  if (!result)
+    return XHCI_DESCRIPTOR_NOT_READY;
+
+  *result = (xhci_descriptor_info_t){0};
+
+  if (descriptor_attempted)
+    return XHCI_DESCRIPTOR_ALREADY_ATTEMPTED;
+
+  if (!device_addressed || !internal_hub.prepared ||
+      internal_hub_slot == 0 || !controller_running ||
+      command_outstanding || command_ring_failed)
+    return XHCI_DESCRIPTOR_NOT_READY;
+
+  if (internal_hub.ep0_ring.owner != DMA_OWNER_DEVICE)
+    return XHCI_DESCRIPTOR_NOT_READY;
+
+  xhci_info_t controller;
+  xhci_port_t port;
+  if (!xhci_probe(&controller) || !xhci_port_read(1U, &port) ||
+      !port.connected || !port.enabled || !port.powered ||
+      port.resetting || port.speed != 3U)
+    return XHCI_DESCRIPTOR_NOT_READY;
+
+  cache_info_t cache;
+  if (!cache_get_info(&cache) || cache.data_line_size == 0 ||
+      cache.data_line_size > PAGE_SIZE ||
+      (cache.data_line_size & (cache.data_line_size - 1U)))
+    return XHCI_DESCRIPTOR_NOT_READY;
+
+  if (!dma_alloc(8U, 64U, &descriptor_buffer))
+    return XHCI_DESCRIPTOR_ALLOCATION_FAILED;
+
+  if (!dma_begin_device(&descriptor_buffer, DMA_FROM_DEVICE)) {
+    dma_free(&descriptor_buffer);
+    return XHCI_DESCRIPTOR_DMA_FAILED;
+  }
+
+  xhci_trb_t *ring = internal_hub.ep0_ring.virtual;
+  // GET_DESCRIPTOR(Device), first eight bytes:
+  // bmRequestType=80, bRequest=06, wValue=0100,
+  // wIndex=0000, wLength=0008.
+  ring[0].parameter = 0x0008000001000680ULL;
+  ring[0].status = 8U;
+  ring[0].control =
+      (XHCI_TRB_SETUP_STAGE << XHCI_TRB_TYPE_SHIFT) |
+      XHCI_TRB_IDT | XHCI_TRB_TRT_IN | XHCI_TRB_CYCLE;
+
+  // IN data stage: eight bytes to a PCIe DMA buffer.
+  ring[1].parameter = descriptor_buffer.bus;
+  ring[1].status = 8U;
+  ring[1].control =
+      (XHCI_TRB_DATA_STAGE << XHCI_TRB_TYPE_SHIFT) |
+      XHCI_TRB_DIR_IN | XHCI_TRB_CYCLE;
+
+  // Status stage is OUT, opposite the data stage.
+  // IOC requests one completion event for the transaction.
+  ring[2].parameter = 0;
+  ring[2].status = 0;
+  ring[2].control =
+      (XHCI_TRB_STATUS_STAGE << XHCI_TRB_TYPE_SHIFT) |
+      XHCI_TRB_IOC | XHCI_TRB_CYCLE;
+
+  uint64_t status_trb = internal_hub.ep0_ring.bus +
+      2ULL * sizeof(xhci_trb_t);
+  result->slot_id = internal_hub_slot;
+  result->status_trb = status_trb;
+  // Publish all three TRBs together before the controller
+  // is allowed to advance through the transfer ring.
+  size_t length = 3U * sizeof(xhci_trb_t);
+  size_t line = cache.data_line_size;
+  length = (length + line - 1U) & ~(line - 1U);
+
+  if (!cache_clean(ring, length)) {
+    // No doorbell has been rung, so the controller cannot
+    // be processing these newly published transfer TRBs.
+    dma_end_device(&descriptor_buffer);
+    dma_free(&descriptor_buffer);
+    return XHCI_DESCRIPTOR_DMA_FAILED;
+  }
+
+  // From this point onward, never submit this diagnostic again
+  // during this boot, even if the completion is lost.
+  descriptor_attempted = true;
+
+  __asm__ volatile("dsb sy" ::: "memory");
+
+  // Device doorbell: slot ID selects the doorbell register;
+  // target 1 selects the default control endpoint (EP0).
+  xhci_write(controller.doorbell_offset + 4U * internal_hub_slot, 1U);
+
+  uint64_t started = timer_now_us();
+  while (timer_now_us() - started < XHCI_TRANSFER_TIMEOUT_US) {
+    xhci_event_t event;
+    xhci_event_result_t status = xhci_event_poll(&event);
+
+    if (status == XHCI_EVENT_ERROR)
+      return XHCI_DESCRIPTOR_EVENT_FAILED;
+
+    if (status == XHCI_EVENT_NONE) {
+      uint32_t usbsts = xhci_read(controller.capability_length + XHCI_USBSTS);
+      if (usbsts & (XHCI_STS_HALTED | XHCI_STS_HOST_ERROR)) {
+        result->controller_status = usbsts;
+        return XHCI_DESCRIPTOR_EVENT_FAILED;
+      }
+      continue;
+    }
+
+    if (event.type == XHCI_TRB_PORT_STATUS_EVENT) {
+      if (!xhci_event_record(&event))
+        return XHCI_DESCRIPTOR_EVENT_FAILED;
+      continue;
+    }
+    result->event_type = event.type;
+    result->completion_code = event.completion_code;
+    result->endpoint_id = (uint8_t)((event.control >> 16) & 0x1fU);
+    result->event_parameter = event.parameter;
+    result->event_status = event.status;
+    result->elapsed_us = timer_now_us() - started;
+    result->controller_status =
+        xhci_read(controller.capability_length + XHCI_USBSTS);
+    if (event.type != XHCI_TRB_TRANSFER_EVENT ||
+        event.slot_id != internal_hub_slot ||
+        result->endpoint_id != 1U ||
+        event.parameter != status_trb)
+      return XHCI_DESCRIPTOR_EVENT_FAILED;
+    if (event.completion_code != XHCI_COMPLETION_SUCCESS)
+      return XHCI_DESCRIPTOR_TRANSFER_FAILED;
+    // The completed transfer no longer writes the receive buffer.
+    // Return ownership to the CPU and invalidate its cached contents.
+    if (!dma_end_device(&descriptor_buffer))
+      return XHCI_DESCRIPTOR_DMA_FAILED;
+    uint8_t *bytes = descriptor_buffer.virtual;
+    for (unsigned int i = 0; i < 8U; i++)
+      result->bytes[i] = bytes[i];
+    // A Device Descriptor begins with bLength=18,
+    // bDescriptorType=1.
+    if (result->bytes[0] != 18U || result->bytes[1] != 1U)
+      return XHCI_DESCRIPTOR_INVALID_DATA;
+    return XHCI_DESCRIPTOR_OK;
+  }
+
+  result->elapsed_us = timer_now_us() - started;
+  result->controller_status =
+      xhci_read(controller.capability_length + XHCI_USBSTS);
+  return XHCI_DESCRIPTOR_TIMEOUT;
 }
 
 xhci_noop_result_t xhci_noop(xhci_noop_info_t *result) {
