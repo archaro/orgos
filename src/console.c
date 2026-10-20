@@ -12,8 +12,9 @@
 #include "mmu.h"
 #include "page.h"
 #include "cache.h"
-#include "pcie.h"
 #include "dma.h"
+#include "pcie.h"
+#include "usb.h"
 #include "xhci.h"
 #include "midi.h"
 
@@ -1313,163 +1314,6 @@ static void cmd_usb_events(void) {
   console_putc('\n');
 }
 
-static void cmd_usb_enableslot(void) {
-  xhci_slot_info_t info;
-  xhci_slot_result_t status = xhci_enable_slot(&info);
-  console_puts("xHCI Enable Slot:\n");
-  switch (status) {
-    case XHCI_SLOT_OK:
-      console_puts("  Root port       : ");
-      console_putu32(info.root_port);
-      console_putc('\n');
-      console_puts("  Allocated slot  : ");
-      console_putu32(info.slot_id);
-      console_putc('\n');
-      console_puts("  Completion code : ");
-      console_putu32(info.completion_code);
-      console_putc('\n');
-      console_puts("Enable Slot: PASS\n");
-      break;
-    case XHCI_SLOT_ALREADY_REQUESTED:
-      console_puts("Enable Slot already attempted this boot.\n");
-      break;
-    case XHCI_SLOT_NOT_READY:
-      console_puts("Root port or controller is not ready.\n");
-      break;
-    case XHCI_SLOT_COMMAND_FAILED:
-      console_puts("Enable Slot command failed.\n");
-      console_puts("  Transport result: ");
-      console_putu32((uint32_t)info.command_result);
-      console_putc('\n');
-      console_puts("  Completion code : ");
-      console_putu32(info.completion_code);
-      console_putc('\n');
-      console_puts("  Controller status: 0x");
-      console_puthex(info.controller_status, 8);
-      console_putc('\n');
-      break;
-    case XHCI_SLOT_INVALID_ID:
-      console_puts("Enable Slot returned an invalid Slot ID.\n");
-      console_puts("  Slot ID: ");
-      console_putu32(info.slot_id);
-      console_putc('\n');
-      break;
-  }
-}
-
-static void cmd_usb_contexts(void) {
-  xhci_device_info_t info;
-
-  if (!xhci_device_get_info(&info)) {
-    xhci_device_result_t status = xhci_device_prepare(&info);
-    if (status != XHCI_DEVICE_OK) {
-      console_puts("Device context preparation failed: ");
-      console_putu32((uint32_t)status);
-      console_putc('\n');
-      return;
-    }
-  }
-  console_puts("Internal USB hub device contexts:\n");
-  console_puts("  Slot ID          : ");
-  console_putu32(info.slot_id);
-  console_putc('\n');
-  console_puts("  Root port        : ");
-  console_putu32(info.root_port);
-  console_putc('\n');
-  console_puts("  Context size     : ");
-  console_putu32(info.context_size);
-  console_puts(" bytes\n");
-  console_puts("  EP0 max packet   : ");
-  console_putu32(info.max_packet_size);
-  console_puts(" bytes\n");
-  console_puts("  Input context    : 0x");
-  console_puthex64(info.input_context);
-  console_putc('\n');
-  console_puts("  Output context   : 0x");
-  console_puthex64(info.output_context);
-  console_putc('\n');
-  console_puts("  EP0 transfer ring: 0x");
-  console_puthex64(info.ep0_ring);
-  console_putc('\n');
-  console_puts("  DCBAA slot entry : 0x");
-  console_puthex64(info.dcbaa_entry);
-  console_putc('\n');
-  console_puts("  Add flags        : 0x");
-  console_puthex(info.input_add_flags, 8);
-  console_putc('\n');
-  console_puts("  Slot DW0         : 0x");
-  console_puthex(info.slot_dword0, 8);
-  console_putc('\n');
-  console_puts("  Slot DW1         : 0x");
-  console_puthex(info.slot_dword1, 8);
-  console_putc('\n');
-  console_puts("  EP0 DW1          : 0x");
-  console_puthex(info.ep0_dword1, 8);
-  console_putc('\n');
-  console_puts("  EP0 dequeue      : 0x");
-  uint64_t dequeue = ((uint64_t)info.ep0_dword3 << 32) | info.ep0_dword2;
-  console_puthex64(dequeue);
-  console_putc('\n');
-  console_puts("Device contexts: PREPARED\n");
-}
-
-static void cmd_usb_address(void) {
-  xhci_address_info_t info;
-  xhci_address_result_t status = xhci_address_device(&info);
-
-  console_puts("xHCI Address Device:\n");
-  console_puts("  Slot ID          : ");
-  console_putu32(info.slot_id);
-  console_putc('\n');
-  console_puts("  Transport result : ");
-  console_putu32((uint32_t)info.command_result);
-  console_putc('\n');
-  console_puts("  Completion code  : ");
-  console_putu32(info.completion_code);
-  console_putc('\n');
-  console_puts("  Controller status: 0x");
-  console_puthex(info.controller_status, 8);
-  console_putc('\n');
-  console_puts("  Elapsed          : ");
-  console_putu32((uint32_t)info.elapsed_us);
-  console_puts(" us\n");
-  console_puts("  Slot DW3         : 0x");
-  console_puthex(info.slot_dword3, 8);
-  console_putc('\n');
-  console_puts("  EP0 DW0          : 0x");
-  console_puthex(info.ep0_dword0, 8);
-  console_putc('\n');
-  console_puts("  USB address      : ");
-  console_putu32(info.usb_address);
-  console_putc('\n');
-  console_puts("  Slot state       : ");
-  console_putu32(info.slot_state);
-  console_putc('\n');
-  console_puts("  EP0 state        : ");
-  console_putu32(info.ep0_state);
-  console_putc('\n');
-  switch (status) {
-    case XHCI_ADDRESS_OK:
-      console_puts("Address Device: PASS\n");
-      break;
-    case XHCI_ADDRESS_NOT_READY:
-      console_puts("Address Device: NOT READY\n");
-      break;
-    case XHCI_ADDRESS_ALREADY_ATTEMPTED:
-      console_puts("Address Device already attempted.\n");
-      break;
-    case XHCI_ADDRESS_COMMAND_FAILED:
-      console_puts("Address Device: COMMAND FAILED\n");
-      break;
-    case XHCI_ADDRESS_BAD_SLOT:
-      console_puts("Address Device: WRONG SLOT ID\n");
-      break;
-    case XHCI_ADDRESS_VERIFY_FAILED:
-      console_puts("Address Device: CONTEXT VERIFICATION FAILED\n");
-      break;
-  }
-}
-
 static void cmd_usb_descriptor(void) {
   const xhci_setup_packet_t setup = {
     .request_type = 0x80U,
@@ -1761,27 +1605,71 @@ static void cmd_usb_hubinfo(void) {
   console_puts("Hub descriptor read: PASS\n");
 }
 
+static void cmd_usb_devices(void) {
+  usb_init_info_t info;
+
+  if (!usb_get_init_info(&info)) {
+    console_puts("USB subsystem state unavailable.\n");
+    return;
+  }
+  console_puts("USB device enumeration:\n");
+  console_puts("  Initialisation : ");
+  if (info.result == USB_INIT_OK && info.address != 0U)
+    console_puts("OK\n");
+  else
+    console_puts("FAILED or incomplete\n");
+  console_puts("  Result code    : ");
+  console_putu32((uint32_t)info.result);
+  console_putc('\n');
+  console_puts("  Detail         : 0x");
+  console_puthex(info.detail, 8);
+  console_putc('\n');
+  if (info.address == 0U)
+    return;
+  console_puts("  Device         : Internal USB 2.0 hub\n");
+  console_puts("  Root port      : ");
+  console_putu32(info.root_port);
+  console_putc('\n');
+  console_puts("  Speed          : ");
+  switch (info.speed) {
+    case 3U:
+      console_puts("High Speed (480 Mbit/s)\n");
+      break;
+    case 4U:
+      console_puts("SuperSpeed (5 Gbit/s)\n");
+      break;
+    default:
+      console_putu32(info.speed);
+      console_puts(" (xHCI speed ID)\n");
+      break;
+  }
+  console_puts("  Slot ID        : ");
+  console_putu32(info.slot_id);
+  console_putc('\n');
+  console_puts("  USB address    : ");
+  console_putu32(info.address);
+  console_putc('\n');
+  console_puts("  Slot state     : ");
+  console_putu32(info.slot_state);
+  console_puts(info.slot_state == 2U ? " (Addressed)\n" : "\n");
+  console_puts("  EP0 state      : ");
+  console_putu32(info.ep0_state);
+  console_puts(info.ep0_state == 1U ? " (Running)\n" : "\n");
+}
+
 static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
+  if (next_word_is(&args, "devices") && end_of_args(args)) {
+    cmd_usb_devices();
+    return;
+  }
   if (next_word_is(&args, "hubinfo") && end_of_args(args)) {
     cmd_usb_hubinfo();
     return;
   }
   if (next_word_is(&args, "descriptor") && end_of_args(args)) {
     cmd_usb_descriptor();
-    return;
-  }
-  if (next_word_is(&args, "address") && end_of_args(args)) {
-    cmd_usb_address();
-    return;
-  }
-  if (next_word_is(&args, "contexts") && end_of_args(args)) {
-    cmd_usb_contexts();
-    return;
-  }
-  if (next_word_is(&args, "enableslot") && end_of_args(args)) {
-    cmd_usb_enableslot();
     return;
   }
   if (next_word_is(&args, "events") && end_of_args(args)) {
@@ -1820,7 +1708,7 @@ static void cmd_usb(const char *args) {
   if (!end_of_args(args)) {
     console_puts(
     "Usage: usb [state | dma | ready | inspect | noops | ports | protocols |"
-    " events | enableslot | contexts | address | descriptor | hubinfo]\n");
+    " events | devices | descriptor | hubinfo]\n");
     return;
   }
 
