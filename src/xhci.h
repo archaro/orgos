@@ -285,6 +285,30 @@ xhci_device_result_t xhci_device_prepare(xhci_device_info_t *result);
 bool xhci_device_get_info(xhci_device_info_t *result);
 
 typedef enum {
+  XHCI_ADDRESS_OK,
+  XHCI_ADDRESS_NOT_READY,
+  XHCI_ADDRESS_ALREADY_ATTEMPTED,
+  XHCI_ADDRESS_COMMAND_FAILED,
+  XHCI_ADDRESS_BAD_SLOT,
+  XHCI_ADDRESS_VERIFY_FAILED
+} xhci_address_result_t;
+
+typedef struct {
+  uint8_t slot_id;
+  uint8_t usb_address;
+  uint8_t slot_state;
+  uint8_t ep0_state;
+  uint8_t completion_code;
+  uint32_t controller_status;
+  uint32_t slot_dword3;
+  uint32_t ep0_dword0;
+  uint64_t elapsed_us;
+  xhci_command_result_t command_result;
+} xhci_address_info_t;
+
+xhci_address_result_t xhci_address_device(xhci_address_info_t *result);
+
+typedef enum {
   XHCI_NOOP_OK,
   XHCI_NOOP_NOT_RUNNING,
   XHCI_NOOP_ALREADY_SUBMITTED,

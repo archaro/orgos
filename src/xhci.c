@@ -87,6 +87,9 @@ typedef struct {
 } xhci_device_t;
 
 static xhci_device_t internal_hub;
+static bool address_attempted;
+static bool device_addressed;
+static xhci_address_info_t address_info;
 static xhci_dma_t controller_dma;
 static bool controller_configured;
 static bool controller_verified;
@@ -402,6 +405,7 @@ xhci_port_reset_result_t xhci_port_reset(
 #define XHCI_TRB_LINK  6U
 #define XHCI_TRB_ENABLE_SLOT 9U
 #define XHCI_TRB_TYPE_SHIFT 10U
+#define XHCI_TRB_ADDRESS_DEVICE 11U
 #define XHCI_TRB_NOOP_CMD       23U
 #define XHCI_TRB_COMMAND_EVENT  33U
 #define XHCI_TRB_PORT_STATUS_EVENT 34U
@@ -1518,6 +1522,102 @@ dma_failed:
 allocation_failed:
   xhci_device_release_partial();
   return XHCI_DEVICE_ALLOCATION_FAILED;
+}
+
+xhci_address_result_t xhci_address_device(
+    xhci_address_info_t *result) {
+
+  if (!result)
+    return XHCI_ADDRESS_NOT_READY;
+
+  *result = (xhci_address_info_t){0};
+
+  if (address_attempted) {
+    if (device_addressed)
+      *result = address_info;
+    return XHCI_ADDRESS_ALREADY_ATTEMPTED;
+  }
+
+  if (!internal_hub.prepared || internal_hub_slot == 0 ||
+      !controller_running || !controller_verified ||
+      command_outstanding || command_ring_failed)
+    return XHCI_ADDRESS_NOT_READY;
+
+  if (internal_hub.input.owner != DMA_OWNER_DEVICE ||
+      internal_hub.output.owner != DMA_OWNER_DEVICE ||
+      internal_hub.ep0_ring.owner != DMA_OWNER_DEVICE)
+    return XHCI_ADDRESS_NOT_READY;
+
+  xhci_port_t port;
+  if (!xhci_port_read(1U, &port) ||
+      !port.connected || !port.enabled || !port.powered ||
+      port.resetting || port.speed != 3U)
+    return XHCI_ADDRESS_NOT_READY;
+
+  xhci_info_t controller;
+  if (!xhci_probe(&controller) ||
+      internal_hub_slot > controller.max_slots)
+    return XHCI_ADDRESS_NOT_READY;
+
+  result->slot_id = internal_hub_slot;
+  result->command_result = XHCI_COMMAND_UNAVAILABLE;
+
+  // The input context must be 16-byte aligned.
+  if ((internal_hub.input.bus & 0x0fULL) != 0)
+    return XHCI_ADDRESS_NOT_READY;
+
+  xhci_trb_t command = {
+    .parameter = internal_hub.input.bus,
+    .status = 0,
+    .control = (XHCI_TRB_ADDRESS_DEVICE << XHCI_TRB_TYPE_SHIFT) |
+        ((uint32_t)internal_hub_slot << 24)
+  };
+  // BSR bit 9 is zero: issue USB SET_ADDRESS.
+  // Never blindly resubmit if completion is lost.
+  address_attempted = true;
+  xhci_command_completion_t completion;
+  xhci_command_result_t status = xhci_command_submit( &command, &completion);
+  result->command_result = status;
+  result->completion_code = completion.completion_code;
+  result->controller_status = completion.controller_status;
+  result->elapsed_us = completion.elapsed_us;
+
+  if (status != XHCI_COMMAND_OK)
+    return XHCI_ADDRESS_COMMAND_FAILED;
+
+  if (completion.slot_id != internal_hub_slot)
+    return XHCI_ADDRESS_BAD_SLOT;
+
+  // The controller has written the Output Device Context.
+  // Invalidate only the relevant cache lines, while keeping
+  // the allocation under device ownership.
+  cache_info_t cache;
+  if (!cache_get_info(&cache) || cache.data_line_size == 0 ||
+      cache.data_line_size > PAGE_SIZE ||
+      (cache.data_line_size & (cache.data_line_size - 1U)))
+    return XHCI_ADDRESS_VERIFY_FAILED;
+
+  uint32_t size = internal_hub.info.context_size;
+  uint8_t *output = internal_hub.output.virtual;
+  if (!cache_invalidate(output, 2U * size))
+    return XHCI_ADDRESS_VERIFY_FAILED;
+
+  uint32_t *slot = (uint32_t *)output;
+  uint32_t *ep0 = (uint32_t *)(output + size);
+  result->slot_dword3 = slot[3];
+  result->ep0_dword0 = ep0[0];
+  result->usb_address = (uint8_t)(slot[3] & 0xffU);
+  result->slot_state = (uint8_t)((slot[3] >> 27) & 0x1fU);
+  result->ep0_state = (uint8_t)(ep0[0] & 0x07U);
+
+  // Addressed = 2; endpoint Running = 1.
+  if (result->usb_address == 0 || result->usb_address > 127 ||
+      result->slot_state != 2U || result->ep0_state != 1U)
+    return XHCI_ADDRESS_VERIFY_FAILED;
+
+  address_info = *result;
+  device_addressed = true;
+  return XHCI_ADDRESS_OK;
 }
 
 xhci_noop_result_t xhci_noop(xhci_noop_info_t *result) {

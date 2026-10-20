@@ -1413,9 +1413,70 @@ static void cmd_usb_contexts(void) {
   console_puts("Device contexts: PREPARED\n");
 }
 
+static void cmd_usb_address(void) {
+  xhci_address_info_t info;
+  xhci_address_result_t status = xhci_address_device(&info);
+
+  console_puts("xHCI Address Device:\n");
+  console_puts("  Slot ID          : ");
+  console_putu32(info.slot_id);
+  console_putc('\n');
+  console_puts("  Transport result : ");
+  console_putu32((uint32_t)info.command_result);
+  console_putc('\n');
+  console_puts("  Completion code  : ");
+  console_putu32(info.completion_code);
+  console_putc('\n');
+  console_puts("  Controller status: 0x");
+  console_puthex(info.controller_status, 8);
+  console_putc('\n');
+  console_puts("  Elapsed          : ");
+  console_putu32((uint32_t)info.elapsed_us);
+  console_puts(" us\n");
+  console_puts("  Slot DW3         : 0x");
+  console_puthex(info.slot_dword3, 8);
+  console_putc('\n');
+  console_puts("  EP0 DW0          : 0x");
+  console_puthex(info.ep0_dword0, 8);
+  console_putc('\n');
+  console_puts("  USB address      : ");
+  console_putu32(info.usb_address);
+  console_putc('\n');
+  console_puts("  Slot state       : ");
+  console_putu32(info.slot_state);
+  console_putc('\n');
+  console_puts("  EP0 state        : ");
+  console_putu32(info.ep0_state);
+  console_putc('\n');
+  switch (status) {
+    case XHCI_ADDRESS_OK:
+      console_puts("Address Device: PASS\n");
+      break;
+    case XHCI_ADDRESS_NOT_READY:
+      console_puts("Address Device: NOT READY\n");
+      break;
+    case XHCI_ADDRESS_ALREADY_ATTEMPTED:
+      console_puts("Address Device already attempted.\n");
+      break;
+    case XHCI_ADDRESS_COMMAND_FAILED:
+      console_puts("Address Device: COMMAND FAILED\n");
+      break;
+    case XHCI_ADDRESS_BAD_SLOT:
+      console_puts("Address Device: WRONG SLOT ID\n");
+      break;
+    case XHCI_ADDRESS_VERIFY_FAILED:
+      console_puts("Address Device: CONTEXT VERIFICATION FAILED\n");
+      break;
+  }
+}
+
 static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
+  if (next_word_is(&args, "address") && end_of_args(args)) {
+    cmd_usb_address();
+    return;
+  }
   if (next_word_is(&args, "contexts") && end_of_args(args)) {
     cmd_usb_contexts();
     return;
@@ -1460,7 +1521,7 @@ static void cmd_usb(const char *args) {
   if (!end_of_args(args)) {
     console_puts(
     "Usage: usb [state | dma | ready | inspect | noops | ports | protocols |"
-    " events | enableslot | contexts]\n");
+    " events | enableslot | contexts | address]\n");
     return;
   }
 
