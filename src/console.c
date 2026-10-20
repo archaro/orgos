@@ -1259,50 +1259,6 @@ static void cmd_usb_protocols(void) {
   console_putc('\n');
 }
 
-static void cmd_usb_portreset(void) {
-  xhci_port_reset_info_t info;
-  console_puts("Resetting USB 2.0 root port 1...\n");
-  xhci_port_reset_result_t status = xhci_port_reset(1U, &info);
-  console_puts("  PORTSC before : 0x");
-  console_puthex(info.before, 8);
-  console_putc('\n');
-  console_puts("  PORTSC after  : 0x");
-  console_puthex(info.after, 8);
-  console_putc('\n');
-  console_puts("  USBSTS        : 0x");
-  console_puthex(info.controller_status, 8);
-  console_putc('\n');
-  console_puts("  Elapsed       : ");
-  console_putu32((uint32_t)info.elapsed_us);
-  console_puts(" us\n");
-  switch (status) {
-    case XHCI_PORT_RESET_OK:
-      console_puts("USB port reset: PASS\n");
-      break;
-    case XHCI_PORT_RESET_NOT_RUNNING:
-      console_puts("FAILED: xHCI controller is not running.\n");
-      break;
-    case XHCI_PORT_RESET_UNAVAILABLE:
-      console_puts("FAILED: root port unavailable.\n");
-      break;
-    case XHCI_PORT_RESET_DISCONNECTED:
-      console_puts("FAILED: no device connected.\n");
-      break;
-    case XHCI_PORT_RESET_NOT_POWERED:
-      console_puts("FAILED: port power disabled.\n");
-      break;
-    case XHCI_PORT_RESET_ALREADY_ENABLED:
-      console_puts("Port already enabled; reset not required.\n");
-      break;
-    case XHCI_PORT_RESET_TIMEOUT:
-      console_puts("FAILED: port reset timed out.\n");
-      break;
-    case XHCI_PORT_RESET_FAILED:
-      console_puts("FAILED: port did not become enabled.\n");
-      break;
-  }
-}
-
 static void cmd_usb_events(void) {
   unsigned int consumed = 0;
 
@@ -1357,38 +1313,6 @@ static void cmd_usb_events(void) {
   console_putc('\n');
 }
 
-static void cmd_usb_portclear(void) {
-  xhci_port_clear_info_t info;
-  xhci_port_clear_result_t status = xhci_port_clear(1U, &info);
-  console_puts("USB root port 1 change acknowledgement:\n");
-  console_puts("  PORTSC before : 0x");
-  console_puthex(info.before, 8);
-  console_putc('\n');
-  console_puts("  Acknowledged  : 0x");
-  console_puthex(info.acknowledged, 8);
-  console_putc('\n');
-  console_puts("  PORTSC after  : 0x");
-  console_puthex(info.after, 8);
-  console_putc('\n');
-  switch (status) {
-    case XHCI_PORT_CLEAR_OK:
-      console_puts("Port change acknowledgement: PASS\n");
-      break;
-    case XHCI_PORT_CLEAR_NOT_RUNNING:
-      console_puts("FAILED: xHCI controller is not running.\n");
-      break;
-    case XHCI_PORT_CLEAR_UNAVAILABLE:
-      console_puts("FAILED: port unavailable.\n");
-      break;
-    case XHCI_PORT_CLEAR_RESET_ACTIVE:
-      console_puts("FAILED: port reset is active.\n");
-      break;
-    case XHCI_PORT_CLEAR_FAILED:
-      console_puts("FAILED: change flags remain set.\n");
-      break;
-  }
-}
-
 static void cmd_usb_enableslot(void) {
   xhci_slot_info_t info;
   xhci_slot_result_t status = xhci_enable_slot(&info);
@@ -1440,16 +1364,8 @@ static void cmd_usb(const char *args) {
     cmd_usb_enableslot();
     return;
   }
-  if (next_word_is(&args, "portclear") && end_of_args(args)) {
-    cmd_usb_portclear();
-    return;
-  }
   if (next_word_is(&args, "events") && end_of_args(args)) {
     cmd_usb_events();
-    return;
-  }
-  if (next_word_is(&args, "portreset") && end_of_args(args)) {
-    cmd_usb_portreset();
     return;
   }
   if (next_word_is(&args, "protocols") && end_of_args(args)) {
@@ -1484,7 +1400,7 @@ static void cmd_usb(const char *args) {
   if (!end_of_args(args)) {
     console_puts(
     "Usage: usb [state | dma | ready | inspect | noops | ports | protocols |"
-    " portreset | portclear | events | enableslot]\n");
+    " events | enableslot]\n");
     return;
   }
 

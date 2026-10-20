@@ -15,6 +15,9 @@
 #include "console.h"
 
 #define UART_BAUD 115200U
+#define USB_ROOT_PORT 1U
+#define USB_ROOT_EVENT_WAIT_MS 100U
+#define USB_PORT_STATUS_EVENT 34U
 
 static unsigned int current_el(void) {
   uint64_t value;
@@ -188,6 +191,92 @@ bool pcie_subsystem_init(void) {
   } else {
     console_puts("VL805 firmware already initialised.\n");
   }
+  return true;
+}
+
+static bool usb_root_port_init(void) {
+  xhci_port_clear_info_t clear;
+  xhci_port_reset_info_t reset;
+  xhci_port_t port;
+
+  // This port connects the VL805 to the internal USB 2.0 hub.
+  // Acknowledge any initial change flags before requesting reset.
+  xhci_port_clear_result_t clear_status =
+      xhci_port_clear(USB_ROOT_PORT, &clear);
+
+  if (clear_status != XHCI_PORT_CLEAR_OK) {
+    console_puts("FAILED (port clear ");
+    console_putu32((uint32_t)clear_status);
+    console_puts(").\n");
+    return false;
+  }
+
+  // A port which is already enabled requires no further reset.
+  if (!xhci_port_read(USB_ROOT_PORT, &port)) {
+    console_puts("FAILED (port status unavailable).\n");
+    return false;
+  }
+
+  if (port.enabled) {
+    if (!port.connected || !port.powered || port.resetting ||
+        port.speed != 3U || port.link_state != 0U) {
+      console_puts("FAILED (enabled port has unexpected state).\n");
+      return false;
+    }
+    console_puts("OK (Port 1 already enabled).\n");
+    return true;
+  }
+
+  xhci_port_reset_result_t reset_status =
+      xhci_port_reset(USB_ROOT_PORT, &reset);
+  if (reset_status != XHCI_PORT_RESET_OK) {
+    console_puts("FAILED (port reset ");
+    console_putu32((uint32_t)reset_status);
+    console_puts(").\n");
+    return false;
+  }
+
+  // Confirm that the upstream hub connection is operational.
+  if (!xhci_port_read(USB_ROOT_PORT, &port) ||
+      !port.connected || !port.enabled || !port.powered ||
+      port.resetting || port.speed != 3U || port.link_state != 0U) {
+    console_puts("FAILED (port did not reach High Speed U0).\n");
+    return false;
+  }
+
+  // The reset should produce a Port Status Change Event.
+  // Poll with a fixed deadline; no interrupts are required yet.
+  bool change_seen = false;
+  for (unsigned int ms = 0; ms < USB_ROOT_EVENT_WAIT_MS; ms++) {
+    xhci_event_t event;
+    xhci_event_result_t status = xhci_event_poll(&event);
+    if (status == XHCI_EVENT_ERROR) {
+      console_puts("FAILED (event ring).\n");
+      return false;
+    }
+    if (status == XHCI_EVENT_READY) {
+      if (!xhci_event_record(&event)) {
+        console_puts("FAILED (unexpected USB event ");
+        console_putu32(event.type);
+        console_puts(").\n");
+        return false;
+      }
+      if (event.type == USB_PORT_STATUS_EVENT &&
+          event.port_id == USB_ROOT_PORT) {
+        change_seen = true;
+        break;
+      }
+      // An unrelated port-change event is recorded, but does
+      // not satisfy the expected Port 1 reset completion.
+      continue;
+    }
+    timer_delay_ms(1);
+  }
+  if (!change_seen) {
+    console_puts("FAILED (Port 1 change event not received).\n");
+    return false;
+  }
+  console_puts("OK (Port 1, High Speed).\n");
   return true;
 }
 
@@ -382,6 +471,8 @@ void main(void) {
         console_puts(").\n");
       } else {
         console_puts("OK.\n");
+        console_puts("Initialising USB root port... ");
+        usb_root_port_init();
       }
     }
   }
