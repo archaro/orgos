@@ -21,5 +21,5 @@ typedef struct {
   xhci_control_result_t transfer_result;
 } usb_hub_port_t;
 
-usb_hub_result_t usb_hub_port_status(
-    uint8_t port, usb_hub_port_t *result);
+usb_hub_result_t usb_hub_port_status(uint8_t port, usb_hub_port_t *result);
+usb_hub_result_t usb_hub_power_on(usb_hub_port_t *result);

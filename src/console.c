@@ -1777,9 +1777,38 @@ static void cmd_usb_hubports(void) {
   }
 }
 
+static void cmd_usb_hubpower(void) {
+  usb_hub_port_t info;
+  usb_hub_result_t result = usb_hub_power_on(&info);
+  console_puts("Internal USB hub power:\n");
+  console_puts("  Result          : ");
+  console_putu32((uint32_t)result);
+  console_putc('\n');
+  console_puts("  Transfer result : ");
+  console_putu32((uint32_t)info.transfer_result);
+  console_putc('\n');
+  console_puts("  Completion code : ");
+  console_putu32(info.completion_code);
+  console_putc('\n');
+  console_puts("  Port 1 status   : 0x");
+  console_puthex(info.status, 4);
+  console_putc('\n');
+  if (result != USB_HUB_OK) {
+    console_puts("Hub power: FAILED or NOT READY\n");
+    return;
+  }
+  console_puts("Hub power: PASS\n");
+  // Inspect the entire power group, not just port 1.
+  cmd_usb_hubports();
+}
+
 static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
+  if (next_word_is(&args, "hubpower") && end_of_args(args)) {
+    cmd_usb_hubpower();
+    return;
+  }
   if (next_word_is(&args, "hubports") && end_of_args(args)) {
     cmd_usb_hubports();
     return;
@@ -1836,7 +1865,8 @@ static void cmd_usb(const char *args) {
   if (!end_of_args(args)) {
     console_puts(
     "Usage: usb [state | dma | ready | inspect | noops | ports | protocols |"
-    " events | devices | descriptor | hubinfo | configure | hubports]\n");
+    " events | devices | descriptor | hubinfo | configure | hubports |"
+    " hubpower]\n");
     return;
   }
 
