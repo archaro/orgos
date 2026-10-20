@@ -1820,7 +1820,7 @@ static void cmd_usb(const char *args) {
   if (!end_of_args(args)) {
     console_puts(
     "Usage: usb [state | dma | ready | inspect | noops | ports | protocols |"
-    " events | enableslot | contexts | address | descriptor]\n");
+    " events | enableslot | contexts | address | descriptor | hubinfo]\n");
     return;
   }
 
