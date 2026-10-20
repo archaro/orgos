@@ -308,33 +308,43 @@ typedef struct {
 
 xhci_address_result_t xhci_address_device(xhci_address_info_t *result);
 
+#define XHCI_CONTROL_MAX_DATA 64U
+
 typedef enum {
-  XHCI_DESCRIPTOR_OK,
-  XHCI_DESCRIPTOR_NOT_READY,
-  XHCI_DESCRIPTOR_ALREADY_ATTEMPTED,
-  XHCI_DESCRIPTOR_ALLOCATION_FAILED,
-  XHCI_DESCRIPTOR_DMA_FAILED,
-  XHCI_DESCRIPTOR_EVENT_FAILED,
-  XHCI_DESCRIPTOR_TIMEOUT,
-  XHCI_DESCRIPTOR_TRANSFER_FAILED,
-  XHCI_DESCRIPTOR_INVALID_DATA
-} xhci_descriptor_result_t;
+  XHCI_CONTROL_OK,
+  XHCI_CONTROL_NOT_READY,
+  XHCI_CONTROL_ALLOCATION_FAILED,
+  XHCI_CONTROL_DMA_FAILED,
+  XHCI_CONTROL_RING_FAILED,
+  XHCI_CONTROL_EVENT_FAILED,
+  XHCI_CONTROL_TIMEOUT,
+  XHCI_CONTROL_TRANSFER_FAILED
+} xhci_control_result_t;
+
+typedef struct {
+  uint8_t request_type;
+  uint8_t request;
+  uint16_t value;
+  uint16_t index;
+  uint16_t length;
+} xhci_setup_packet_t;
 
 typedef struct {
   uint8_t slot_id;
   uint8_t completion_code;
   uint8_t event_type;
   uint8_t endpoint_id;
-  uint8_t bytes[8];
+  uint8_t data[XHCI_CONTROL_MAX_DATA];
+  uint16_t length;
   uint32_t event_status;
   uint32_t controller_status;
   uint64_t event_parameter;
   uint64_t status_trb;
   uint64_t elapsed_us;
-} xhci_descriptor_info_t;
+} xhci_control_info_t;
 
-xhci_descriptor_result_t xhci_descriptor_first8(
-    xhci_descriptor_info_t *result);
+xhci_control_result_t xhci_control_in(
+    const xhci_setup_packet_t *setup, xhci_control_info_t *result);
 
 typedef enum {
   XHCI_NOOP_OK,

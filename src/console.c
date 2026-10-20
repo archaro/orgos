@@ -1471,24 +1471,24 @@ static void cmd_usb_address(void) {
 }
 
 static void cmd_usb_descriptor(void) {
-  xhci_descriptor_info_t info;
-  xhci_descriptor_result_t status = xhci_descriptor_first8(&info);
-
-  console_puts("USB Device Descriptor (first 8 bytes):\n");
-  console_puts("  Slot ID         : ");
-  console_putu32(info.slot_id);
-  console_putc('\n');
+  const xhci_setup_packet_t setup = {
+    .request_type = 0x80U,
+    .request = 0x06U,
+    .value = 0x0100U,
+    .index = 0U,
+    .length = 18U
+  };
+  xhci_control_info_t info;
+  xhci_control_result_t status = xhci_control_in(&setup, &info);
+  console_puts("USB Device Descriptor:\n");
   console_puts("  Result          : ");
   console_putu32((uint32_t)status);
-  console_putc('\n');
-  console_puts("  Event type      : ");
-  console_putu32(info.event_type);
   console_putc('\n');
   console_puts("  Completion code : ");
   console_putu32(info.completion_code);
   console_putc('\n');
-  console_puts("  Endpoint ID     : ");
-  console_putu32(info.endpoint_id);
+  console_puts("  Event type      : ");
+  console_putu32(info.event_type);
   console_putc('\n');
   console_puts("  Event parameter : 0x");
   console_puthex64(info.event_parameter);
@@ -1496,46 +1496,50 @@ static void cmd_usb_descriptor(void) {
   console_puts("  Expected TRB    : 0x");
   console_puthex64(info.status_trb);
   console_putc('\n');
-  console_puts("  Event status    : 0x");
-  console_puthex(info.event_status, 8);
-  console_putc('\n');
-  console_puts("  USBSTS          : 0x");
-  console_puthex(info.controller_status, 8);
-  console_putc('\n');
   console_puts("  Elapsed         : ");
   console_putu32((uint32_t)info.elapsed_us);
   console_puts(" us\n");
-  if (status != XHCI_DESCRIPTOR_OK) {
+  if (status != XHCI_CONTROL_OK) {
     console_puts("Device descriptor read: FAILED\n");
     return;
   }
+  const uint8_t *d = info.data;
   console_puts("  Raw bytes       :");
-  for (unsigned int i = 0; i < 8U; i++) {
+  for (unsigned int i = 0; i < info.length; i++) {
     console_putc(' ');
-    console_puthex(info.bytes[i], 2);
+    console_puthex(d[i], 2);
   }
   console_putc('\n');
-  console_puts("  Descriptor length: ");
-  console_putu32(info.bytes[0]);
+  if (info.length != 18U || d[0] != 18U || d[1] != 1U) {
+    console_puts("Device descriptor: INVALID\n");
+    return;
+  }
+  console_puts("  USB version     : 0x");
+  console_puthex((uint16_t)d[2] | ((uint16_t)d[3] << 8), 4);
   console_putc('\n');
-  console_puts("  Descriptor type  : ");
-  console_putu32(info.bytes[1]);
+  console_puts("  Device class    : 0x");
+  console_puthex(d[4], 2);
   console_putc('\n');
-  console_puts("  USB version      : 0x");
-  uint16_t version = (uint16_t)info.bytes[2] | ((uint16_t)info.bytes[3] << 8);
-  console_puthex(version, 4);
+  console_puts("  Device subclass : 0x");
+  console_puthex(d[5], 2);
   console_putc('\n');
-  console_puts("  Device class     : 0x");
-  console_puthex(info.bytes[4], 2);
+  console_puts("  Device protocol : 0x");
+  console_puthex(d[6], 2);
   console_putc('\n');
-  console_puts("  Device subclass  : 0x");
-  console_puthex(info.bytes[5], 2);
+  console_puts("  EP0 max packet  : ");
+  console_putu32(d[7]);
   console_putc('\n');
-  console_puts("  Device protocol  : 0x");
-  console_puthex(info.bytes[6], 2);
+  console_puts("  Vendor ID       : 0x");
+  console_puthex((uint16_t)d[8] | ((uint16_t)d[9] << 8), 4);
   console_putc('\n');
-  console_puts("  EP0 max packet   : ");
-  console_putu32(info.bytes[7]);
+  console_puts("  Product ID      : 0x");
+  console_puthex((uint16_t)d[10] | ((uint16_t)d[11] << 8), 4);
+  console_putc('\n');
+  console_puts("  Device release  : 0x");
+  console_puthex((uint16_t)d[12] | ((uint16_t)d[13] << 8), 4);
+  console_putc('\n');
+  console_puts("  Configurations  : ");
+  console_putu32(d[17]);
   console_putc('\n');
   console_puts("Device descriptor read: PASS\n");
 }
