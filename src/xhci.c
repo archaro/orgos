@@ -86,6 +86,7 @@ typedef struct {
   xhci_device_info_t info;
 } xhci_device_t;
 
+static bool ep0_wrap_pending;
 static dma_buffer_t control_buffer;
 static unsigned int ep0_index;
 static unsigned int ep0_cycle = 1U;
@@ -416,6 +417,7 @@ xhci_port_reset_result_t xhci_port_reset(
 #define XHCI_TRB_TRT_IN       (3U << 16)
 #define XHCI_TRB_STATUS_STAGE  4U
 #define XHCI_TRB_LINK  6U
+#define XHCI_TRB_NOOP_TRANSFER 8U
 #define XHCI_TRB_ENABLE_SLOT 9U
 #define XHCI_TRB_TYPE_SHIFT 10U
 #define XHCI_TRB_ADDRESS_DEVICE 11U
@@ -1649,17 +1651,7 @@ static bool xhci_ep0_publish(unsigned int first,
   return cache_clean((const void *)start, end - start);
 }
 
-static bool xhci_ep0_advance(size_t line) {
-  ep0_index += 3U;
-
-  if (ep0_index != XHCI_RING_TRBS - 1U)
-    return true;
-
-  ep0_index = 0;
-  ep0_cycle ^= 1U;
-
-  // The controller has passed the Link TRB. Prepare its
-  // cycle bit for the next traversal of the transfer ring.
+static bool xhci_ep0_link_update(size_t line) {
   xhci_trb_t *ring = internal_hub.ep0_ring.virtual;
   xhci_trb_t *link = &ring[XHCI_RING_TRBS - 1U];
 
@@ -1669,7 +1661,67 @@ static bool xhci_ep0_advance(size_t line) {
   return xhci_ep0_publish(XHCI_RING_TRBS - 1U, 1U, line);
 }
 
-xhci_control_result_t xhci_control_in(
+static bool xhci_ep0_prepare(unsigned int count, size_t line) {
+  const unsigned int usable = XHCI_RING_TRBS - 1U;
+
+  if (count == 0U || count > usable || ep0_wrap_pending)
+    return false;
+
+  if (ep0_index + count <= usable)
+    return true;
+
+  // Not enough room for a complete control transfer.
+  // Fill the remaining slots with transfer No Ops.
+  xhci_trb_t *ring = internal_hub.ep0_ring.virtual;
+  unsigned int first = ep0_index;
+
+  for (unsigned int i = first; i < usable; i++) {
+    ring[i].parameter = 0;
+    ring[i].status = 0;
+    ring[i].control = (XHCI_TRB_NOOP_TRANSFER << XHCI_TRB_TYPE_SHIFT) |
+        (ep0_cycle ? XHCI_TRB_CYCLE : 0U);
+  }
+
+  if (!xhci_ep0_publish(first, usable - first, line))
+    return false;
+
+  // Move the producer to the next cycle, but leave the
+  // Link TRB unchanged until the controller has crossed it.
+  ep0_index = 0;
+  ep0_cycle ^= 1U;
+  ep0_wrap_pending = true;
+
+  return true;
+}
+
+static bool xhci_ep0_advance(unsigned int count, size_t line) {
+  const unsigned int usable = XHCI_RING_TRBS - 1U;
+
+  ep0_index += count;
+  if (ep0_index > usable)
+    return false;
+
+  if (ep0_wrap_pending) {
+    // Completion of the new transfer confirms that the
+    // controller has followed the old-cycle Link TRB.
+    ep0_wrap_pending = false;
+    if (!xhci_ep0_link_update(line))
+      return false;
+  }
+
+  if (ep0_index == usable) {
+    // The completed transfer ended immediately before
+    // the Link TRB. Prepare for the next traversal.
+    ep0_index = 0;
+    ep0_cycle ^= 1U;
+    if (!xhci_ep0_link_update(line))
+      return false;
+  }
+
+  return true;
+}
+
+static xhci_control_result_t xhci_control_transfer(
     const xhci_setup_packet_t *setup, xhci_control_info_t *result) {
 
   if (!result)
@@ -1677,10 +1729,15 @@ xhci_control_result_t xhci_control_in(
 
   *result = (xhci_control_info_t){0};
 
-  if (!setup || !(setup->request_type & 0x80U) ||
-      setup->length == 0 ||
-      setup->length > XHCI_CONTROL_MAX_DATA)
+  if (!setup || setup->length > XHCI_CONTROL_MAX_DATA)
     return XHCI_CONTROL_NOT_READY;
+
+  // Nonzero-length transfers currently support IN only.
+  if (setup->length != 0U && !(setup->request_type & 0x80U))
+    return XHCI_CONTROL_NOT_READY;
+
+  bool has_data = setup->length != 0U;
+  unsigned int count = has_data ? 3U : 2U;
 
   if (!device_addressed || !internal_hub.prepared ||
       internal_hub_slot == 0 || !controller_running ||
@@ -1704,50 +1761,60 @@ xhci_control_result_t xhci_control_in(
       (cache.data_line_size & (cache.data_line_size - 1U)))
     return XHCI_CONTROL_NOT_READY;
 
-  if (!control_buffer.pages &&
-      !dma_alloc(XHCI_CONTROL_MAX_DATA, 64U, &control_buffer))
-    return XHCI_CONTROL_ALLOCATION_FAILED;
+  if (has_data) {
+    if (!control_buffer.pages &&
+        !dma_alloc(XHCI_CONTROL_MAX_DATA, 64U, &control_buffer))
+      return XHCI_CONTROL_ALLOCATION_FAILED;
 
-  if (!dma_begin_device(&control_buffer, DMA_FROM_DEVICE))
-    return XHCI_CONTROL_DMA_FAILED;
+    if (!dma_begin_device(&control_buffer, DMA_FROM_DEVICE))
+      return XHCI_CONTROL_DMA_FAILED;
+  }
+
+  if (!xhci_ep0_prepare(count, cache.data_line_size)) {
+    ep0_failed = true;
+    return XHCI_CONTROL_RING_FAILED;
+  }
 
   unsigned int first = ep0_index;
-  unsigned int cycle = ep0_cycle;
+  uint32_t cycle_bit = ep0_cycle ? XHCI_TRB_CYCLE : 0U;
   xhci_trb_t *ring = internal_hub.ep0_ring.virtual;
 
-  // USB setup packets are little-endian and eight bytes long.
   uint64_t packet = (uint64_t)setup->request_type |
       ((uint64_t)setup->request << 8) |
       ((uint64_t)setup->value << 16) |
       ((uint64_t)setup->index << 32) |
       ((uint64_t)setup->length << 48);
-  uint32_t cycle_bit = cycle ? XHCI_TRB_CYCLE : 0U;
+
   ring[first].parameter = packet;
   ring[first].status = 8U;
   ring[first].control =
       (XHCI_TRB_SETUP_STAGE << XHCI_TRB_TYPE_SHIFT) |
-      XHCI_TRB_IDT | XHCI_TRB_TRT_IN | cycle_bit;
+      XHCI_TRB_IDT |
+      (has_data ? XHCI_TRB_TRT_IN : 0U) |
+      cycle_bit;
 
-  ring[first + 1U].parameter = control_buffer.bus;
-  ring[first + 1U].status = setup->length;
-  ring[first + 1U].control =
-      (XHCI_TRB_DATA_STAGE << XHCI_TRB_TYPE_SHIFT) |
-      XHCI_TRB_DIR_IN | cycle_bit;
+  if (has_data) {
+    ring[first + 1U].parameter = control_buffer.bus;
+    ring[first + 1U].status = setup->length;
+    ring[first + 1U].control =
+        (XHCI_TRB_DATA_STAGE << XHCI_TRB_TYPE_SHIFT) |
+        XHCI_TRB_DIR_IN | cycle_bit;
+  }
 
-  ring[first + 2U].parameter = 0;
-  ring[first + 2U].status = 0;
-  ring[first + 2U].control =
-      (XHCI_TRB_STATUS_STAGE << XHCI_TRB_TYPE_SHIFT) |
-      XHCI_TRB_IOC | cycle_bit;
+  unsigned int status_index = first + count - 1U;
+  ring[status_index].parameter = 0;
+  ring[status_index].status = 0;
+  ring[status_index].control =
+      (XHCI_TRB_STATUS_STAGE << XHCI_TRB_TYPE_SHIFT) | XHCI_TRB_IOC |
+      (has_data ? 0U : XHCI_TRB_DIR_IN) | cycle_bit;
 
   uint64_t status_trb = internal_hub.ep0_ring.bus +
-      (uint64_t)(first + 2U) * sizeof(xhci_trb_t);
-
+      (uint64_t)status_index * sizeof(xhci_trb_t);
   result->slot_id = internal_hub_slot;
   result->status_trb = status_trb;
-
-  if (!xhci_ep0_publish(first, 3U, cache.data_line_size)) {
-    dma_end_device(&control_buffer);
+  if (!xhci_ep0_publish(first, count, cache.data_line_size)) {
+    if (has_data)
+      dma_end_device(&control_buffer);
     ep0_failed = true;
     return XHCI_CONTROL_RING_FAILED;
   }
@@ -1802,18 +1869,22 @@ xhci_control_result_t xhci_control_in(
       return XHCI_CONTROL_TRANSFER_FAILED;
     }
 
-    if (!dma_end_device(&control_buffer))
-      goto dma_failed;
+    if (has_data) {
+      if (!dma_end_device(&control_buffer))
+        goto dma_failed;
 
-    uint8_t *bytes = control_buffer.virtual;
-    for (unsigned int i = 0; i < setup->length; i++)
-      result->data[i] = bytes[i];
-    result->length = setup->length;
-    if (!xhci_ep0_advance(cache.data_line_size)) {
+      uint8_t *bytes = control_buffer.virtual;
+      for (unsigned int i = 0; i < setup->length; i++)
+        result->data[i] = bytes[i];
+      result->length = setup->length;
+    }
+
+    if (!xhci_ep0_advance(count, cache.data_line_size)) {
       ep0_failed = true;
       ep0_active = false;
       return XHCI_CONTROL_RING_FAILED;
     }
+
     ep0_active = false;
     return XHCI_CONTROL_OK;
   }
@@ -1834,6 +1905,25 @@ dma_failed:
   ep0_failed = true;
   ep0_active = false;
   return XHCI_CONTROL_DMA_FAILED;
+}
+
+xhci_control_result_t xhci_control_in(
+    const xhci_setup_packet_t *setup, xhci_control_info_t *result) {
+
+  if (!setup || !(setup->request_type & 0x80U) ||
+      setup->length == 0U)
+    return XHCI_CONTROL_NOT_READY;
+
+  return xhci_control_transfer(setup, result);
+}
+
+xhci_control_result_t xhci_control_no_data(
+    const xhci_setup_packet_t *setup, xhci_control_info_t *result) {
+
+  if (!setup || setup->length != 0U)
+    return XHCI_CONTROL_NOT_READY;
+
+  return xhci_control_transfer(setup, result);
 }
 
 xhci_noop_result_t xhci_noop(xhci_noop_info_t *result) {

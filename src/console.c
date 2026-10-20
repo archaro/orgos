@@ -1657,9 +1657,65 @@ static void cmd_usb_devices(void) {
   console_puts(info.ep0_state == 1U ? " (Running)\n" : "\n");
 }
 
+static void cmd_usb_configure(void) {
+  static bool configured;
+
+  xhci_control_info_t info;
+  xhci_setup_packet_t setup = {
+    .request_type = 0x80U,
+    .request = 0x08U,  // GET_CONFIGURATION
+    .value = 0U,
+    .index = 0U,
+    .length = 1U
+  };
+  xhci_control_result_t status = xhci_control_in(&setup, &info);
+  if (status != XHCI_CONTROL_OK || info.length != 1U) {
+    console_puts("GET_CONFIGURATION failed.\n");
+    return;
+  }
+  console_puts("USB configuration before: ");
+  console_putu32(info.data[0]);
+  console_putc('\n');
+  if (!configured) {
+    setup.request_type = 0x00U;
+    setup.request = 0x09U;  // SET_CONFIGURATION
+    setup.value = 1U;
+    setup.length = 0U;
+    status = xhci_control_no_data(&setup, &info);
+    console_puts("SET_CONFIGURATION result: ");
+    console_putu32((uint32_t)status);
+    console_puts(", completion: ");
+    console_putu32(info.completion_code);
+    console_putc('\n');
+    if (status != XHCI_CONTROL_OK)
+      return;
+    configured = true;
+  }
+  setup.request_type = 0x80U;
+  setup.request = 0x08U;
+  setup.value = 0U;
+  setup.length = 1U;
+  status = xhci_control_in(&setup, &info);
+  if (status != XHCI_CONTROL_OK || info.length != 1U) {
+    console_puts("Verification GET_CONFIGURATION failed.\n");
+    return;
+  }
+  console_puts("USB configuration after : ");
+  console_putu32(info.data[0]);
+  console_putc('\n');
+  if (info.data[0] == 1U)
+    console_puts("Hub configuration: PASS\n");
+  else
+    console_puts("Hub configuration: FAILED\n");
+}
+
 static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
+  if (next_word_is(&args, "configure") && end_of_args(args)) {
+    cmd_usb_configure();
+    return;
+  }
   if (next_word_is(&args, "devices") && end_of_args(args)) {
     cmd_usb_devices();
     return;
@@ -1708,7 +1764,7 @@ static void cmd_usb(const char *args) {
   if (!end_of_args(args)) {
     console_puts(
     "Usage: usb [state | dma | ready | inspect | noops | ports | protocols |"
-    " events | devices | descriptor | hubinfo]\n");
+    " events | devices | descriptor | hubinfo | configure]\n");
     return;
   }
 
