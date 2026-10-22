@@ -277,6 +277,7 @@ typedef struct {
   uint32_t input_add_flags;
   uint32_t slot_dword0;
   uint32_t slot_dword1;
+  uint32_t slot_dword2;
   uint32_t ep0_dword1;
   uint32_t ep0_dword2;
   uint32_t ep0_dword3;
@@ -284,6 +285,8 @@ typedef struct {
 
 xhci_device_result_t xhci_device_prepare(xhci_device_info_t *result);
 bool xhci_device_get_info(xhci_device_info_t *result);
+xhci_device_result_t xhci_downstream_prepare(
+    uint8_t hub_port, uint8_t speed, xhci_device_info_t *result);
 
 typedef enum {
   XHCI_ADDRESS_OK,

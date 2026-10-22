@@ -1875,11 +1875,76 @@ static void cmd_usb_secondslot(void) {
     console_puts("Second slot: FAILED or NOT READY\n");
 }
 
+
+static void cmd_usb_secondprepare(void) {
+  // Read the hub's live port status rather than assume
+  // a particular connection or negotiated speed.
+  usb_hub_port_t port;
+  usb_hub_result_t hub_result = usb_hub_port_status(3U, &port);
+  if (hub_result != USB_HUB_OK ||
+      !(port.status & (1U << 0)) ||
+      !(port.status & (1U << 1)) ||
+      !(port.status & (1U << 8)) ||
+      (port.status & (1U << 4))) {
+    console_puts(
+        "Downstream port 3 is not ready.\n");
+    return;
+  }
+  // Our current test device is Full Speed.
+  // Reject a High-Speed or Low-Speed connection.
+  if (port.status & ((1U << 9) | (1U << 10))) {
+    console_puts(
+        "Port 3 is not reporting Full Speed.\n");
+    return;
+  }
+  xhci_device_info_t info;
+  xhci_device_result_t result = xhci_downstream_prepare(3U, 1U, &info);
+  console_puts("Downstream device context:\n");
+  console_puts("  Result          : ");
+  console_putu32((uint32_t)result);
+  console_putc('\n');
+  if (result != XHCI_DEVICE_OK)
+    return;
+  console_puts("  Slot ID         : ");
+  console_putu32(info.slot_id);
+  console_putc('\n');
+  console_puts("  Root port       : ");
+  console_putu32(info.root_port);
+  console_putc('\n');
+  console_puts("  Speed ID        : ");
+  console_putu32(info.speed);
+  console_putc('\n');
+  console_puts("  EP0 MPS         : ");
+  console_putu32(info.max_packet_size);
+  console_putc('\n');
+  console_puts("  Slot DW0        : 0x");
+  console_puthex(info.slot_dword0, 8);
+  console_putc('\n');
+  console_puts("  Slot DW1        : 0x");
+  console_puthex(info.slot_dword1, 8);
+  console_putc('\n');
+  console_puts("  Slot DW2        : 0x");
+  console_puthex(info.slot_dword2, 8);
+  console_putc('\n');
+  console_puts("  EP0 DW1         : 0x");
+  console_puthex(info.ep0_dword1, 8);
+  console_putc('\n');
+  console_puts("  DCBAA entry     : 0x");
+  console_puthex64(info.dcbaa_entry);
+  console_putc('\n');
+  console_puts("Downstream context: PASS\n");
+}
+
+
 static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
   if (next_word_is(&args, "secondslot") && end_of_args(args)) {
     cmd_usb_secondslot();
+    return;
+  }
+  if (next_word_is(&args, "secondprepare") && end_of_args(args)) {
+    cmd_usb_secondprepare();
     return;
   }
   const char *reset_args = args;

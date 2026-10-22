@@ -1629,6 +1629,136 @@ dma_failed:
   return XHCI_DEVICE_DMA_FAILED;
 }
 
+
+xhci_device_result_t xhci_downstream_prepare(
+    uint8_t hub_port, uint8_t speed, xhci_device_info_t *result) {
+
+  if (!result)
+    return XHCI_DEVICE_NOT_READY;
+
+  *result = (xhci_device_info_t){0};
+  xhci_device_t *device = &devices[1];
+  if (device->prepared)
+    return XHCI_DEVICE_ALREADY_PREPARED;
+
+  // For now, support the single downstream Full-Speed
+  // device attached directly to our four-port hub.
+  if (hub_port == 0U || hub_port > 4U || speed != 1U ||
+      device->slot_id == 0U ||
+      !internal_hub.prepared || !internal_hub.addressed ||
+      !controller_running || !controller_verified)
+    return XHCI_DEVICE_NOT_READY;
+
+  xhci_info_t controller;
+  if (!xhci_probe(&controller) ||
+      device->slot_id > controller.max_slots ||
+      device->slot_id == internal_hub.slot_id)
+    return XHCI_DEVICE_NOT_READY;
+
+  uint32_t hccparams = xhci_read(XHCI_HCCPARAMS1);
+  uint32_t context_size = (hccparams & XHCI_CONTEXT_SIZE_FLAG) ? 64U : 32U;
+
+  if (!xhci_device_alloc_buffers(device, context_size))
+    return XHCI_DEVICE_ALLOCATION_FAILED;
+
+  device->root_port = internal_hub.root_port;
+  device->hub_slot = internal_hub.slot_id;
+  device->hub_port = hub_port;
+  device->speed = speed;
+  device->ep0_max_packet = 8U;
+  device->route_string = hub_port;
+
+  // Input Context layout:
+  //   Context 0: Input Control Context
+  //   Context 1: Slot Context
+  //   Context 2: EP0 Context
+  uint32_t *control = device->input.virtual;
+  uint32_t *slot = (uint32_t *)((uint8_t *)control + context_size);
+  uint32_t *ep0 = (uint32_t *)((uint8_t *)slot + context_size);
+
+  // Add Slot Context and EP0 Context.
+  control[1] = 0x00000003U;
+
+  // Slot Context DW0:
+  //   Context Entries = 1
+  //   Speed = 1 (Full Speed)
+  //   Route String = downstream port number
+  slot[0] = (1U << 27) | ((uint32_t)speed << 20) | device->route_string;
+
+  // Slot Context DW1:
+  //   Root Hub Port = same root port as parent hub
+  slot[1] = (uint32_t)device->root_port << 16;
+
+  // Slot Context DW2:
+  //   TT Hub Slot ID (bits 7:0)
+  //   TT Port Number (bits 15:8)
+  slot[2] = (uint32_t)device->hub_slot | ((uint32_t)device->hub_port << 8);
+
+  // EP0 Context DW1:
+  //   Initial Full-Speed MPS = 8
+  //   Endpoint Type = Control (4)
+  //   Error Count = 3
+  ep0[1] = ((uint32_t)device->ep0_max_packet << 16) |
+      (XHCI_EP0_TYPE_CONTROL << 3) | (3U << 1);
+
+  // EP0 transfer-ring dequeue pointer, DCS = 1.
+  uint64_t dequeue = device->ep0_ring.bus | 1ULL;
+  ep0[2] = (uint32_t)dequeue;
+  ep0[3] = (uint32_t)(dequeue >> 32);
+  ep0[4] = 8U;
+
+  result->slot_id = device->slot_id;
+  result->root_port = device->root_port;
+  result->speed = device->speed;
+  result->context_size = (uint8_t)context_size;
+  result->max_packet_size = device->ep0_max_packet;
+  result->input_context = device->input.bus;
+  result->output_context = device->output.bus;
+  result->ep0_ring = device->ep0_ring.bus;
+  result->input_add_flags = control[1];
+  result->slot_dword0 = slot[0];
+  result->slot_dword1 = slot[1];
+  result->slot_dword2 = slot[2];
+  result->ep0_dword1 = ep0[1];
+  result->ep0_dword2 = ep0[2];
+  result->ep0_dword3 = ep0[3];
+
+  // Make contexts and ring available for DMA.
+  if (!dma_begin_device(&device->input, DMA_TO_DEVICE))
+    return XHCI_DEVICE_DMA_FAILED;
+
+  if (!dma_begin_device(&device->output, DMA_BIDIRECTIONAL))
+    return XHCI_DEVICE_DMA_FAILED;
+
+  if (!dma_begin_device(&device->ep0_ring, DMA_BIDIRECTIONAL))
+    return XHCI_DEVICE_DMA_FAILED;
+
+  // Publish this device's Output Context in its own
+  // DCBAA entry, leaving the upstream hub untouched.
+  uint64_t *dcbaa = controller_dma.dcbaa.virtual;
+  dcbaa[device->slot_id] = device->output.bus;
+  cache_info_t cache;
+  if (!cache_get_info(&cache) ||
+      cache.data_line_size == 0U ||
+      cache.data_line_size > PAGE_SIZE ||
+      (cache.data_line_size & (cache.data_line_size - 1U)))
+    return XHCI_DEVICE_DMA_FAILED;
+
+  uintptr_t address = (uintptr_t)&dcbaa[device->slot_id];
+  address &= ~(uintptr_t)(cache.data_line_size - 1U);
+
+  if (!cache_clean((const void *)address, cache.data_line_size))
+    return XHCI_DEVICE_DMA_FAILED;
+
+  __asm__ volatile("dsb sy" ::: "memory");
+
+  result->dcbaa_entry = dcbaa[device->slot_id];
+  device->info = *result;
+  device->prepared = true;
+  return XHCI_DEVICE_OK;
+}
+
+
 xhci_address_result_t xhci_address_device(
     xhci_address_info_t *result) {
 
