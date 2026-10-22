@@ -253,6 +253,7 @@ typedef struct {
 } xhci_slot_info_t;
 
 xhci_slot_result_t xhci_enable_slot(xhci_slot_info_t *result);
+xhci_slot_result_t xhci_enable_downstream_slot(xhci_slot_info_t *result);
 
 typedef enum {
   XHCI_DEVICE_OK,

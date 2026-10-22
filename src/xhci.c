@@ -122,6 +122,7 @@ static bool command_outstanding;
 static bool command_ring_failed;
 static xhci_event_stats_t event_stats;
 static bool slot_requested;
+static bool downstream_slot_requested;
 static uint8_t internal_hub_slot;
 
 static uint32_t xhci_read(uint32_t offset) {
@@ -1387,6 +1388,63 @@ xhci_slot_result_t xhci_enable_slot(xhci_slot_info_t *result) {
     return XHCI_SLOT_INVALID_ID;
 
   internal_hub_slot = completion.slot_id;
+  return XHCI_SLOT_OK;
+}
+
+xhci_slot_result_t xhci_enable_downstream_slot(
+    xhci_slot_info_t *result) {
+
+  if (!result)
+    return XHCI_SLOT_NOT_READY;
+
+  *result = (xhci_slot_info_t){0};
+  result->root_port = 1U;
+  result->command_result = XHCI_COMMAND_UNAVAILABLE;
+
+  // Only one attempt is permitted per controller lifetime.
+  // Never issue another Enable Slot following an uncertain
+  // completion: the first command may have succeeded.
+  if (downstream_slot_requested)
+    return XHCI_SLOT_ALREADY_REQUESTED;
+
+  // The upstream hub must already be operational.
+  if (!internal_hub.prepared || !internal_hub.addressed ||
+      internal_hub.slot_id == 0U ||
+      !controller_running || !controller_verified ||
+      command_outstanding || command_ring_failed)
+    return XHCI_SLOT_NOT_READY;
+
+  xhci_info_t controller;
+  if (!xhci_probe(&controller) || controller.max_slots < 2U)
+    return XHCI_SLOT_NOT_READY;
+
+  // Enable Slot does not yet describe the device's topology.
+  // It merely reserves a hardware device slot.
+  xhci_trb_t command = {
+    .parameter = 0U,
+    .status = 0U,
+    .control = XHCI_TRB_ENABLE_SLOT << XHCI_TRB_TYPE_SHIFT
+  };
+
+  downstream_slot_requested = true;
+  xhci_command_completion_t completion = {0};
+  xhci_command_result_t status = xhci_command_submit(&command, &completion);
+  result->command_result = status;
+  result->completion_code = completion.completion_code;
+  result->controller_status = completion.controller_status;
+  result->slot_id = completion.slot_id;
+
+  if (status != XHCI_COMMAND_OK)
+    return XHCI_SLOT_COMMAND_FAILED;
+
+  if (completion.slot_id == 0U ||
+      completion.slot_id > controller.max_slots ||
+      completion.slot_id == internal_hub.slot_id)
+    return XHCI_SLOT_INVALID_ID;
+
+  devices[1].slot_id = completion.slot_id;
+  devices[1].root_port = 1U;
+  devices[1].hub_slot = internal_hub.slot_id;
   return XHCI_SLOT_OK;
 }
 

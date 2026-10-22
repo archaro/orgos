@@ -1853,9 +1853,35 @@ static void cmd_usb_hubreset(uint8_t port) {
   console_puts("Hub port reset: PASS\n");
 }
 
+static void cmd_usb_secondslot(void) {
+  xhci_slot_info_t info;
+  xhci_slot_result_t result = xhci_enable_downstream_slot(&info);
+  console_puts("Second xHCI device slot:\n");
+  console_puts("  Result          : ");
+  console_putu32((uint32_t)result);
+  console_putc('\n');
+  console_puts("  Command result  : ");
+  console_putu32((uint32_t)info.command_result);
+  console_putc('\n');
+  console_puts("  Completion code : ");
+  console_putu32(info.completion_code);
+  console_putc('\n');
+  console_puts("  Hardware slot ID: ");
+  console_putu32(info.slot_id);
+  console_putc('\n');
+  if (result == XHCI_SLOT_OK)
+    console_puts("Second slot: PASS\n");
+  else
+    console_puts("Second slot: FAILED or NOT READY\n");
+}
+
 static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
+  if (next_word_is(&args, "secondslot") && end_of_args(args)) {
+    cmd_usb_secondslot();
+    return;
+  }
   const char *reset_args = args;
   if (next_word_is(&reset_args, "hubreset")) {
     for (uint8_t port = 1U; port <= 4U; port++) {
