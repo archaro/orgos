@@ -1936,9 +1936,81 @@ static void cmd_usb_secondprepare(void) {
 }
 
 
+static void cmd_usb_hubcontext(void) {
+  // Read the USB 2.0 hub descriptor.
+  xhci_setup_packet_t setup = {
+    .request_type = 0xa0U,
+    .request = 0x06U,
+    .value = 0x2900U,
+    .index = 0U,
+    .length = 9U
+  };
+
+  xhci_control_info_t descriptor;
+  xhci_control_result_t transfer = xhci_control_in(&setup, &descriptor);
+  if (transfer != XHCI_CONTROL_OK || descriptor.length != 9U ||
+      descriptor.data[0] != 9U || descriptor.data[1] != 0x29U) {
+    console_puts("Hub descriptor read: FAILED\n");
+    return;
+  }
+  uint8_t ports = descriptor.data[2];
+  uint16_t characteristics = (uint16_t)descriptor.data[3] |
+      ((uint16_t)descriptor.data[4] << 8);
+  // USB hub characteristics bits 6:5 specify TT
+  // Think Time. Bits 5:6 map directly to xHCI TTT.
+  uint8_t ttt = (uint8_t)((characteristics >> 5) & 3U);
+  xhci_hub_info_t info;
+  xhci_hub_result_t result = xhci_hub_configure(ports, ttt, &info);
+  console_puts("Internal hub xHCI configuration:\n");
+  console_puts("  Result          : ");
+  console_putu32((uint32_t)result);
+  console_putc('\n');
+  console_puts("  Command result  : ");
+  console_putu32((uint32_t)info.command_result);
+  console_putc('\n');
+  console_puts("  Completion code : ");
+  console_putu32(info.completion_code);
+  console_putc('\n');
+  console_puts("  Hub slot ID     : ");
+  console_putu32(info.slot_id);
+  console_putc('\n');
+  console_puts("  Downstream ports: ");
+  console_putu32(ports);
+  console_putc('\n');
+  console_puts("  TT Think Time   : ");
+  console_putu32(ttt);
+  console_putc('\n');
+  console_puts("  Input DW0       : 0x");
+  console_puthex(info.slot_dword0, 8);
+  console_putc('\n');
+  console_puts("  Input DW1       : 0x");
+  console_puthex(info.slot_dword1, 8);
+  console_putc('\n');
+  console_puts("  Input DW2       : 0x");
+  console_puthex(info.slot_dword2, 8);
+  console_putc('\n');
+  console_puts("  Output DW0      : 0x");
+  console_puthex(info.output_dword0, 8);
+  console_putc('\n');
+  console_puts("  Output DW1      : 0x");
+  console_puthex(info.output_dword1, 8);
+  console_putc('\n');
+  console_puts("  Output DW2      : 0x");
+  console_puthex(info.output_dword2, 8);
+  console_putc('\n');
+  if (result == XHCI_HUB_OK)
+    console_puts("Hub xHCI configuration: PASS\n");
+  else
+    console_puts("Hub xHCI configuration: FAILED\n");
+}
+
 static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
+  if (next_word_is(&args, "hubcontext") && end_of_args(args)) {
+    cmd_usb_hubcontext();
+    return;
+  }
   if (next_word_is(&args, "secondslot") && end_of_args(args)) {
     cmd_usb_secondslot();
     return;
@@ -2022,7 +2094,7 @@ static void cmd_usb(const char *args) {
     console_puts(
     "Usage: usb [state | dma | ready | inspect | noops | ports | protocols |"
     " events | devices | descriptor | hubinfo | configure | hubports |"
-    " hubpower | hubreset]\n");
+    " hubpower | hubreset | hubcontext | secondslot | secondprepare]\n");
     return;
   }
 

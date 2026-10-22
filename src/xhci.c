@@ -95,6 +95,8 @@ typedef struct {
   xhci_device_info_t info;
 } xhci_device_t;
 
+static bool hub_configuration_attempted;
+static bool hub_configured;
 static bool ep0_wrap_pending;
 static dma_buffer_t control_buffer;
 static unsigned int ep0_index;
@@ -424,6 +426,7 @@ xhci_port_reset_result_t xhci_port_reset(
 #define XHCI_TRB_IOC          (1U << 5)
 #define XHCI_TRB_IDT          (1U << 6)
 #define XHCI_TRB_DIR_IN       (1U << 16)
+#define XHCI_SLOT_HUB_FLAG (1U << 26)
 #define XHCI_TRB_SETUP_STAGE   2U
 #define XHCI_TRB_DATA_STAGE    3U
 #define XHCI_TRB_TRT_IN       (3U << 16)
@@ -433,6 +436,7 @@ xhci_port_reset_result_t xhci_port_reset(
 #define XHCI_TRB_ENABLE_SLOT 9U
 #define XHCI_TRB_TYPE_SHIFT 10U
 #define XHCI_TRB_ADDRESS_DEVICE 11U
+#define XHCI_TRB_CONFIGURE_ENDPOINT 12U
 #define XHCI_TRB_NOOP_CMD       23U
 #define XHCI_TRB_TRANSFER_EVENT 32U
 #define XHCI_TRB_COMMAND_EVENT  33U
@@ -1756,6 +1760,105 @@ xhci_device_result_t xhci_downstream_prepare(
   device->info = *result;
   device->prepared = true;
   return XHCI_DEVICE_OK;
+}
+
+
+xhci_hub_result_t xhci_hub_configure(
+    uint8_t ports, uint8_t tt_think_time, xhci_hub_info_t *result) {
+
+  if (!result)
+    return XHCI_HUB_NOT_READY;
+
+  *result = (xhci_hub_info_t){0};
+  if (hub_configuration_attempted)
+    return hub_configured ?  XHCI_HUB_ALREADY_CONFIGURED : XHCI_HUB_NOT_READY;
+
+  if (!internal_hub.prepared || !internal_hub.addressed ||
+      internal_hub.slot_id == 0U ||
+      !controller_running || !controller_verified ||
+      command_outstanding || command_ring_failed ||
+      ports == 0U || tt_think_time > 3U)
+    return XHCI_HUB_NOT_READY;
+
+  if (internal_hub.input.owner != DMA_OWNER_DEVICE ||
+      internal_hub.output.owner != DMA_OWNER_DEVICE)
+    return XHCI_HUB_NOT_READY;
+
+  cache_info_t cache;
+  if (!cache_get_info(&cache) || cache.data_line_size == 0U ||
+      cache.data_line_size > PAGE_SIZE ||
+      (cache.data_line_size & (cache.data_line_size - 1U)))
+    return XHCI_HUB_DMA_FAILED;
+
+  uint32_t size = internal_hub.context_size;
+  uint8_t *input = internal_hub.input.virtual;
+  uint32_t *control = (uint32_t *)input;
+  uint32_t *slot = (uint32_t *)(input + size);
+  // Configure Endpoint:
+  // Drop Context flags = 0.
+  // Add Context flags = A0 only (Slot Context).
+  // No endpoint contexts are added or removed.
+  control[0] = 0U;
+  control[1] = 1U;
+
+  // Preserve route, speed and context entries.
+  slot[0] |= XHCI_SLOT_HUB_FLAG;
+
+  // Slot DW1: Number of downstream ports, bits 31:24.
+  slot[1] = (slot[1] & 0x00ffffffU) | ((uint32_t)ports << 24);
+
+  // Slot DW2: TT Think Time, bits 17:16.
+  // MTT remains zero for this single-TT hub.
+  slot[2] = (slot[2] & ~0x00030000U) | ((uint32_t)tt_think_time << 16);
+
+  result->slot_id = internal_hub.slot_id;
+  result->ports = ports;
+  result->tt_think_time = tt_think_time;
+  result->slot_dword0 = slot[0];
+  result->slot_dword1 = slot[1];
+  result->slot_dword2 = slot[2];
+
+  // The input allocation is already device-owned.
+  // Publish the modified control and slot contexts.
+  if (!cache_clean(input, 2U * size))
+    return XHCI_HUB_DMA_FAILED;
+
+  __asm__ volatile("dsb sy" ::: "memory");
+
+  xhci_trb_t command = {
+    .parameter = internal_hub.input.bus,
+    .status = 0U,
+    .control = (XHCI_TRB_CONFIGURE_ENDPOINT << XHCI_TRB_TYPE_SHIFT) |
+        ((uint32_t)internal_hub.slot_id << 24)
+  };
+
+  // A completion timeout makes the controller's state
+  // uncertain. Never submit this operation twice.
+  hub_configuration_attempted = true;
+  xhci_command_completion_t completion = {0};
+  xhci_command_result_t status = xhci_command_submit(&command, &completion);
+  result->command_result = status;
+  result->completion_code = completion.completion_code;
+
+  if (status != XHCI_COMMAND_OK || completion.slot_id != internal_hub.slot_id)
+    return XHCI_HUB_COMMAND_FAILED;
+
+  // Refresh the first two Output Context entries.
+  uint8_t *output = internal_hub.output.virtual;
+  if (!cache_invalidate(output, 2U * size))
+    return XHCI_HUB_DMA_FAILED;
+
+  uint32_t *output_slot = (uint32_t *)output;
+  result->output_dword0 = output_slot[0];
+  result->output_dword1 = output_slot[1];
+  result->output_dword2 = output_slot[2];
+  if (!(output_slot[0] & XHCI_SLOT_HUB_FLAG) ||
+      ((output_slot[1] >> 24) & 0xffU) != ports ||
+      ((output_slot[2] >> 16) & 3U) != tt_think_time)
+    return XHCI_HUB_VERIFY_FAILED;
+
+  hub_configured = true;
+  return XHCI_HUB_OK;
 }
 
 

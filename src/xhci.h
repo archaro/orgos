@@ -312,6 +312,32 @@ typedef struct {
 
 xhci_address_result_t xhci_address_device(xhci_address_info_t *result);
 
+typedef enum {
+  XHCI_HUB_OK,
+  XHCI_HUB_NOT_READY,
+  XHCI_HUB_ALREADY_CONFIGURED,
+  XHCI_HUB_DMA_FAILED,
+  XHCI_HUB_COMMAND_FAILED,
+  XHCI_HUB_VERIFY_FAILED
+} xhci_hub_result_t;
+
+typedef struct {
+  uint8_t slot_id;
+  uint8_t ports;
+  uint8_t tt_think_time;
+  uint8_t completion_code;
+  uint32_t slot_dword0;
+  uint32_t slot_dword1;
+  uint32_t slot_dword2;
+  uint32_t output_dword0;
+  uint32_t output_dword1;
+  uint32_t output_dword2;
+  xhci_command_result_t command_result;
+} xhci_hub_info_t;
+
+xhci_hub_result_t xhci_hub_configure( uint8_t ports, uint8_t tt_think_time,
+    xhci_hub_info_t *result);
+
 #define XHCI_CONTROL_MAX_DATA 64U
 
 typedef enum {
