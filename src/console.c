@@ -2004,9 +2004,62 @@ static void cmd_usb_hubcontext(void) {
     console_puts("Hub xHCI configuration: FAILED\n");
 }
 
+static void cmd_usb_secondaddress(void) {
+  // Verify that port 3 remains connected and enabled.
+  usb_hub_port_t port;
+  usb_hub_result_t hub_status = usb_hub_port_status(3U, &port);
+  if (hub_status != USB_HUB_OK ||
+      (port.status & 0x0103U) != 0x0103U ||
+      (port.status & 0x0018U) != 0U) {
+    console_puts("Downstream port 3 is not ready.\n");
+    return;
+  }
+  xhci_address_info_t info;
+  xhci_address_result_t result = xhci_address_downstream(&info);
+  console_puts("Downstream USB device addressing:\n");
+  console_puts("  Result          : ");
+  console_putu32((uint32_t)result);
+  console_putc('\n');
+  console_puts("  Command result  : ");
+  console_putu32((uint32_t)info.command_result);
+  console_putc('\n');
+  console_puts("  Completion code : ");
+  console_putu32(info.completion_code);
+  console_putc('\n');
+  console_puts("  Slot ID         : ");
+  console_putu32(info.slot_id);
+  console_putc('\n');
+  console_puts("  USB address     : ");
+  console_putu32(info.usb_address);
+  console_putc('\n');
+  console_puts("  Slot state      : ");
+  console_putu32(info.slot_state);
+  console_putc('\n');
+  console_puts("  EP0 state       : ");
+  console_putu32(info.ep0_state);
+  console_putc('\n');
+  console_puts("  Slot DW3        : 0x");
+  console_puthex(info.slot_dword3, 8);
+  console_putc('\n');
+  console_puts("  EP0 DW0         : 0x");
+  console_puthex(info.ep0_dword0, 8);
+  console_putc('\n');
+  console_puts("  Elapsed         : ");
+  console_putu64(info.elapsed_us);
+  console_puts(" us\n");
+  if (result == XHCI_ADDRESS_OK)
+    console_puts("Downstream addressing: PASS\n");
+  else
+    console_puts("Downstream addressing: FAILED\n");
+}
+
 static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
+  if (next_word_is(&args, "secondaddress") && end_of_args(args)) {
+    cmd_usb_secondaddress();
+    return;
+  }
   if (next_word_is(&args, "hubcontext") && end_of_args(args)) {
     cmd_usb_hubcontext();
     return;
@@ -2094,7 +2147,8 @@ static void cmd_usb(const char *args) {
     console_puts(
     "Usage: usb [state | dma | ready | inspect | noops | ports | protocols |"
     " events | devices | descriptor | hubinfo | configure | hubports |"
-    " hubpower | hubreset | hubcontext | secondslot | secondprepare]\n");
+    " hubpower | hubreset | hubcontext | secondslot | secondprepare |"
+    " secondaddress]\n");
     return;
   }
 

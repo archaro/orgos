@@ -311,6 +311,7 @@ typedef struct {
 } xhci_address_info_t;
 
 xhci_address_result_t xhci_address_device(xhci_address_info_t *result);
+xhci_address_result_t xhci_address_downstream( xhci_address_info_t *result);
 
 typedef enum {
   XHCI_HUB_OK,

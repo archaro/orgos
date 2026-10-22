@@ -107,6 +107,7 @@ static bool ep0_active;
 static xhci_device_t devices[XHCI_MAX_DEVICES];
 #define internal_hub devices[0]
 static bool address_attempted;
+static bool downstream_address_attempted;
 static bool device_addressed;
 static xhci_address_info_t address_info;
 static xhci_dma_t controller_dma;
@@ -1861,7 +1862,6 @@ xhci_hub_result_t xhci_hub_configure(
   return XHCI_HUB_OK;
 }
 
-
 xhci_address_result_t xhci_address_device(
     xhci_address_info_t *result) {
 
@@ -1958,6 +1958,124 @@ xhci_address_result_t xhci_address_device(
   device_addressed = true;
   return XHCI_ADDRESS_OK;
 }
+
+xhci_address_result_t xhci_address_downstream(xhci_address_info_t *result) {
+  if (!result)
+    return XHCI_ADDRESS_NOT_READY;
+
+  *result = (xhci_address_info_t){0};
+  xhci_device_t *device = &devices[1];
+  // Never repeat Address Device after an uncertain completion.
+  if (downstream_address_attempted)
+    return XHCI_ADDRESS_ALREADY_ATTEMPTED;
+
+  // The parent hub must already be registered as a hub
+  // in the xHCI Output Slot Context.
+  if (!hub_configured || !internal_hub.addressed || !device->prepared ||
+      device->addressed || device->slot_id == 0U ||
+      device->hub_slot != internal_hub.slot_id ||
+      !controller_running || !controller_verified ||
+      command_outstanding || command_ring_failed)
+    return XHCI_ADDRESS_NOT_READY;
+
+  if (device->input.owner != DMA_OWNER_DEVICE ||
+      device->output.owner != DMA_OWNER_DEVICE ||
+      device->ep0_ring.owner != DMA_OWNER_DEVICE)
+    return XHCI_ADDRESS_NOT_READY;
+
+  // Ensure the expected downstream topology is present.
+  if (device->root_port != 1U || device->hub_port == 0U ||
+      device->hub_port > 4U || device->speed != 1U ||
+      device->route_string != device->hub_port ||
+      device->ep0_max_packet != 8U)
+    return XHCI_ADDRESS_NOT_READY;
+
+  xhci_info_t controller;
+  if (!xhci_probe(&controller) || device->slot_id > controller.max_slots ||
+      device->slot_id == internal_hub.slot_id)
+    return XHCI_ADDRESS_NOT_READY;
+
+  // Input Context must be aligned to at least 16 bytes.
+  if (device->input.bus & 0x0fULL)
+    return XHCI_ADDRESS_NOT_READY;
+
+  if (device->context_size != 32U && device->context_size != 64U)
+    return XHCI_ADDRESS_NOT_READY;
+
+  // The contexts were prepared in the previous sprint.
+  // Check their essential topology fields before use.
+  uint32_t size = device->context_size;
+  uint8_t *input = device->input.virtual;
+  uint32_t *control = (uint32_t *)input;
+  uint32_t *slot = (uint32_t *)(input + size);
+  uint32_t *ep0 = (uint32_t *)(input + 2U * size);
+
+  if (control[1] != 3U ||
+      (slot[0] & 0x000fffffU) != device->route_string ||
+      ((slot[0] >> 20) & 0x0fU) != device->speed ||
+      ((slot[1] >> 16) & 0xffU) != device->root_port ||
+      (slot[2] & 0xffU) != device->hub_slot ||
+      ((slot[2] >> 8) & 0xffU) != device->hub_port ||
+      ((ep0[1] >> 16) & 0xffffU) != 8U)
+    return XHCI_ADDRESS_NOT_READY;
+
+  result->slot_id = device->slot_id;
+  result->command_result = XHCI_COMMAND_UNAVAILABLE;
+
+  // Address Device Command:
+  //   Parameter: Input Context bus address
+  //   Slot ID:   downstream device slot
+  //   BSR = 0:   controller performs SET_ADDRESS
+  xhci_trb_t command = {
+    .parameter = device->input.bus,
+    .status = 0U,
+    .control = (XHCI_TRB_ADDRESS_DEVICE << XHCI_TRB_TYPE_SHIFT) |
+        ((uint32_t)device->slot_id << 24)
+  };
+
+  downstream_address_attempted = true;
+  xhci_command_completion_t completion = {0};
+  xhci_command_result_t status = xhci_command_submit(&command, &completion);
+  result->command_result = status;
+  result->completion_code = completion.completion_code;
+  result->controller_status = completion.controller_status;
+  result->elapsed_us = completion.elapsed_us;
+
+  if (status != XHCI_COMMAND_OK)
+    return XHCI_ADDRESS_COMMAND_FAILED;
+
+  if (completion.slot_id != device->slot_id)
+    return XHCI_ADDRESS_BAD_SLOT;
+
+  // Refresh the Output Slot and EP0 contexts.
+  // DMA ownership remains with the controller.
+  cache_info_t cache;
+  if (!cache_get_info(&cache) || cache.data_line_size == 0U ||
+      cache.data_line_size > PAGE_SIZE ||
+      (cache.data_line_size & (cache.data_line_size - 1U)))
+    return XHCI_ADDRESS_VERIFY_FAILED;
+
+  uint8_t *output = device->output.virtual;
+  if (!cache_invalidate(output, 2U * size))
+    return XHCI_ADDRESS_VERIFY_FAILED;
+
+  uint32_t *output_slot = (uint32_t *)output;
+  uint32_t *output_ep0 = (uint32_t *)(output + size);
+  result->slot_dword3 = output_slot[3];
+  result->ep0_dword0 = output_ep0[0];
+  result->usb_address = (uint8_t)(output_slot[3] & 0xffU);
+  result->slot_state = (uint8_t)((output_slot[3] >> 27) & 0x1fU);
+  result->ep0_state = (uint8_t)(output_ep0[0] & 0x07U);
+  // A successful Address Device command should leave
+  // the slot Addressed and Endpoint 0 Running.
+  if (result->usb_address == 0U || result->usb_address > 127U ||
+      result->slot_state != 2U || result->ep0_state != 1U)
+    return XHCI_ADDRESS_VERIFY_FAILED;
+
+  device->addressed = true;
+  return XHCI_ADDRESS_OK;
+}
+
 
 static bool xhci_ep0_publish(unsigned int first,
     unsigned int count, size_t line) {
