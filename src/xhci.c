@@ -82,7 +82,16 @@ typedef struct {
   dma_buffer_t input;
   dma_buffer_t output;
   dma_buffer_t ep0_ring;
+  uint8_t slot_id;
+  uint8_t root_port;
+  uint8_t hub_slot;
+  uint8_t hub_port;
+  uint8_t speed;
+  uint8_t context_size;
+  uint16_t ep0_max_packet;
+  uint32_t route_string;
   bool prepared;
+  bool addressed;
   xhci_device_info_t info;
 } xhci_device_t;
 
@@ -92,7 +101,9 @@ static unsigned int ep0_index;
 static unsigned int ep0_cycle = 1U;
 static bool ep0_failed;
 static bool ep0_active;
-static xhci_device_t internal_hub;
+#define XHCI_MAX_DEVICES 2U
+static xhci_device_t devices[XHCI_MAX_DEVICES];
+#define internal_hub devices[0]
 static bool address_attempted;
 static bool device_addressed;
 static xhci_address_info_t address_info;
@@ -1383,15 +1394,48 @@ xhci_slot_result_t xhci_enable_slot(xhci_slot_info_t *result) {
 #define XHCI_EP0_TYPE_CONTROL 4U
 #define XHCI_EP0_MAX_PACKET 64U
 
-static void xhci_device_release_partial(void) {
-  if (internal_hub.ep0_ring.pages)
-    dma_free(&internal_hub.ep0_ring);
+static bool xhci_device_alloc_buffers(xhci_device_t *device,
+    uint32_t context_size) {
 
-  if (internal_hub.output.pages)
-    dma_free(&internal_hub.output);
+  if (!device || (context_size != 32U && context_size != 64U))
+    return false;
 
-  if (internal_hub.input.pages)
-    dma_free(&internal_hub.input);
+  uint32_t input_size = 34U * context_size;
+  uint32_t output_size = 33U * context_size;
+
+  if (!dma_alloc(input_size, 64U, &device->input))
+    goto failed;
+
+  if (!dma_alloc(output_size, 64U, &device->output))
+    goto failed;
+
+  if (!dma_alloc(PAGE_SIZE, 64U, &device->ep0_ring))
+    goto failed;
+
+  // Prepare the transfer-ring Link TRB.
+  // The controller will follow this when it reaches
+  // the end of the ring.
+  xhci_trb_t *ring = device->ep0_ring.virtual;
+  xhci_trb_t *link = &ring[XHCI_RING_TRBS - 1U];
+  link->parameter = device->ep0_ring.bus;
+  link->status = 0U;
+  link->control = (XHCI_TRB_LINK << XHCI_TRB_TYPE_SHIFT) |
+      XHCI_TRB_TOGGLE_CYCLE | XHCI_TRB_CYCLE;
+  device->context_size = (uint8_t)context_size;
+  return true;
+
+failed:
+  // These allocations have not been handed to the controller.
+  if (device->ep0_ring.pages)
+    dma_free(&device->ep0_ring);
+
+  if (device->output.pages)
+    dma_free(&device->output);
+
+  if (device->input.pages)
+    dma_free(&device->input);
+
+  return false;
 }
 
 bool xhci_device_get_info(xhci_device_info_t *result) {
@@ -1427,27 +1471,16 @@ xhci_device_result_t xhci_device_prepare(xhci_device_info_t *result) {
   uint32_t hccparams = xhci_read(XHCI_HCCPARAMS1);
   uint32_t context_size =
       (hccparams & XHCI_CONTEXT_SIZE_FLAG) ? 64U : 32U;
-  // The input context has an additional control context.
-  uint32_t input_size = 34U * context_size;
-  uint32_t output_size = 33U * context_size;
+  if (!xhci_device_alloc_buffers(&internal_hub, context_size))
+    return XHCI_DEVICE_ALLOCATION_FAILED;
 
-  if (!dma_alloc(input_size, 64U, &internal_hub.input))
-    goto allocation_failed;
-
-  if (!dma_alloc(output_size, 64U, &internal_hub.output))
-    goto allocation_failed;
-
-  if (!dma_alloc(PAGE_SIZE, 64U, &internal_hub.ep0_ring))
-    goto allocation_failed;
-
-  // Endpoint 0 uses the same 256-TRB ring format
-  // as the controller's command ring.
-  xhci_trb_t *ring = internal_hub.ep0_ring.virtual;
-  xhci_trb_t *link = &ring[XHCI_RING_TRBS - 1U];
-  link->parameter = internal_hub.ep0_ring.bus;
-  link->status = 0;
-  link->control = (XHCI_TRB_LINK << XHCI_TRB_TYPE_SHIFT) |
-      XHCI_TRB_TOGGLE_CYCLE | XHCI_TRB_CYCLE;
+  internal_hub.slot_id = internal_hub_slot;
+  internal_hub.root_port = 1U;
+  internal_hub.hub_slot = 0U;
+  internal_hub.hub_port = 0U;
+  internal_hub.speed = port.speed;
+  internal_hub.ep0_max_packet = XHCI_EP0_MAX_PACKET;
+  internal_hub.route_string = 0U;
 
   // Context offsets are measured in context entries,
   // not necessarily in 32-byte units.
@@ -1536,10 +1569,6 @@ dma_failed:
   // Keep handed-off allocations alive. This is conservative;
   // cleanup can be generalised with the device lifecycle.
   return XHCI_DEVICE_DMA_FAILED;
-
-allocation_failed:
-  xhci_device_release_partial();
-  return XHCI_DEVICE_ALLOCATION_FAILED;
 }
 
 xhci_address_result_t xhci_address_device(
@@ -1633,6 +1662,7 @@ xhci_address_result_t xhci_address_device(
       result->slot_state != 2U || result->ep0_state != 1U)
     return XHCI_ADDRESS_VERIFY_FAILED;
 
+  internal_hub.addressed = true;
   address_info = *result;
   device_addressed = true;
   return XHCI_ADDRESS_OK;
