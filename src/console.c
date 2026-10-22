@@ -1802,9 +1802,74 @@ static void cmd_usb_hubpower(void) {
   cmd_usb_hubports();
 }
 
+static void cmd_usb_hubreset(uint8_t port) {
+  usb_hub_reset_info_t info;
+  usb_hub_result_t result = usb_hub_port_reset(port, &info);
+  console_puts("USB downstream port reset:\n");
+  console_puts("  Port          : ");
+  console_putu32(info.port);
+  console_putc('\n');
+  console_puts("  Before status : 0x");
+  console_puthex(info.before_status, 4);
+  console_putc('\n');
+  console_puts("  Before change : 0x");
+  console_puthex(info.before_change, 4);
+  console_putc('\n');
+  console_puts("  After status  : 0x");
+  console_puthex(info.after_status, 4);
+  console_putc('\n');
+  console_puts("  After change  : 0x");
+  console_puthex(info.after_change, 4);
+  console_putc('\n');
+  console_puts("  Final change  : 0x");
+  console_puthex(info.final_change, 4);
+  console_putc('\n');
+  console_puts("  Elapsed       : ");
+  console_putu32(info.elapsed_ms);
+  console_puts(" ms\n");
+  if (result != USB_HUB_OK) {
+    console_puts("Hub port reset: FAILED (result ");
+    console_putu32((uint32_t)result);
+    console_puts(", completion ");
+    console_putu32(info.completion_code);
+    console_puts(")\n");
+    return;
+  }
+  console_puts("  Device speed  : ");
+  switch (info.speed) {
+    case 1U:
+      console_puts("Full Speed\n");
+      break;
+    case 2U:
+      console_puts("Low Speed\n");
+      break;
+    case 3U:
+      console_puts("High Speed\n");
+      break;
+    default:
+      console_puts("Unknown\n");
+      break;
+  }
+  console_puts("Hub port reset: PASS\n");
+}
+
 static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
+  const char *reset_args = args;
+  if (next_word_is(&reset_args, "hubreset")) {
+    for (uint8_t port = 1U; port <= 4U; port++) {
+      const char *port_args = reset_args;
+      const char *names[] = {"1", "2", "3", "4"};
+      if (next_word_is(&port_args, names[port - 1U]) &&
+          end_of_args(port_args)) {
+        cmd_usb_hubreset(port);
+        return;
+      }
+    }
+    console_puts("Usage: usb hubreset <1|2|3|4>\n");
+    return;
+  }
   if (next_word_is(&args, "hubpower") && end_of_args(args)) {
     cmd_usb_hubpower();
     return;
@@ -1866,7 +1931,7 @@ static void cmd_usb(const char *args) {
     console_puts(
     "Usage: usb [state | dma | ready | inspect | noops | ports | protocols |"
     " events | devices | descriptor | hubinfo | configure | hubports |"
-    " hubpower]\n");
+    " hubpower | hubreset]\n");
     return;
   }
 

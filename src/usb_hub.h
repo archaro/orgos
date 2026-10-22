@@ -10,7 +10,11 @@ typedef enum {
   USB_HUB_INVALID_PORT,
   USB_HUB_NOT_READY,
   USB_HUB_TRANSFER_FAILED,
-  USB_HUB_INVALID_RESPONSE
+  USB_HUB_INVALID_RESPONSE,
+  USB_HUB_DISCONNECTED,
+  USB_HUB_NOT_POWERED,
+  USB_HUB_RESET_TIMEOUT,
+  USB_HUB_RESET_FAILED
 } usb_hub_result_t;
 
 typedef struct {
@@ -22,4 +26,20 @@ typedef struct {
 } usb_hub_port_t;
 
 usb_hub_result_t usb_hub_port_status(uint8_t port, usb_hub_port_t *result);
+typedef struct {
+  uint8_t port;
+  uint8_t speed;
+  uint16_t before_status;
+  uint16_t before_change;
+  uint16_t after_status;
+  uint16_t after_change;
+  uint16_t final_change;
+  uint32_t elapsed_ms;
+  uint8_t completion_code;
+  xhci_control_result_t transfer_result;
+} usb_hub_reset_info_t;
+
+usb_hub_result_t usb_hub_port_reset(
+    uint8_t port, usb_hub_reset_info_t *result);
+
 usb_hub_result_t usb_hub_power_on(usb_hub_port_t *result);

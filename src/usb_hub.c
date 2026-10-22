@@ -8,11 +8,26 @@
 
 #define USB_HUB_PORTS 4U
 
-#define USB_REQ_GET_STATUS 0x00U
 #define USB_RT_HUB_PORT_IN 0xA3U
+#define USB_RT_HUB_PORT_OUT 0x23U
+
+#define USB_REQ_GET_STATUS 0x00U
 #define USB_REQ_SET_FEATURE 0x03U
 #define USB_REQ_GET_CONFIGURATION 0x08U
-#define USB_RT_HUB_PORT_OUT 0x23U
+#define USB_HUB_REQ_CLEAR_FEATURE 0x01U
+#define USB_HUB_REQ_SET_FEATURE   0x03U
+#define USB_HUB_PORT_REQUEST_OUT  0x23U
+
+#define USB_HUB_FEATURE_RESET       4U
+#define USB_HUB_CHANGE_CONNECTION  16U
+#define USB_HUB_CHANGE_RESET       20U
+
+#define USB_HUB_STATUS_CONNECTION (1U << 0)
+#define USB_HUB_STATUS_ENABLE     (1U << 1)
+#define USB_HUB_STATUS_RESET      (1U << 4)
+#define USB_HUB_STATUS_POWER      (1U << 8)
+
+#define USB_HUB_RESET_TIMEOUT_MS 500U
 
 #define USB_HUB_PORT_POWER 8U
 #define USB_HUB_POWER_DELAY_MS 120U
@@ -147,5 +162,138 @@ usb_hub_result_t usb_hub_power_on(usb_hub_port_t *result) {
   }
 
   return USB_HUB_OK;
+}
+
+static usb_hub_result_t usb_hub_port_feature(
+    uint8_t port, uint8_t request, uint16_t feature,
+    xhci_control_info_t *result) {
+
+  xhci_setup_packet_t setup = {
+    .request_type = USB_HUB_PORT_REQUEST_OUT,
+    .request = request,
+    .value = feature,
+    .index = port,
+    .length = 0U
+  };
+
+  xhci_control_result_t status = xhci_control_no_data(&setup, result);
+
+  if (status != XHCI_CONTROL_OK)
+    return USB_HUB_TRANSFER_FAILED;
+
+  return USB_HUB_OK;
+}
+
+usb_hub_result_t usb_hub_port_reset(
+    uint8_t port, usb_hub_reset_info_t *result) {
+
+  if (!result)
+    return USB_HUB_NOT_READY;
+
+  *result = (usb_hub_reset_info_t){0};
+  result->port = port;
+
+  if (port == 0U || port > USB_HUB_PORTS)
+    return USB_HUB_INVALID_PORT;
+
+  usb_hub_port_t before;
+  usb_hub_result_t status =
+      usb_hub_port_status(port, &before);
+
+  if (status != USB_HUB_OK)
+    return status;
+
+  result->before_status = before.status;
+  result->before_change = before.change;
+
+  if (!(before.status & USB_HUB_STATUS_POWER))
+    return USB_HUB_NOT_POWERED;
+
+  if (!(before.status & USB_HUB_STATUS_CONNECTION))
+    return USB_HUB_DISCONNECTED;
+
+  // SET_FEATURE(PORT_RESET).
+  // This resets a downstream hub port, not an xHCI root port.
+  xhci_control_info_t transfer;
+  status = usb_hub_port_feature(
+      port, USB_HUB_REQ_SET_FEATURE,
+      USB_HUB_FEATURE_RESET, &transfer);
+
+  result->transfer_result = status == USB_HUB_OK ?
+      XHCI_CONTROL_OK : XHCI_CONTROL_TRANSFER_FAILED;
+  result->completion_code = transfer.completion_code;
+
+  if (status != USB_HUB_OK)
+    return status;
+
+  uint64_t started = timer_now_us();
+
+  for (unsigned int ms = 0; ms < USB_HUB_RESET_TIMEOUT_MS; ms++) {
+    // Poll using GET_STATUS. A completed reset should
+    // clear PORT_RESET and set C_PORT_RESET.
+    timer_delay_ms(1);
+
+    usb_hub_port_t current;
+    status = usb_hub_port_status(port, &current);
+
+    if (status != USB_HUB_OK)
+      return status;
+
+    result->after_status = current.status;
+    result->after_change = current.change;
+    result->elapsed_ms = (uint32_t)((timer_now_us() - started) / 1000ULL);
+
+    if (!(current.status & USB_HUB_STATUS_CONNECTION))
+      return USB_HUB_DISCONNECTED;
+
+    if (current.status & USB_HUB_STATUS_RESET)
+      continue;
+
+    if (!(current.change & (1U << 4)))
+      continue;
+
+    if (!(current.status & USB_HUB_STATUS_ENABLE))
+      return USB_HUB_RESET_FAILED;
+
+    // Decode the speed after reset has completed.
+    if (current.status & (1U << 10))
+      result->speed = 3U;  // High Speed
+    else if (current.status & (1U << 9))
+      result->speed = 2U;  // Low Speed (xHCI speed ID)
+    else
+      result->speed = 1U;  // Full Speed
+
+    // Acknowledge C_PORT_RESET.
+    status = usb_hub_port_feature(port, USB_HUB_REQ_CLEAR_FEATURE,
+        USB_HUB_CHANGE_RESET, &transfer);
+    if (status != USB_HUB_OK)
+      return status;
+
+    // Acknowledge any connection change observed
+    // during this reset sequence.
+    if (current.change & (1U << 0)) {
+      status = usb_hub_port_feature(
+          port, USB_HUB_REQ_CLEAR_FEATURE,
+          USB_HUB_CHANGE_CONNECTION, &transfer);
+      if (status != USB_HUB_OK)
+        return status;
+    }
+
+    // Verify the resulting port state and change flags.
+    status = usb_hub_port_status(port, &current);
+    if (status != USB_HUB_OK)
+      return status;
+
+    result->final_change = current.change;
+    if (!(current.status & USB_HUB_STATUS_ENABLE) ||
+        !(current.status & USB_HUB_STATUS_CONNECTION) ||
+        (current.status & USB_HUB_STATUS_RESET))
+      return USB_HUB_RESET_FAILED;
+    if (current.change & ((1U << 0) | (1U << 4)))
+      return USB_HUB_RESET_FAILED;
+    return USB_HUB_OK;
+  }
+
+  return USB_HUB_RESET_TIMEOUT;
 }
 
