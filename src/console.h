@@ -2,6 +2,8 @@
 
 #include <stdint.h>
 
+void console_printf(const char *fmt, ...)
+    __attribute__((format(printf, 1, 2)));
 void console_run(void);
 void console_putc(char c);
 void console_puts(const char *s);

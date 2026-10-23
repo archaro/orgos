@@ -1,7 +1,9 @@
 
 #include <stddef.h>
 #include <stdbool.h>
+#include <stdarg.h>
 
+#include "format.h"
 #include "console.h"
 #include "mailbox.h"
 #include "timer.h"
@@ -30,6 +32,20 @@ static bool end_of_args(const char *p) {
     p++;
 
   return *p == '\0';
+}
+
+
+static void console_format_putc(char c, void *context) {
+  (void)context;
+  console_putc(c);
+}
+
+void console_printf(const char *fmt, ...) {
+  va_list args;
+
+  va_start(args, fmt);
+  format_vprintf(console_format_putc, NULL, fmt, args);
+  va_end(args);
 }
 
 static void console_puthex8(uint8_t value) {
@@ -1585,59 +1601,37 @@ static void cmd_usb_midiconfig(void) {
 static void cmd_usb_enumerate(void) {
   usb_enum_info_t info = {0};
   usb_enum_result_t result = usb_enumerate(&info);
-  console_puts("USB enumeration:\n");
-  console_puts("  Result          : ");
-  console_putu32((uint32_t)result);
-  console_putc('\n');
-  console_puts("  Detail          : ");
-  console_putu32(info.detail);
-  console_putc('\n');
+  console_printf("USB enumeration:\n");
+  console_printf("  Result          : %u\n", (unsigned int)result);
+  console_printf("  Detail          : %u\n", info.detail);
   if (result == USB_ENUM_ALREADY_ATTEMPTED) {
-    console_puts("Enumeration already attempted.\n");
-    console_puts("Previous result  : ");
-    console_putu32((uint32_t)info.result);
-    console_putc('\n');
+    console_printf("Enumeration already attempted.\n");
+    console_printf("Previous result  : %u\n", (unsigned int)info.result);
     return;
   }
   if (result != USB_ENUM_OK) {
-    console_puts("USB enumeration: FAILED\n");
+    console_printf("USB enumeration: FAILED\n");
     return;
   }
-  console_puts("  Hub ports       : ");
-  console_putu32(info.hub_ports);
-  console_putc('\n');
-  console_puts("  Connected port  : ");
-  console_putu32(info.hub_port);
-  console_putc('\n');
-  console_puts("  Device slot     : ");
-  console_putu32(info.slot_id);
-  console_putc('\n');
-  console_puts("  USB address     : ");
-  console_putu32(info.address);
-  console_putc('\n');
-  console_puts("  Vendor ID       : 0x");
-  console_puthex(info.vendor_id, 4);
-  console_putc('\n');
-  console_puts("  Product ID      : 0x");
-  console_puthex(info.product_id, 4);
-  console_putc('\n');
-  console_puts("  Config length   : ");
-  console_putu32(info.configuration_length);
-  console_putc('\n');
-  console_puts("  MIDI interface  : ");
-  console_putu32(info.midi.midi_interface);
-  console_putc('\n');
-  console_puts("  Bulk OUT        : 0x");
-  console_puthex(info.midi.bulk_out, 2);
-  console_puts(", MPS ");
-  console_putu32(info.midi.bulk_out_mps);
-  console_putc('\n');
-  console_puts("  Bulk IN         : 0x");
-  console_puthex(info.midi.bulk_in, 2);
-  console_puts(", MPS ");
-  console_putu32(info.midi.bulk_in_mps);
-  console_putc('\n');
-  console_puts("USB enumeration: PASS\n");
+  console_printf("  Hub ports       : %u\n", (unsigned int)info.hub_ports);
+  console_printf("  Connected port  : %u\n", (unsigned int)info.hub_port);
+  console_printf("  Device slot     : %u\n", (unsigned int)info.slot_id);
+  console_printf("  USB address     : %u\n", (unsigned int)info.address);
+  console_printf("  Vendor ID       : 0x%04x\n",
+      (unsigned int)info.vendor_id);
+  console_printf("  Product ID      : 0x%04x\n",
+      (unsigned int)info.product_id);
+  console_printf("  Config length   : %u\n",
+      (unsigned int)info.configuration_length);
+  console_printf("  MIDI interface  : %u\n",
+      (unsigned int)info.midi.midi_interface);
+  console_printf("  Bulk OUT        : 0x%02x, MPS %u\n",
+      (unsigned int)info.midi.bulk_out,
+      (unsigned int)info.midi.bulk_out_mps);
+  console_printf("  Bulk IN         : 0x%02x, MPS %u\n",
+      (unsigned int)info.midi.bulk_in,
+      (unsigned int)info.midi.bulk_in_mps);
+  console_printf("USB enumeration: PASS\n");
 }
 
 static void cmd_usb(const char *args) {
