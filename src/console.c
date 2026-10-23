@@ -2166,9 +2166,108 @@ static void cmd_usb_midimps(void) {
   }
 }
 
+static void cmd_usb_midifull(void) {
+  const xhci_setup_packet_t setup = {
+    .request_type = 0x80U,
+    .request = 0x06U,
+    .value = 0x0100U,
+    .index = 0U,
+    .length = 18U
+  };
+  xhci_control_info_t info;
+  xhci_control_result_t status = xhci_downstream_control_in(&setup, &info);
+  console_puts("U2MIDI Pro USB Device Descriptor:\n");
+  console_puts("  Result          : ");
+  console_putu32((uint32_t)status);
+  console_putc('\n');
+  console_puts("  Slot ID         : ");
+  console_putu32(info.slot_id);
+  console_putc('\n');
+  console_puts("  Completion code : ");
+  console_putu32(info.completion_code);
+  console_putc('\n');
+  console_puts("  Event type      : ");
+  console_putu32(info.event_type);
+  console_putc('\n');
+  console_puts("  Event parameter : 0x");
+  console_puthex64(info.event_parameter);
+  console_putc('\n');
+  console_puts("  Expected TRB    : 0x");
+  console_puthex64(info.status_trb);
+  console_putc('\n');
+  console_puts("  Elapsed         : ");
+  console_putu32((uint32_t)info.elapsed_us);
+  console_puts(" us\n");
+  if (status != XHCI_CONTROL_OK) {
+    console_puts("Full MIDI device descriptor: FAILED\n");
+    return;
+  }
+  console_puts("  Raw bytes       :");
+  for (unsigned int i = 0; i < info.length; i++) {
+    console_putc(' ');
+    console_puthex(info.data[i], 2);
+  }
+  console_putc('\n');
+  if (info.length != 18U || info.data[0] != 18U || info.data[1] != 0x01U) {
+    console_puts("Full MIDI device descriptor: INVALID\n");
+    return;
+  }
+  const uint8_t *d = info.data;
+  uint16_t version = (uint16_t)d[2] | ((uint16_t)d[3] << 8);
+  uint16_t vendor = (uint16_t)d[8] | ((uint16_t)d[9] << 8);
+  uint16_t product = (uint16_t)d[10] | ((uint16_t)d[11] << 8);
+  uint16_t release = (uint16_t)d[12] | ((uint16_t)d[13] << 8);
+  console_puts("  USB version     : 0x");
+  console_puthex(version, 4);
+  console_putc('\n');
+  console_puts("  Device class    : 0x");
+  console_puthex(d[4], 2);
+  console_putc('\n');
+  console_puts("  Device subclass : 0x");
+  console_puthex(d[5], 2);
+  console_putc('\n');
+  console_puts("  Device protocol : 0x");
+  console_puthex(d[6], 2);
+  console_putc('\n');
+  console_puts("  EP0 max packet  : ");
+  console_putu32(d[7]);
+  console_putc('\n');
+  console_puts("  Vendor ID       : 0x");
+  console_puthex(vendor, 4);
+  console_putc('\n');
+  console_puts("  Product ID      : 0x");
+  console_puthex(product, 4);
+  console_putc('\n');
+  console_puts("  Device release  : 0x");
+  console_puthex(release, 4);
+  console_putc('\n');
+  console_puts("  Manufacturer idx: ");
+  console_putu32(d[14]);
+  console_putc('\n');
+  console_puts("  Product idx     : ");
+  console_putu32(d[15]);
+  console_putc('\n');
+  console_puts("  Serial idx      : ");
+  console_putu32(d[16]);
+  console_putc('\n');
+  console_puts("  Configurations  : ");
+  console_putu32(d[17]);
+  console_putc('\n');
+  // Validate the values established by the eight-byte read.
+  if (version != 0x0110U || d[7] != 64U || d[17] == 0U || d[17] > 16U) {
+    console_puts("Full MIDI device descriptor: UNEXPECTED\n");
+    return;
+  }
+  console_puts("Full MIDI device descriptor: PASS\n");
+}
+
 static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
+  if (next_word_is(&args, "midifull") && end_of_args(args)) {
+    cmd_usb_midifull();
+    return;
+  }
   if (next_word_is(&args, "midimps") && end_of_args(args)) {
     cmd_usb_midimps();
     return;
@@ -2269,7 +2368,7 @@ static void cmd_usb(const char *args) {
     "Usage: usb [state | dma | ready | inspect | noops | ports | protocols |"
     " events | devices | descriptor | hubinfo | configure | hubports |"
     " hubpower | hubreset | hubcontext | secondslot | secondprepare |"
-    " secondaddress]\n");
+    " secondaddress | mididescriptor | midimps | midifull]\n");
     return;
   }
 
