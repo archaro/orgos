@@ -848,237 +848,6 @@ static void cmd_usb_state(void) {
   console_putc('\n');
 }
 
-static void cmd_usb_dma(void) {
-  xhci_dma_t dma;
-  page_stats_t before, after;
-  bool passed = true;
-  if (!page_get_stats(&before)) {
-    console_puts("Page allocator unavailable.\n");
-    return;
-  }
-  if (!xhci_dma_prepare(&dma)) {
-    console_puts("xHCI DMA preparation failed.\n");
-    return;
-  }
-  console_puts("xHCI DMA structures:\n");
-  console_puts("  Command ring : 0x");
-  console_puthex64(dma.command_ring.bus);
-  console_putc('\n');
-  console_puts("  Event ring   : 0x");
-  console_puthex64(dma.event_ring.bus);
-  console_putc('\n');
-  console_puts("  ERST         : 0x");
-  console_puthex64(dma.erst.bus);
-  console_putc('\n');
-  console_puts("  DCBAA        : 0x");
-  console_puthex64(dma.dcbaa.bus);
-  console_putc('\n');
-  xhci_trb_t *commands = (xhci_trb_t *)dma.command_ring.virtual;
-  xhci_trb_t *link = &commands[255];
-  if (link->parameter != dma.command_ring.bus ||
-      ((link->control >> 10) & 0x3fU) != 6U || (link->control & 3U) != 3U) {
-    console_puts("  Command ring : FAIL\n");
-    passed = false;
-  } else {
-    console_puts("  Command ring : PASS\n");
-  }
-  xhci_erst_entry_t *erst = (xhci_erst_entry_t *)dma.erst.virtual;
-  if (erst[0].base != dma.event_ring.bus || erst[0].size != 256) {
-    console_puts("  ERST         : FAIL\n");
-    passed = false;
-  } else {
-    console_puts("  ERST         : PASS\n");
-  }
-  // Confirm every DMA address has 64-byte alignment.
-  if ((dma.command_ring.bus & 63U) || (dma.event_ring.bus & 63U) ||
-      (dma.erst.bus & 63U) || (dma.dcbaa.bus & 63U)) {
-    console_puts("  Alignment    : FAIL\n");
-    passed = false;
-  } else {
-    console_puts("  Alignment    : PASS\n");
-  }
-    console_puts("  Scratchpads  : ");
-  console_putu32(dma.scratchpad_count);
-  console_putc('\n');
-
-  bool scratchpads_ok = true;
-
-  uint64_t *dcbaa = (uint64_t *)dma.dcbaa.virtual;
-  uint64_t *pointers =
-      (uint64_t *)dma.scratchpad_array.virtual;
-
-  // This development controller requires exactly
-  // 31 scratchpad buffers.
-  if (dma.scratchpad_count != 31U ||
-      dma.scratchpad_array.pages != 1U ||
-      dcbaa[0] != dma.scratchpad_array.bus ||
-      (dma.scratchpad_array.bus & 63U))
-    scratchpads_ok = false;
-
-  if (scratchpads_ok) {
-    for (unsigned int i = 0;
-        i < dma.scratchpad_count; i++) {
-
-      dma_buffer_t *buffer = &dma.scratchpads[i];
-
-      if (buffer->pages != 1U ||
-          !buffer->virtual ||
-          (buffer->bus & (PAGE_SIZE - 1U)) ||
-          pointers[i] != buffer->bus ||
-          buffer->owner != DMA_OWNER_CPU) {
-        scratchpads_ok = false;
-        break;
-      }
-
-      // Every scratchpad page must start zeroed.
-      const uint8_t *bytes =
-          (const uint8_t *)buffer->virtual;
-
-      for (unsigned int j = 0; j < PAGE_SIZE; j++) {
-        if (bytes[j] != 0) {
-          scratchpads_ok = false;
-          break;
-        }
-      }
-
-      if (!scratchpads_ok)
-        break;
-    }
-  }
-
-  // No device contexts have been configured yet.
-  for (unsigned int i = 1; i <= 32U; i++) {
-    if (dcbaa[i] != 0) {
-      scratchpads_ok = false;
-      break;
-    }
-  }
-  console_puts("  Scratchpads  : ");
-  console_puts(scratchpads_ok ? "PASS\n" : "FAIL\n");
-  if (!scratchpads_ok)
-    passed = false;
-  // Five structural pages plus 31 scratchpad pages.
-  if (dma.scratchpad_count != 31U ||
-      dma.command_ring.pages +
-      dma.event_ring.pages +
-      dma.erst.pages +
-      dma.dcbaa.pages +
-      dma.scratchpad_array.pages +
-      dma.scratchpad_count != 36U) {
-    console_puts("  Page count   : FAIL\n");
-    passed = false;
-  } else {
-    console_puts("  Page count   : PASS (36 pages)\n");
-  }
-  if (!xhci_dma_release(&dma)) {
-    console_puts("  Release      : FAIL\n");
-    passed = false;
-  } else {
-    console_puts("  Release      : PASS\n");
-  }
-  if (!page_get_stats(&after) || before.free_pages != after.free_pages ||
-      before.allocated_pages != after.allocated_pages) {
-    console_puts("  Accounting   : FAIL\n");
-    passed = false;
-  } else {
-    console_puts("  Accounting   : PASS\n");
-  }
-  console_puts("\nResult: ");
-  console_puts(passed ?  "ALL TESTS PASSED\n" : "TEST FAILED\n");
-}
-
-static void cmd_usb_ready(void) {
-  xhci_readiness_t result;
-
-  if (!xhci_check_readiness(&result)) {
-    console_puts("Cannot inspect xHCI readiness.\n");
-    return;
-  }
-
-  console_puts("VL805 readiness:\n");
-  console_puts("  HCSPARAMS2       : 0x");
-  console_puthex(result.hcsparams2, 8);
-  console_putc('\n');
-  console_puts("  Scratchpad count : ");
-  console_putu32(result.scratchpad_buffers);
-  console_putc('\n');
-  console_puts("  Controller ready : ");
-  console_puts(result.ready ? "Yes\n" : "No\n");
-  console_puts("  Controller halted: ");
-  console_puts(result.halted ? "Yes\n" : "No\n");
-}
-
-static void cmd_usb_inspect(void) {
-  pcie_xhci_diagnostic_t pci;
-  xhci_cap_diagnostic_t hc;
-
-  if (!pcie_xhci_diagnose(&pci)) {
-    console_puts("VL805 PCI diagnostics unavailable.\n");
-    return;
-  }
-
-  if (!xhci_diagnose_capabilities(&hc)) {
-    console_puts("xHCI capability diagnostics unavailable.\n");
-    return;
-  }
-  console_puts("VL805 PCI diagnostics:\n");
-  console_puts("  Revision ID    : 0x");
-  console_puthex(pci.class_revision & 0xffU, 2);
-  console_putc('\n');
-  console_puts("  Command/status : 0x");
-  console_puthex(pci.command_status, 8);
-  console_putc('\n');
-  console_puts("  Header         : 0x");
-  console_puthex(pci.header, 8);
-  console_putc('\n');
-  console_puts("  Capabilities   : ");
-  console_puts(pci.capabilities_present ?  "Present\n" : "Absent\n");
-  console_puts("  PM capability  : ");
-  console_puts(pci.pm_present ?  "Present\n" : "Absent\n");
-  if (pci.pm_present) {
-    console_puts("  PM offset      : 0x");
-    console_puthex(pci.pm_offset, 2);
-    console_putc('\n');
-    console_puts("  PM capabilities: 0x");
-    console_puthex(pci.pm_capabilities, 4);
-    console_putc('\n');
-    console_puts("  PMCSR          : 0x");
-    console_puthex(pci.pm_control, 4);
-    console_putc('\n');
-    console_puts("  Power state    : D");
-    console_putu32(pci.pm_control & 3U);
-    console_putc('\n');
-  }
-  console_puts("\nxHCI capability diagnostics:\n");
-  console_puts("  HCSPARAMS1     : 0x");
-  console_puthex(hc.hcsparams1, 8);
-  console_putc('\n');
-  console_puts("  HCSPARAMS2     : 0x");
-  console_puthex(hc.hcsparams2, 8);
-  console_putc('\n');
-  console_puts("  HCSPARAMS3     : 0x");
-  console_puthex(hc.hcsparams3, 8);
-  console_putc('\n');
-  console_puts("  HCCPARAMS1     : 0x");
-  console_puthex(hc.hccparams1, 8);
-  console_putc('\n');
-  console_puts("  Ext cap offset : 0x");
-  console_puthex(hc.ext_cap_offset, 8);
-  console_putc('\n');
-  console_puts("  Ext cap header : 0x");
-  console_puthex(hc.ext_cap_header, 8);
-  console_putc('\n');
-  console_puts("  VL805 firmware : ");
-  uint32_t firmware_version;
-  if (pcie_xhci_get_firmware_version(&firmware_version)) {
-    console_puts("0x");
-    console_puthex(firmware_version, 8);
-    console_putc('\n');
-  } else {
-    console_puts("Unavailable\n");
-  }
-}
-
 static void cmd_usb_noops(void) {
   const unsigned int count = 600U;
   console_puts("Executing 600 sequential No Op commands...\n");
@@ -1190,75 +959,6 @@ static void cmd_usb_ports(void) {
       console_puts(" None");
     console_putc('\n');
   }
-}
-
-static void cmd_usb_protocols(void) {
-  xhci_state_t state;
-  if (!xhci_get_state(&state)) {
-    console_puts("Unable to read xHCI controller state.\n");
-    return;
-  }
-  console_puts("xHCI Supported Protocol Capabilities\n");
-  console_puts("  USBCMD : 0x");
-  console_puthex(state.command, 8);
-  console_putc('\n');
-  console_puts("  USBSTS : 0x");
-  console_puthex(state.status, 8);
-  console_putc('\n');
-  unsigned int count = 0;
-  for (unsigned int i = 0; i <= 8U; i++) {
-    xhci_protocol_t protocol;
-    bool found;
-    if (!xhci_protocol_get(i, &protocol, &found)) {
-      console_puts("Extended capability traversal failed.\n");
-      return;
-    }
-    if (!found)
-      break;
-    if (i == 8U) {
-      console_puts("More than eight protocol records found.\n");
-      return;
-    }
-    count++;
-    console_puts("\nProtocol ");
-    console_putu32(count);
-    console_puts(":\n");
-    console_puts("  Offset       : 0x");
-    console_puthex(protocol.offset, 4);
-    console_putc('\n');
-    console_puts("  Header       : 0x");
-    console_puthex(protocol.header, 8);
-    console_putc('\n');
-    console_puts("  Name         : ");
-    for (unsigned int c = 0; c < 4U; c++) {
-      uint8_t ch = (uint8_t)(protocol.name >> (c * 8U));
-      console_putc(ch >= 32U && ch <= 126U ? (char)ch : '.');
-    }
-    console_putc('\n');
-    console_puts("  Revision     : ");
-    console_putu32(protocol.major);
-    console_putc('.');
-    console_puthex(protocol.minor, 2);
-    console_putc('\n');
-    console_puts("  First port   : ");
-    console_putu32(protocol.first_port);
-    console_putc('\n');
-    console_puts("  Port count   : ");
-    console_putu32(protocol.port_count);
-    console_putc('\n');
-    console_puts("  Speed IDs    : ");
-    console_putu32(protocol.speed_id_count);
-    console_putc('\n');
-    console_puts("  Slot type    : ");
-    console_putu32(protocol.slot_type);
-    console_putc('\n');
-    console_puts("  Raw ports    : 0x");
-    console_puthex(protocol.ports, 8);
-    console_putc('\n');
-  }
-  console_puts("\nSupported protocols found: ");
-  console_putu32(count);
-  console_putc('\n');
 }
 
 static void cmd_usb_events(void) {
@@ -2053,75 +1753,6 @@ static void cmd_usb_secondaddress(void) {
     console_puts("Downstream addressing: FAILED\n");
 }
 
-
-static void cmd_usb_mididescriptor(void) {
-  // Start with the first eight bytes of the device
-  // descriptor, using the initial EP0 MPS of eight.
-  const xhci_setup_packet_t setup = {
-    .request_type = 0x80U,
-    .request = 0x06U,
-    .value = 0x0100U,
-    .index = 0U,
-    .length = 8U
-  };
-  xhci_control_info_t info;
-  xhci_control_result_t status = xhci_downstream_control_in(&setup, &info);
-  console_puts("Downstream USB device descriptor:\n");
-  console_puts("  Result          : ");
-  console_putu32((uint32_t)status);
-  console_putc('\n');
-  console_puts("  Slot ID         : ");
-  console_putu32(info.slot_id);
-  console_putc('\n');
-  console_puts("  Completion code : ");
-  console_putu32(info.completion_code);
-  console_putc('\n');
-  console_puts("  Event type      : ");
-  console_putu32(info.event_type);
-  console_putc('\n');
-  console_puts("  Event parameter : 0x");
-  console_puthex64(info.event_parameter);
-  console_putc('\n');
-  console_puts("  Expected TRB    : 0x");
-  console_puthex64(info.status_trb);
-  console_putc('\n');
-  console_puts("  Elapsed         : ");
-  console_putu32((uint32_t)info.elapsed_us);
-  console_puts(" us\n");
-  if (status != XHCI_CONTROL_OK) {
-    console_puts("MIDI device descriptor: FAILED\n");
-    return;
-  }
-  console_puts("  Raw bytes       :");
-  for (unsigned int i = 0; i < info.length; i++) {
-    console_putc(' ');
-    console_puthex(info.data[i], 2);
-  }
-  console_putc('\n');
-  if (info.length != 8U || info.data[0] != 18U || info.data[1] != 1U) {
-    console_puts("MIDI descriptor: INVALID\n");
-    return;
-  }
-  uint16_t version = (uint16_t)info.data[2] | ((uint16_t)info.data[3] << 8);
-  console_puts("  USB version     : 0x");
-  console_puthex(version, 4);
-  console_putc('\n');
-  console_puts("  Device class    : 0x");
-  console_puthex(info.data[4], 2);
-  console_putc('\n');
-  console_puts("  Device subclass : 0x");
-  console_puthex(info.data[5], 2);
-  console_putc('\n');
-  console_puts("  Device protocol : 0x");
-  console_puthex(info.data[6], 2);
-  console_putc('\n');
-  console_puts("  EP0 max packet  : ");
-  console_putu32(info.data[7]);
-  console_putc('\n');
-  console_puts("MIDI device descriptor: PASS\n");
-}
-
-
 static void cmd_usb_midimps(void) {
   xhci_ep0_update_info_t info;
   xhci_ep0_update_result_t result = xhci_downstream_ep0_update(64U, &info);
@@ -2536,10 +2167,6 @@ static void cmd_usb(const char *args) {
     cmd_usb_midimps();
     return;
   }
-  if (next_word_is(&args, "mididescriptor") && end_of_args(args)) {
-    cmd_usb_mididescriptor();
-    return;
-  }
   if (next_word_is(&args, "secondaddress") && end_of_args(args)) {
     cmd_usb_secondaddress();
     return;
@@ -2598,28 +2225,12 @@ static void cmd_usb(const char *args) {
     cmd_usb_events();
     return;
   }
-  if (next_word_is(&args, "protocols") && end_of_args(args)) {
-    cmd_usb_protocols();
-    return;
-  }
   if (next_word_is(&args, "ports") && end_of_args(args)) {
     cmd_usb_ports();
     return;
   }
   if (next_word_is(&args, "noops") && end_of_args(args)) {
     cmd_usb_noops();
-    return;
-  }
-  if (next_word_is(&args, "inspect") && end_of_args(args)) {
-    cmd_usb_inspect();
-    return;
-  }
-  if (next_word_is(&args, "ready") && end_of_args(args)) {
-    cmd_usb_ready();
-    return;
-  }
-  if (next_word_is(&args, "dma") && end_of_args(args)) {
-    cmd_usb_dma();
     return;
   }
   if (next_word_is(&args, "state") && end_of_args(args)) {
@@ -2629,10 +2240,10 @@ static void cmd_usb(const char *args) {
 
   if (!end_of_args(args)) {
     console_puts(
-    "Usage: usb [state | dma | ready | inspect | noops | ports | protocols |"
+    "Usage: usb [state | noops | ports |"
     " events | devices | descriptor | hubinfo | configure | hubports |"
     " hubpower | hubreset | hubcontext | secondslot | secondprepare |"
-    " secondaddress | mididescriptor | midimps | midifull | midiconfig]\n");
+    " secondaddress | midimps | midifull | midiconfig]\n");
     return;
   }
 
