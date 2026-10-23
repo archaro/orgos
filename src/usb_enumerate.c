@@ -260,6 +260,43 @@ static usb_enum_result_t read_configuration( usb_enum_info_t *state) {
   return USB_ENUM_OK;
 }
 
+static usb_enum_result_t select_configuration( usb_enum_info_t *state) {
+
+  uint8_t configuration = state->midi.configuration;
+  if (configuration == 0U) {
+    state->detail = 0U;
+    return USB_ENUM_SET_CONFIG_FAILED;
+  }
+
+  xhci_setup_packet_t setup = {
+    .request_type = 0x00U,
+    .request = USB_REQ_SET_CONFIGURATION,
+    .value = configuration,
+    .index = 0U,
+    .length = 0U
+  };
+
+  xhci_control_info_t info = {0};
+  xhci_control_result_t result =
+      xhci_downstream_control_no_data(&setup, &info);
+  if (result != XHCI_CONTROL_OK) {
+    state->detail = (uint32_t)result;
+    return USB_ENUM_SET_CONFIG_FAILED;
+  }
+
+  if (!control_in(true, 0x80U, USB_REQ_GET_CONFIGURATION, 0U, 1U, &info)) {
+    state->detail = info.completion_code;
+    return USB_ENUM_VERIFY_CONFIG_FAILED;
+  }
+
+  if (info.data[0] != configuration) {
+    state->detail = info.data[0];
+    return USB_ENUM_VERIFY_CONFIG_FAILED;
+  }
+
+  return USB_ENUM_OK;
+}
+
 bool usb_get_enumeration(usb_enum_info_t *info) {
   if (!info)
     return false;
@@ -303,6 +340,10 @@ usb_enum_result_t usb_enumerate(usb_enum_info_t *info) {
     goto complete;
 
   result = read_configuration(&state);
+  if (result != USB_ENUM_OK)
+    goto complete;
+
+  result = select_configuration(&state);
 
 complete:
   state.result = result;

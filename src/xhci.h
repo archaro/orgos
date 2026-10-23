@@ -404,6 +404,8 @@ xhci_control_result_t xhci_control_no_data(
     const xhci_setup_packet_t *setup, xhci_control_info_t *result);
 xhci_control_result_t xhci_downstream_control_in(
     const xhci_setup_packet_t *setup, xhci_control_info_t *result);
+xhci_control_result_t xhci_downstream_control_no_data(
+    const xhci_setup_packet_t *setup, xhci_control_info_t *result);
 
 typedef enum {
   XHCI_NOOP_OK,

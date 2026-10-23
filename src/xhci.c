@@ -2490,6 +2490,15 @@ xhci_control_result_t xhci_downstream_control_in(
   return xhci_control_transfer(&devices[1], setup, result);
 }
 
+xhci_control_result_t xhci_downstream_control_no_data(
+    const xhci_setup_packet_t *setup, xhci_control_info_t *result) {
+
+  if (!setup || setup->length != 0U)
+    return XHCI_CONTROL_NOT_READY;
+
+  return xhci_control_transfer(&devices[1], setup, result);
+}
+
 xhci_noop_result_t xhci_noop(xhci_noop_info_t *result) {
   if (!result)
     return XHCI_NOOP_UNAVAILABLE;
