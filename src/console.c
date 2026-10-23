@@ -2261,9 +2261,273 @@ static void cmd_usb_midifull(void) {
   console_puts("Full MIDI device descriptor: PASS\n");
 }
 
+typedef struct {
+  uint8_t configuration;
+  uint8_t midi_interface;
+  uint8_t midi_alternate;
+  uint8_t bulk_in;
+  uint8_t bulk_out;
+  uint8_t bulk_in_jacks;
+  uint8_t bulk_out_jacks;
+  uint16_t bulk_in_mps;
+  uint16_t bulk_out_mps;
+  bool midi_found;
+  bool in_found;
+  bool out_found;
+} usb_midi_config_t;
+
+
+static bool usb_parse_midi_config(const uint8_t *data,
+    unsigned int length, usb_midi_config_t *result) {
+  if (!data || !result || length < 9U)
+    return false;
+  *result = (usb_midi_config_t){0};
+  if (data[0] != 9U || data[1] != 0x02U ||
+      usb_u16(&data[2]) != length)
+    return false;
+  result->configuration = data[5];
+  bool in_midi_interface = false;
+  bool pending_bulk_endpoint = false;
+  bool pending_in = false;
+  unsigned int offset = 0U;
+  while (offset < length) {
+    if (length - offset < 2U)
+      return false;
+    const uint8_t *d = &data[offset];
+    uint8_t size = d[0];
+    uint8_t type = d[1];
+    if (size < 2U || size > length - offset)
+      return false;
+    console_puts("  Descriptor at ");
+    console_putu32(offset);
+    console_puts(": type 0x");
+    console_puthex(type, 2);
+    console_puts(", length ");
+    console_putu32(size);
+    console_putc('\n');
+    if (type == 0x04U) {
+      // Standard Interface Descriptor.
+      if (size < 9U)
+        return false;
+      if (pending_bulk_endpoint)
+        pending_bulk_endpoint = false;
+      in_midi_interface = d[5] == 0x01U && d[6] == 0x03U;
+      console_puts("    Interface      : ");
+      console_putu32(d[2]);
+      console_puts(", alternate ");
+      console_putu32(d[3]);
+      console_putc('\n');
+      console_puts("    Class/subclass : 0x");
+      console_puthex(d[5], 2);
+      console_puts("/0x");
+      console_puthex(d[6], 2);
+      console_putc('\n');
+      if (in_midi_interface) {
+        if (result->midi_found)
+          return false;
+        result->midi_found = true;
+        result->midi_interface = d[2];
+        result->midi_alternate = d[3];
+        console_puts("    MIDI Streaming interface\n");
+      } else if (d[5] == 0x01U && d[6] == 0x01U) {
+        console_puts("    Audio Control interface\n");
+      }
+    } else if (type == 0x05U) {
+      // Standard Endpoint Descriptor.
+      if (size < 7U)
+        return false;
+      pending_bulk_endpoint = false;
+      if (in_midi_interface && (d[3] & 0x03U) == 2U) {
+        uint8_t address = d[2];
+        uint16_t mps = usb_u16(&d[4]) & 0x07ffU;
+        bool input = (address & 0x80U) != 0U;
+        if ((address & 0x0fU) == 0U || mps == 0U)
+          return false;
+        if (input) {
+          if (result->in_found)
+            return false;
+          result->bulk_in = address;
+          result->bulk_in_mps = mps;
+          result->in_found = true;
+        } else {
+          if (result->out_found)
+            return false;
+          result->bulk_out = address;
+          result->bulk_out_mps = mps;
+          result->out_found = true;
+        }
+        pending_bulk_endpoint = true;
+        pending_in = input;
+        console_puts("    MIDI bulk ");
+        console_puts(input ? "IN" : "OUT");
+        console_puts(" endpoint: 0x");
+        console_puthex(address, 2);
+        console_puts(", MPS ");
+        console_putu32(mps);
+        console_putc('\n');
+      }
+    } else if (type == 0x24U && in_midi_interface) {
+      // Class-specific Audio Interface Descriptor.
+      if (size < 3U)
+        return false;
+      console_puts("    MIDI class descriptor, subtype 0x");
+      console_puthex(d[2], 2);
+      console_putc('\n');
+      if (d[2] == 0x01U) {
+        // MIDI Streaming header.
+        if (size < 7U)
+          return false;
+        console_puts("    MIDI version   : 0x");
+        console_puthex(usb_u16(&d[3]), 4);
+        console_putc('\n');
+        console_puts("    MIDI CS length : ");
+        console_putu32(usb_u16(&d[5]));
+        console_putc('\n');
+      } else if (d[2] == 0x02U) {
+        // MIDI IN Jack Descriptor.
+        if (size < 6U)
+          return false;
+        console_puts("    MIDI IN jack   : ID ");
+        console_putu32(d[4]);
+        console_puts(", type ");
+        console_putu32(d[3]);
+        console_putc('\n');
+      } else if (d[2] == 0x03U) {
+        // MIDI OUT Jack Descriptor.
+        if (size < 7U || size < 7U + 2U * (unsigned int)d[5])
+          return false;
+        console_puts("    MIDI OUT jack  : ID ");
+        console_putu32(d[4]);
+        console_puts(", type ");
+        console_putu32(d[3]);
+        console_puts(", input pins ");
+        console_putu32(d[5]);
+        console_putc('\n');
+      }
+    } else if (type == 0x25U && in_midi_interface) {
+      // Class-specific endpoint: associated jack IDs.
+      if (size < 4U || d[2] != 0x01U || size < 4U + (unsigned int)d[3])
+        return false;
+      if (pending_bulk_endpoint) {
+        if (pending_in)
+          result->bulk_in_jacks = d[3];
+        else
+          result->bulk_out_jacks = d[3];
+        console_puts("    Associated MIDI jacks: ");
+        console_putu32(d[3]);
+        console_putc('\n');
+        for (unsigned int i = 0U; i < d[3]; i++) {
+          console_puts("      Jack ID ");
+          console_putu32(d[4U + i]);
+          console_putc('\n');
+        }
+        pending_bulk_endpoint = false;
+      }
+    }
+    offset += size;
+  }
+  return result->midi_found && result->in_found && result->out_found;
+}
+
+
+static void cmd_usb_midiconfig(void) {
+  xhci_setup_packet_t setup = {
+    .request_type = 0x80U,
+    .request = 0x06U,
+    .value = 0x0200U,
+    .index = 0U,
+    .length = 9U
+  };
+  xhci_control_info_t info;
+  xhci_control_result_t status = xhci_downstream_control_in(&setup, &info);
+  console_puts("U2MIDI Pro USB Configuration:\n");
+  if (status != XHCI_CONTROL_OK || info.length != 9U ||
+      info.data[0] != 9U || info.data[1] != 0x02U) {
+    console_puts("Configuration header: FAILED\n");
+    console_puts("  Transfer result : ");
+    console_putu32((uint32_t)status);
+    console_putc('\n');
+    console_puts("  Completion code : ");
+    console_putu32(info.completion_code);
+    console_putc('\n');
+    return;
+  }
+  uint16_t total = usb_u16(&info.data[2]);
+  console_puts("  Total length    : ");
+  console_putu32(total);
+  console_putc('\n');
+  console_puts("  Interfaces      : ");
+  console_putu32(info.data[4]);
+  console_putc('\n');
+  if (total < 9U || total > XHCI_CONTROL_MAX_DATA) {
+    console_puts("Configuration length unsupported.\n");
+    return;
+  }
+  setup.length = total;
+  status = xhci_downstream_control_in(&setup, &info);
+  console_puts("  Transfer result : ");
+  console_putu32((uint32_t)status);
+  console_putc('\n');
+  console_puts("  Completion code : ");
+  console_putu32(info.completion_code);
+  console_putc('\n');
+  console_puts("  Slot ID         : ");
+  console_putu32(info.slot_id);
+  console_putc('\n');
+  console_puts("  Elapsed         : ");
+  console_putu32((uint32_t)info.elapsed_us);
+  console_puts(" us\n");
+  if (status != XHCI_CONTROL_OK || info.length != total) {
+    console_puts("Complete configuration read: FAILED\n");
+    return;
+  }
+  console_puts("  Raw bytes       :");
+  for (unsigned int i = 0U; i < info.length; i++) {
+    console_putc(' ');
+    console_puthex(info.data[i], 2);
+  }
+  console_putc('\n');
+  usb_midi_config_t config;
+  if (!usb_parse_midi_config(info.data, info.length, &config)) {
+    console_puts("MIDI configuration parsing: FAILED\n");
+    return;
+  }
+  console_puts("\nMIDI Streaming summary:\n");
+  console_puts("  Configuration   : ");
+  console_putu32(config.configuration);
+  console_putc('\n');
+  console_puts("  Interface       : ");
+  console_putu32(config.midi_interface);
+  console_putc('\n');
+  console_puts("  Alternate       : ");
+  console_putu32(config.midi_alternate);
+  console_putc('\n');
+  console_puts("  Bulk OUT        : 0x");
+  console_puthex(config.bulk_out, 2);
+  console_puts(", MPS ");
+  console_putu32(config.bulk_out_mps);
+  console_putc('\n');
+  console_puts("  Bulk IN         : 0x");
+  console_puthex(config.bulk_in, 2);
+  console_puts(", MPS ");
+  console_putu32(config.bulk_in_mps);
+  console_putc('\n');
+  console_puts("  OUT jack count  : ");
+  console_putu32(config.bulk_out_jacks);
+  console_putc('\n');
+  console_puts("  IN jack count   : ");
+  console_putu32(config.bulk_in_jacks);
+  console_putc('\n');
+  console_puts("MIDI configuration: PASS\n");
+}
+
 static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
+  if (next_word_is(&args, "midiconfig") && end_of_args(args)) {
+    cmd_usb_midiconfig();
+    return;
+  }
   if (next_word_is(&args, "midifull") && end_of_args(args)) {
     cmd_usb_midifull();
     return;
@@ -2368,7 +2632,7 @@ static void cmd_usb(const char *args) {
     "Usage: usb [state | dma | ready | inspect | noops | ports | protocols |"
     " events | devices | descriptor | hubinfo | configure | hubports |"
     " hubpower | hubreset | hubcontext | secondslot | secondprepare |"
-    " secondaddress | mididescriptor | midimps | midifull]\n");
+    " secondaddress | mididescriptor | midimps | midifull | midiconfig]\n");
     return;
   }
 

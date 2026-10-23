@@ -363,7 +363,7 @@ typedef struct {
 xhci_hub_result_t xhci_hub_configure( uint8_t ports, uint8_t tt_think_time,
     xhci_hub_info_t *result);
 
-#define XHCI_CONTROL_MAX_DATA 64U
+#define XHCI_CONTROL_MAX_DATA 256U
 
 typedef enum {
   XHCI_CONTROL_OK,
