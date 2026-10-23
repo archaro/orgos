@@ -297,6 +297,23 @@ static usb_enum_result_t select_configuration( usb_enum_info_t *state) {
   return USB_ENUM_OK;
 }
 
+static usb_enum_result_t configure_bulk( usb_enum_info_t *state) {
+
+  xhci_bulk_config_info_t info = {0};
+  xhci_bulk_config_result_t result = xhci_downstream_bulk_configure(
+          state->midi.bulk_in, state->midi.bulk_in_mps,
+          state->midi.bulk_out, state->midi.bulk_out_mps, &info);
+
+  if (result != XHCI_BULK_CONFIG_OK) {
+    // Low byte: configuration result.
+    // High byte: xHCI completion code.
+    state->detail = (uint32_t)result | ((uint32_t)info.completion_code << 8);
+    return USB_ENUM_BULK_CONFIG_FAILED;
+  }
+
+  return USB_ENUM_OK;
+}
+
 bool usb_get_enumeration(usb_enum_info_t *info) {
   if (!info)
     return false;
@@ -344,6 +361,10 @@ usb_enum_result_t usb_enumerate(usb_enum_info_t *info) {
     goto complete;
 
   result = select_configuration(&state);
+  if (result != USB_ENUM_OK)
+    goto complete;
+
+  result = configure_bulk(&state);
 
 complete:
   state.result = result;

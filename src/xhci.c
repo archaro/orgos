@@ -78,10 +78,17 @@
 #define XHCI_START_TIMEOUT_US 1000000ULL
 #define XHCI_PORT_RESET_TIMEOUT_US 1000000ULL
 
+#define XHCI_BULK_IN_DCI   3U
+#define XHCI_BULK_OUT_DCI  4U
+#define XHCI_EP_TYPE_OUT   2U
+#define XHCI_EP_TYPE_IN    6U
+
 typedef struct {
   dma_buffer_t input;
   dma_buffer_t output;
   dma_buffer_t ep0_ring;
+  dma_buffer_t bulk_in_ring;
+  dma_buffer_t bulk_out_ring;
   dma_buffer_t control_buffer;
   uint8_t slot_id;
   uint8_t root_port;
@@ -109,6 +116,7 @@ static xhci_device_t devices[XHCI_MAX_DEVICES];
 static bool address_attempted;
 static bool downstream_address_attempted;
 static bool downstream_ep0_update_attempted;
+static bool downstream_bulk_attempted;
 static bool device_addressed;
 static xhci_address_info_t address_info;
 static xhci_dma_t controller_dma;
@@ -1641,7 +1649,6 @@ dma_failed:
   return XHCI_DEVICE_DMA_FAILED;
 }
 
-
 xhci_device_result_t xhci_downstream_prepare(
     uint8_t hub_port, uint8_t speed, xhci_device_info_t *result) {
 
@@ -1758,7 +1765,6 @@ xhci_device_result_t xhci_downstream_prepare(
 
   uintptr_t address = (uintptr_t)&dcbaa[device->slot_id];
   address &= ~(uintptr_t)(cache.data_line_size - 1U);
-
   if (!cache_clean((const void *)address, cache.data_line_size))
     return XHCI_DEVICE_DMA_FAILED;
 
@@ -1770,6 +1776,157 @@ xhci_device_result_t xhci_downstream_prepare(
   return XHCI_DEVICE_OK;
 }
 
+static bool xhci_bulk_ring_init(dma_buffer_t *buffer) {
+  if (!dma_alloc(PAGE_SIZE, 64U, buffer))
+    return false;
+
+  xhci_trb_t *ring = buffer->virtual;
+  xhci_trb_t *link = &ring[XHCI_RING_TRBS - 1U];
+  link->parameter = buffer->bus;
+  link->status = 0U;
+  link->control = (XHCI_TRB_LINK << XHCI_TRB_TYPE_SHIFT) |
+      XHCI_TRB_TOGGLE_CYCLE | XHCI_TRB_CYCLE;
+
+  return true;
+}
+
+xhci_bulk_config_result_t xhci_downstream_bulk_configure(
+    uint8_t in_address, uint16_t in_mps,
+    uint8_t out_address, uint16_t out_mps,
+    xhci_bulk_config_info_t *result) {
+
+  if (!result)
+    return XHCI_BULK_CONFIG_NOT_READY;
+
+  *result = (xhci_bulk_config_info_t){0};
+
+  if (downstream_bulk_attempted)
+    return XHCI_BULK_CONFIG_ALREADY_ATTEMPTED;
+
+  xhci_device_t *device = &devices[1];
+  if (!device->prepared || !device->addressed ||
+      device->slot_id == 0U || !controller_running ||
+      !controller_verified || command_outstanding ||
+      command_ring_failed || device->ep0_active ||
+      device->ep0_failed)
+    return XHCI_BULK_CONFIG_NOT_READY;
+
+  if (in_address != 0x81U || out_address != 0x02U ||
+      in_mps != 64U || out_mps != 64U)
+    return XHCI_BULK_CONFIG_INVALID_ENDPOINT;
+
+  if (device->context_size != 32U && device->context_size != 64U)
+    return XHCI_BULK_CONFIG_NOT_READY;
+
+  if (device->input.owner != DMA_OWNER_DEVICE ||
+      device->output.owner != DMA_OWNER_DEVICE)
+    return XHCI_BULK_CONFIG_NOT_READY;
+
+  cache_info_t cache;
+  if (!cache_get_info(&cache) ||
+      cache.data_line_size == 0U ||
+      cache.data_line_size > PAGE_SIZE ||
+      (cache.data_line_size & (cache.data_line_size - 1U)))
+    return XHCI_BULK_CONFIG_DMA_FAILED;
+
+  downstream_bulk_attempted = true;
+
+  if (!xhci_bulk_ring_init(&device->bulk_in_ring))
+    return XHCI_BULK_CONFIG_ALLOCATION_FAILED;
+
+  if (!xhci_bulk_ring_init(&device->bulk_out_ring))
+    return XHCI_BULK_CONFIG_ALLOCATION_FAILED;
+
+  uint32_t size = device->context_size;
+  uint8_t *input = device->input.virtual;
+  uint8_t *output = device->output.virtual;
+  uint32_t *control = (uint32_t *)input;
+  uint32_t *slot = (uint32_t *)(input + size);
+  uint32_t *in = (uint32_t *)(input + (XHCI_BULK_IN_DCI + 1U) * size);
+  uint32_t *out = (uint32_t *)(input + (XHCI_BULK_OUT_DCI + 1U) * size);
+
+  // Add Slot, EP1 IN and EP2 OUT contexts.
+  // Do not change the existing EP0 context.
+  control[0] = 0U;
+  control[1] = (1U << 0) | (1U << XHCI_BULK_IN_DCI) |
+      (1U << XHCI_BULK_OUT_DCI);
+
+  // Context Entries must include the highest DCI.
+  slot[0] = (slot[0] & ~(0x1fU << 27)) | (XHCI_BULK_OUT_DCI << 27);
+
+  uint64_t in_dequeue = device->bulk_in_ring.bus | 1ULL;
+  uint64_t out_dequeue = device->bulk_out_ring.bus | 1ULL;
+
+  // EP1 IN: type 6, error count 3, MPS 64.
+  in[0] = 0U;
+  in[1] = ((uint32_t)in_mps << 16) |
+      (XHCI_EP_TYPE_IN << 3) | (3U << 1);
+  in[2] = (uint32_t)in_dequeue;
+  in[3] = (uint32_t)(in_dequeue >> 32);
+  in[4] = in_mps;
+
+  // EP2 OUT: type 2, error count 3, MPS 64.
+  out[0] = 0U;
+  out[1] = ((uint32_t)out_mps << 16) | (XHCI_EP_TYPE_OUT << 3) | (3U << 1);
+  out[2] = (uint32_t)out_dequeue;
+  out[3] = (uint32_t)(out_dequeue >> 32);
+  out[4] = out_mps;
+
+  result->slot_id = device->slot_id;
+  result->in_ring = device->bulk_in_ring.bus;
+  result->out_ring = device->bulk_out_ring.bus;
+  result->in_context = in[1];
+  result->out_context = out[1];
+
+  // Publish the rings before the controller can use them.
+  if (!dma_begin_device(&device->bulk_in_ring, DMA_BIDIRECTIONAL))
+    return XHCI_BULK_CONFIG_DMA_FAILED;
+
+  if (!dma_begin_device(&device->bulk_out_ring, DMA_BIDIRECTIONAL))
+    return XHCI_BULK_CONFIG_DMA_FAILED;
+
+  // The Input Context is already device-owned.
+  // Clean all entries up to the highest new DCI.
+  if (!cache_clean(input,
+      (XHCI_BULK_OUT_DCI + 2U) * size)) return XHCI_BULK_CONFIG_DMA_FAILED;
+
+  __asm__ volatile("dsb sy" ::: "memory");
+
+  xhci_trb_t command = {
+    .parameter = device->input.bus,
+    .status = 0U,
+    .control = (XHCI_TRB_CONFIGURE_ENDPOINT << XHCI_TRB_TYPE_SHIFT) |
+        ((uint32_t)device->slot_id << 24)
+  };
+
+  xhci_command_completion_t completion = {0};
+  xhci_command_result_t status = xhci_command_submit(&command, &completion);
+  result->command_result = status;
+  result->completion_code = completion.completion_code;
+
+  if (status != XHCI_COMMAND_OK ||
+      completion.slot_id != device->slot_id)
+    return XHCI_BULK_CONFIG_COMMAND_FAILED;
+
+  // Inspect the controller-owned Output Context.
+  if (!cache_invalidate(output, (XHCI_BULK_OUT_DCI + 1U) * size))
+    return XHCI_BULK_CONFIG_DMA_FAILED;
+
+  uint32_t *output_slot = (uint32_t *)output;
+  uint32_t *output_in = (uint32_t *)(output + XHCI_BULK_IN_DCI * size);
+  uint32_t *output_out = (uint32_t *)(output + XHCI_BULK_OUT_DCI * size);
+  result->in_state = (uint8_t)(output_in[0] & 0x07U);
+  result->out_state = (uint8_t)(output_out[0] & 0x07U);
+  if (((output_slot[0] >> 27) & 0x1fU) != XHCI_BULK_OUT_DCI ||
+      result->in_state != 1U || result->out_state != 1U ||
+      ((output_in[1] >> 16) & 0xffffU) != in_mps ||
+      ((output_out[1] >> 16) & 0xffffU) != out_mps ||
+      ((output_in[1] >> 3) & 0x07U) != XHCI_EP_TYPE_IN ||
+      ((output_out[1] >> 3) & 0x07U) != XHCI_EP_TYPE_OUT)
+    return XHCI_BULK_CONFIG_VERIFY_FAILED;
+
+  return XHCI_BULK_CONFIG_OK;
+}
 
 xhci_hub_result_t xhci_hub_configure(
     uint8_t ports, uint8_t tt_think_time, xhci_hub_info_t *result) {

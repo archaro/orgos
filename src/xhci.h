@@ -366,6 +366,34 @@ xhci_hub_result_t xhci_hub_configure( uint8_t ports, uint8_t tt_think_time,
 #define XHCI_CONTROL_MAX_DATA 256U
 
 typedef enum {
+  XHCI_BULK_CONFIG_OK,
+  XHCI_BULK_CONFIG_NOT_READY,
+  XHCI_BULK_CONFIG_ALREADY_ATTEMPTED,
+  XHCI_BULK_CONFIG_INVALID_ENDPOINT,
+  XHCI_BULK_CONFIG_ALLOCATION_FAILED,
+  XHCI_BULK_CONFIG_DMA_FAILED,
+  XHCI_BULK_CONFIG_COMMAND_FAILED,
+  XHCI_BULK_CONFIG_VERIFY_FAILED
+} xhci_bulk_config_result_t;
+
+typedef struct {
+  uint8_t slot_id;
+  uint8_t completion_code;
+  uint8_t in_state;
+  uint8_t out_state;
+  uint32_t in_context;
+  uint32_t out_context;
+  uint64_t in_ring;
+  uint64_t out_ring;
+  xhci_command_result_t command_result;
+} xhci_bulk_config_info_t;
+
+xhci_bulk_config_result_t xhci_downstream_bulk_configure(
+    uint8_t in_address, uint16_t in_mps,
+    uint8_t out_address, uint16_t out_mps,
+    xhci_bulk_config_info_t *result);
+
+typedef enum {
   XHCI_CONTROL_OK,
   XHCI_CONTROL_NOT_READY,
   XHCI_CONTROL_ALLOCATION_FAILED,
