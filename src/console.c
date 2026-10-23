@@ -848,7 +848,7 @@ static void cmd_usb_state(void) {
   console_putc('\n');
 }
 
-static void cmd_usb_noops(void) {
+static void cmd_usb_test_noops(void) {
   const unsigned int count = 600U;
   console_puts("Executing 600 sequential No Op commands...\n");
   for (unsigned int i = 0; i < count; i++) {
@@ -961,57 +961,25 @@ static void cmd_usb_ports(void) {
   }
 }
 
+
 static void cmd_usb_events(void) {
-  unsigned int consumed = 0;
-
-  for (unsigned int i = 0; i < 256U; i++) {
-    xhci_event_t event;
-    xhci_event_result_t status = xhci_event_poll(&event);
-
-    if (status == XHCI_EVENT_ERROR) {
-      console_puts("Event ring read failed.\n");
-      return;
-    }
-
-    if (status == XHCI_EVENT_NONE)
-      break;
-
-    consumed++;
-
-    console_puts("Event type ");
-    console_putu32(event.type);
-    console_puts(", completion ");
-    console_putu32(event.completion_code);
-
-    if (event.type == 34U) {
-      console_puts(", port ");
-      console_putu32(event.port_id);
-    }
-
-    console_putc('\n');
-
-    if (!xhci_event_record(&event)) {
-      console_puts("Unhandled event encountered; stopping.\n");
-      return;
-    }
-  }
-
   xhci_event_stats_t stats;
   if (!xhci_event_get_stats(&stats)) {
-    console_puts("Unable to read event statistics.\n");
+    console_puts("Unable to read USB event statistics.\n");
     return;
   }
-
-  console_puts("Events consumed: ");
-  console_putu32(consumed);
-  console_putc('\n');
-
-  console_puts("Port change events recorded: ");
+  console_puts("USB event statistics:\n");
+  console_puts("  Port changes     : ");
   console_putu32(stats.port_changes);
   console_putc('\n');
-
-  console_puts("Last changed port: ");
+  console_puts("  Last changed port: ");
   console_putu32(stats.last_port);
+  console_putc('\n');
+  console_puts("  Last event status: 0x");
+  console_puthex(stats.last_status, 8);
+  console_putc('\n');
+  console_puts("  Last event ctrl  : 0x");
+  console_puthex(stats.last_control, 8);
   console_putc('\n');
 }
 
@@ -2155,6 +2123,7 @@ static void cmd_usb_midiconfig(void) {
 static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
+  const char *other_args = args;
   if (next_word_is(&args, "midiconfig") && end_of_args(args)) {
     cmd_usb_midiconfig();
     return;
@@ -2183,10 +2152,9 @@ static void cmd_usb(const char *args) {
     cmd_usb_secondprepare();
     return;
   }
-  const char *reset_args = args;
-  if (next_word_is(&reset_args, "hubreset")) {
+  if (next_word_is(&other_args, "hubreset")) {
     for (uint8_t port = 1U; port <= 4U; port++) {
-      const char *port_args = reset_args;
+      const char *port_args = other_args;
       const char *names[] = {"1", "2", "3", "4"};
       if (next_word_is(&port_args, names[port - 1U]) &&
           end_of_args(port_args)) {
@@ -2229,8 +2197,13 @@ static void cmd_usb(const char *args) {
     cmd_usb_ports();
     return;
   }
-  if (next_word_is(&args, "noops") && end_of_args(args)) {
-    cmd_usb_noops();
+  if (next_word_is(&other_args, "test")) {
+    if (next_word_is(&other_args, "noops") &&
+        end_of_args(other_args)) {
+      cmd_usb_test_noops();
+      return;
+    }
+    console_puts("Usage: usb test noops\n");
     return;
   }
   if (next_word_is(&args, "state") && end_of_args(args)) {
@@ -2240,10 +2213,10 @@ static void cmd_usb(const char *args) {
 
   if (!end_of_args(args)) {
     console_puts(
-    "Usage: usb [state | noops | ports |"
-    " events | devices | descriptor | hubinfo | configure | hubports |"
-    " hubpower | hubreset | hubcontext | secondslot | secondprepare |"
-    " secondaddress | midimps | midifull | midiconfig]\n");
+        "Usage: usb [state | ports | events | devices | descriptor | "
+        "hubinfo | configure | hubports | hubpower | hubreset N | "
+        "hubcontext | secondslot | secondprepare | secondaddress | "
+        "midimps | midifull | midiconfig | test noops]\n");
     return;
   }
 
