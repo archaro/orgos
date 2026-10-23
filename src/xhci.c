@@ -108,6 +108,7 @@ static xhci_device_t devices[XHCI_MAX_DEVICES];
 #define internal_hub devices[0]
 static bool address_attempted;
 static bool downstream_address_attempted;
+static bool downstream_ep0_update_attempted;
 static bool device_addressed;
 static xhci_address_info_t address_info;
 static xhci_dma_t controller_dma;
@@ -438,6 +439,7 @@ xhci_port_reset_result_t xhci_port_reset(
 #define XHCI_TRB_TYPE_SHIFT 10U
 #define XHCI_TRB_ADDRESS_DEVICE 11U
 #define XHCI_TRB_CONFIGURE_ENDPOINT 12U
+#define XHCI_TRB_EVALUATE_CONTEXT 13U
 #define XHCI_TRB_NOOP_CMD       23U
 #define XHCI_TRB_TRANSFER_EVENT 32U
 #define XHCI_TRB_COMMAND_EVENT  33U
@@ -2081,6 +2083,114 @@ xhci_address_result_t xhci_address_downstream(xhci_address_info_t *result) {
   return XHCI_ADDRESS_OK;
 }
 
+xhci_ep0_update_result_t xhci_downstream_ep0_update(
+    uint16_t max_packet_size, xhci_ep0_update_info_t *result) {
+
+  if (!result)
+    return XHCI_EP0_UPDATE_NOT_READY;
+
+  *result = (xhci_ep0_update_info_t){0};
+
+  xhci_device_t *device = &devices[1];
+  if (downstream_ep0_update_attempted)
+    return XHCI_EP0_UPDATE_ALREADY_ATTEMPTED;
+
+  if (!device->prepared || !device->addressed ||
+      device->slot_id == 0U || !controller_running ||
+      !controller_verified || command_outstanding ||
+      command_ring_failed || device->ep0_active ||
+      device->ep0_failed || max_packet_size != 64U)
+    return XHCI_EP0_UPDATE_NOT_READY;
+
+  if (device->input.owner != DMA_OWNER_DEVICE ||
+      device->output.owner != DMA_OWNER_DEVICE ||
+      device->ep0_ring.owner != DMA_OWNER_DEVICE)
+    return XHCI_EP0_UPDATE_NOT_READY;
+
+  if (device->context_size != 32U && device->context_size != 64U)
+    return XHCI_EP0_UPDATE_NOT_READY;
+
+  cache_info_t cache;
+  if (!cache_get_info(&cache) || cache.data_line_size == 0U ||
+      cache.data_line_size > PAGE_SIZE ||
+      (cache.data_line_size & (cache.data_line_size - 1U)))
+    return XHCI_EP0_UPDATE_DMA_FAILED;
+
+  uint32_t size = device->context_size;
+  uint8_t *input = device->input.virtual;
+  uint8_t *output = device->output.virtual;
+  // Output Context layout:
+  //   Context 0: Slot
+  //   Context 1: EP0
+  // Input Context layout:
+  //   Context 0: Input Control
+  //   Context 1: Slot
+  //   Context 2: EP0
+  if (!cache_invalidate(output, 2U * size))
+    return XHCI_EP0_UPDATE_DMA_FAILED;
+
+  uint32_t *output_ep0 = (uint32_t *)(output + size);
+  uint32_t *input_ep0 = (uint32_t *)(input + 2U * size);
+  uint32_t *control = (uint32_t *)input;
+  // Copy the controller's current EP0 Context.
+  for (uint32_t i = 0U; i < size / sizeof(uint32_t); i++)
+    input_ep0[i] = output_ep0[i];
+
+  result->slot_id = device->slot_id;
+  result->old_mps = (uint16_t)(output_ep0[1] >> 16);
+  if (result->old_mps != 8U || (output_ep0[0] & 0x07U) != 1U)
+    return XHCI_EP0_UPDATE_NOT_READY;
+
+  // Evaluate Context:
+  //   Drop flags = 0
+  //   Add flags = A1 (EP0) only
+  control[0] = 0U;
+  control[1] = 2U;
+
+  // Change only Max Packet Size, bits 31:16 of EP0 DW1.
+  input_ep0[1] = (input_ep0[1] & 0x0000ffffU) |
+      ((uint32_t)max_packet_size << 16);
+
+  result->input_dword1 = input_ep0[1];
+  result->new_mps = max_packet_size;
+
+  // Publish the Input Control Context and Input EP0
+  // Context. Include the intervening Slot Context.
+  if (!cache_clean(input, 3U * size))
+    return XHCI_EP0_UPDATE_DMA_FAILED;
+
+  __asm__ volatile("dsb sy" ::: "memory");
+
+  xhci_trb_t command = {
+    .parameter = device->input.bus,
+    .status = 0U,
+    .control = (XHCI_TRB_EVALUATE_CONTEXT << XHCI_TRB_TYPE_SHIFT) |
+        ((uint32_t)device->slot_id << 24)
+  };
+
+  // An uncertain command completion must not be retried.
+  downstream_ep0_update_attempted = true;
+  xhci_command_completion_t completion = {0};
+  xhci_command_result_t status = xhci_command_submit(&command, &completion);
+  result->command_result = status;
+  result->completion_code = completion.completion_code;
+  result->elapsed_us = completion.elapsed_us;
+
+  if (status != XHCI_COMMAND_OK || completion.slot_id != device->slot_id)
+    return XHCI_EP0_UPDATE_COMMAND_FAILED;
+
+  // Inspect the controller's updated EP0 Context.
+  if (!cache_invalidate(output, 2U * size))
+    return XHCI_EP0_UPDATE_DMA_FAILED;
+
+  result->output_dword1 = output_ep0[1];
+  result->ep0_state = (uint8_t)(output_ep0[0] & 0x07U);
+  if ((output_ep0[1] >> 16) != max_packet_size || result->ep0_state != 1U)
+    return XHCI_EP0_UPDATE_VERIFY_FAILED;
+
+  device->ep0_max_packet = max_packet_size;
+  return XHCI_EP0_UPDATE_OK;
+}
 
 static bool xhci_ep0_publish(xhci_device_t *device,
     unsigned int first, unsigned int count, size_t line) {

@@ -2121,9 +2121,58 @@ static void cmd_usb_mididescriptor(void) {
   console_puts("MIDI device descriptor: PASS\n");
 }
 
+
+static void cmd_usb_midimps(void) {
+  xhci_ep0_update_info_t info;
+  xhci_ep0_update_result_t result = xhci_downstream_ep0_update(64U, &info);
+  console_puts("Downstream EP0 packet-size update:\n");
+  console_puts("  Result          : ");
+  console_putu32((uint32_t)result);
+  console_putc('\n');
+  console_puts("  Command result  : ");
+  console_putu32((uint32_t)info.command_result);
+  console_putc('\n');
+  console_puts("  Completion code : ");
+  console_putu32(info.completion_code);
+  console_putc('\n');
+  console_puts("  Slot ID         : ");
+  console_putu32(info.slot_id);
+  console_putc('\n');
+  console_puts("  Previous MPS    : ");
+  console_putu32(info.old_mps);
+  console_putc('\n');
+  console_puts("  Requested MPS   : ");
+  console_putu32(info.new_mps);
+  console_putc('\n');
+  console_puts("  Input EP0 DW1   : 0x");
+  console_puthex(info.input_dword1, 8);
+  console_putc('\n');
+  console_puts("  Output EP0 DW1  : 0x");
+  console_puthex(info.output_dword1, 8);
+  console_putc('\n');
+  console_puts("  EP0 state       : ");
+  console_putu32(info.ep0_state);
+  console_putc('\n');
+  console_puts("  Elapsed         : ");
+  console_putu32((uint32_t)info.elapsed_us);
+  console_puts(" us\n");
+  if (result == XHCI_EP0_UPDATE_OK) {
+    console_puts("Downstream EP0 update: PASS\n");
+  } else if (result == XHCI_EP0_UPDATE_ALREADY_ATTEMPTED) {
+    console_puts("Downstream EP0 update: ALREADY ATTEMPTED\n");
+    console_puts("No additional Evaluate Context command issued.\n");
+  } else {
+    console_puts("Downstream EP0 update: FAILED\n");
+  }
+}
+
 static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
+  if (next_word_is(&args, "midimps") && end_of_args(args)) {
+    cmd_usb_midimps();
+    return;
+  }
   if (next_word_is(&args, "mididescriptor") && end_of_args(args)) {
     cmd_usb_mididescriptor();
     return;

@@ -314,6 +314,30 @@ xhci_address_result_t xhci_address_device(xhci_address_info_t *result);
 xhci_address_result_t xhci_address_downstream( xhci_address_info_t *result);
 
 typedef enum {
+  XHCI_EP0_UPDATE_OK,
+  XHCI_EP0_UPDATE_NOT_READY,
+  XHCI_EP0_UPDATE_ALREADY_ATTEMPTED,
+  XHCI_EP0_UPDATE_DMA_FAILED,
+  XHCI_EP0_UPDATE_COMMAND_FAILED,
+  XHCI_EP0_UPDATE_VERIFY_FAILED
+} xhci_ep0_update_result_t;
+
+typedef struct {
+  uint8_t slot_id;
+  uint8_t completion_code;
+  uint8_t ep0_state;
+  uint16_t old_mps;
+  uint16_t new_mps;
+  uint32_t input_dword1;
+  uint32_t output_dword1;
+  uint64_t elapsed_us;
+  xhci_command_result_t command_result;
+} xhci_ep0_update_info_t;
+
+xhci_ep0_update_result_t xhci_downstream_ep0_update(
+    uint16_t max_packet_size, xhci_ep0_update_info_t *result);
+
+typedef enum {
   XHCI_HUB_OK,
   XHCI_HUB_NOT_READY,
   XHCI_HUB_ALREADY_CONFIGURED,
