@@ -82,6 +82,7 @@ typedef struct {
   dma_buffer_t input;
   dma_buffer_t output;
   dma_buffer_t ep0_ring;
+  dma_buffer_t control_buffer;
   uint8_t slot_id;
   uint8_t root_port;
   uint8_t hub_slot;
@@ -90,6 +91,11 @@ typedef struct {
   uint8_t context_size;
   uint16_t ep0_max_packet;
   uint32_t route_string;
+  unsigned int ep0_index;
+  unsigned int ep0_cycle;
+  bool ep0_wrap_pending;
+  bool ep0_failed;
+  bool ep0_active;
   bool prepared;
   bool addressed;
   xhci_device_info_t info;
@@ -97,12 +103,6 @@ typedef struct {
 
 static bool hub_configuration_attempted;
 static bool hub_configured;
-static bool ep0_wrap_pending;
-static dma_buffer_t control_buffer;
-static unsigned int ep0_index;
-static unsigned int ep0_cycle = 1U;
-static bool ep0_failed;
-static bool ep0_active;
 #define XHCI_MAX_DEVICES 2U
 static xhci_device_t devices[XHCI_MAX_DEVICES];
 #define internal_hub devices[0]
@@ -1485,6 +1485,11 @@ static bool xhci_device_alloc_buffers(xhci_device_t *device,
   link->control = (XHCI_TRB_LINK << XHCI_TRB_TYPE_SHIFT) |
       XHCI_TRB_TOGGLE_CYCLE | XHCI_TRB_CYCLE;
   device->context_size = (uint8_t)context_size;
+  device->ep0_index = 0U;
+  device->ep0_cycle = 1U;
+  device->ep0_wrap_pending = false;
+  device->ep0_failed = false;
+  device->ep0_active = false;
   return true;
 
 failed:
@@ -2077,10 +2082,10 @@ xhci_address_result_t xhci_address_downstream(xhci_address_info_t *result) {
 }
 
 
-static bool xhci_ep0_publish(unsigned int first,
-    unsigned int count, size_t line) {
+static bool xhci_ep0_publish(xhci_device_t *device,
+    unsigned int first, unsigned int count, size_t line) {
 
-  xhci_trb_t *ring = internal_hub.ep0_ring.virtual;
+  xhci_trb_t *ring = device->ep0_ring.virtual;
   uintptr_t start = (uintptr_t)&ring[first];
   uintptr_t end = (uintptr_t)&ring[first + count];
 
@@ -2090,150 +2095,151 @@ static bool xhci_ep0_publish(unsigned int first,
   return cache_clean((const void *)start, end - start);
 }
 
-static bool xhci_ep0_link_update(size_t line) {
-  xhci_trb_t *ring = internal_hub.ep0_ring.virtual;
+static bool xhci_ep0_link_update(xhci_device_t *device, size_t line) {
+  xhci_trb_t *ring = device->ep0_ring.virtual;
   xhci_trb_t *link = &ring[XHCI_RING_TRBS - 1U];
 
   link->control = (link->control & ~XHCI_TRB_CYCLE) |
-      (ep0_cycle ? XHCI_TRB_CYCLE : 0U);
+      (device->ep0_cycle ? XHCI_TRB_CYCLE : 0U);
 
-  return xhci_ep0_publish(XHCI_RING_TRBS - 1U, 1U, line);
+  return xhci_ep0_publish(device, XHCI_RING_TRBS - 1U, 1U, line);
 }
 
-static bool xhci_ep0_prepare(unsigned int count, size_t line) {
+static bool xhci_ep0_prepare(xhci_device_t *device,
+    unsigned int count, size_t line) {
+
   const unsigned int usable = XHCI_RING_TRBS - 1U;
 
-  if (count == 0U || count > usable || ep0_wrap_pending)
+  if (count == 0U || count > usable || device->ep0_wrap_pending)
     return false;
 
-  if (ep0_index + count <= usable)
+  if (device->ep0_index + count <= usable)
     return true;
 
-  // Not enough room for a complete control transfer.
-  // Fill the remaining slots with transfer No Ops.
-  xhci_trb_t *ring = internal_hub.ep0_ring.virtual;
-  unsigned int first = ep0_index;
+  // Fill the remaining ring entries with transfer No Ops.
+  xhci_trb_t *ring = device->ep0_ring.virtual;
+  unsigned int first = device->ep0_index;
 
   for (unsigned int i = first; i < usable; i++) {
-    ring[i].parameter = 0;
-    ring[i].status = 0;
-    ring[i].control = (XHCI_TRB_NOOP_TRANSFER << XHCI_TRB_TYPE_SHIFT) |
-        (ep0_cycle ? XHCI_TRB_CYCLE : 0U);
+    ring[i].parameter = 0U;
+    ring[i].status = 0U;
+    ring[i].control =
+        (XHCI_TRB_NOOP_TRANSFER << XHCI_TRB_TYPE_SHIFT) |
+        (device->ep0_cycle ? XHCI_TRB_CYCLE : 0U);
   }
 
-  if (!xhci_ep0_publish(first, usable - first, line))
+  if (!xhci_ep0_publish(device, first, usable - first, line))
     return false;
 
-  // Move the producer to the next cycle, but leave the
-  // Link TRB unchanged until the controller has crossed it.
-  ep0_index = 0;
-  ep0_cycle ^= 1U;
-  ep0_wrap_pending = true;
+  // The old-cycle Link TRB must remain valid until
+  // the controller has followed it.
+  device->ep0_index = 0U;
+  device->ep0_cycle ^= 1U;
+  device->ep0_wrap_pending = true;
 
   return true;
 }
 
-static bool xhci_ep0_advance(unsigned int count, size_t line) {
+static bool xhci_ep0_advance(xhci_device_t *device,
+    unsigned int count, size_t line) {
   const unsigned int usable = XHCI_RING_TRBS - 1U;
 
-  ep0_index += count;
-  if (ep0_index > usable)
+  device->ep0_index += count;
+  if (device->ep0_index > usable)
     return false;
 
-  if (ep0_wrap_pending) {
-    // Completion of the new transfer confirms that the
-    // controller has followed the old-cycle Link TRB.
-    ep0_wrap_pending = false;
-    if (!xhci_ep0_link_update(line))
+  if (device->ep0_wrap_pending) {
+    device->ep0_wrap_pending = false;
+    if (!xhci_ep0_link_update(device, line))
       return false;
   }
 
-  if (ep0_index == usable) {
-    // The completed transfer ended immediately before
-    // the Link TRB. Prepare for the next traversal.
-    ep0_index = 0;
-    ep0_cycle ^= 1U;
-    if (!xhci_ep0_link_update(line))
+  if (device->ep0_index == usable) {
+    device->ep0_index = 0U;
+    device->ep0_cycle ^= 1U;
+    if (!xhci_ep0_link_update(device, line))
       return false;
   }
 
   return true;
 }
 
+
 static xhci_control_result_t xhci_control_transfer(
-    const xhci_setup_packet_t *setup, xhci_control_info_t *result) {
+    xhci_device_t *device, const xhci_setup_packet_t *setup,
+    xhci_control_info_t *result) {
 
   if (!result)
     return XHCI_CONTROL_NOT_READY;
 
   *result = (xhci_control_info_t){0};
 
-  if (!setup || setup->length > XHCI_CONTROL_MAX_DATA)
+  if (!device || !setup || setup->length > XHCI_CONTROL_MAX_DATA)
     return XHCI_CONTROL_NOT_READY;
 
-  // Nonzero-length transfers currently support IN only.
   if (setup->length != 0U && !(setup->request_type & 0x80U))
     return XHCI_CONTROL_NOT_READY;
 
   bool has_data = setup->length != 0U;
   unsigned int count = has_data ? 3U : 2U;
-
-  if (!device_addressed || !internal_hub.prepared ||
-      internal_hub_slot == 0 || !controller_running ||
+  if (!device->addressed || !device->prepared ||
+      device->slot_id == 0U || !controller_running ||
       !controller_verified || command_outstanding ||
-      command_ring_failed || ep0_active || ep0_failed)
+      command_ring_failed || device->ep0_active ||
+      device->ep0_failed)
     return XHCI_CONTROL_NOT_READY;
 
-  if (internal_hub.ep0_ring.owner != DMA_OWNER_DEVICE)
+  if (device->ep0_ring.owner != DMA_OWNER_DEVICE)
     return XHCI_CONTROL_NOT_READY;
 
+  // The upstream root port must remain operational.
   xhci_info_t controller;
   xhci_port_t port;
-  if (!xhci_probe(&controller) || !xhci_port_read(1U, &port) ||
+  if (!xhci_probe(&controller) ||
+      !xhci_port_read(device->root_port, &port) ||
       !port.connected || !port.enabled || !port.powered ||
       port.resetting || port.speed != 3U)
     return XHCI_CONTROL_NOT_READY;
 
   cache_info_t cache;
-  if (!cache_get_info(&cache) || cache.data_line_size == 0 ||
+  if (!cache_get_info(&cache) || cache.data_line_size == 0U ||
       cache.data_line_size > PAGE_SIZE ||
       (cache.data_line_size & (cache.data_line_size - 1U)))
     return XHCI_CONTROL_NOT_READY;
 
+  dma_buffer_t *buffer = &device->control_buffer;
   if (has_data) {
-    if (!control_buffer.pages &&
-        !dma_alloc(XHCI_CONTROL_MAX_DATA, 64U, &control_buffer))
+    if (!buffer->pages && !dma_alloc(XHCI_CONTROL_MAX_DATA, 64U, buffer))
       return XHCI_CONTROL_ALLOCATION_FAILED;
 
-    if (!dma_begin_device(&control_buffer, DMA_FROM_DEVICE))
+    if (!dma_begin_device(buffer, DMA_FROM_DEVICE))
       return XHCI_CONTROL_DMA_FAILED;
   }
 
-  if (!xhci_ep0_prepare(count, cache.data_line_size)) {
-    ep0_failed = true;
+  if (!xhci_ep0_prepare(device, count, cache.data_line_size)) {
+    device->ep0_failed = true;
+    if (has_data)
+      dma_end_device(buffer);
     return XHCI_CONTROL_RING_FAILED;
   }
 
-  unsigned int first = ep0_index;
-  uint32_t cycle_bit = ep0_cycle ? XHCI_TRB_CYCLE : 0U;
-  xhci_trb_t *ring = internal_hub.ep0_ring.virtual;
+  unsigned int first = device->ep0_index;
+  uint32_t cycle_bit = device->ep0_cycle ? XHCI_TRB_CYCLE : 0U;
+  xhci_trb_t *ring = device->ep0_ring.virtual;
 
   uint64_t packet = (uint64_t)setup->request_type |
       ((uint64_t)setup->request << 8) |
       ((uint64_t)setup->value << 16) |
       ((uint64_t)setup->index << 32) |
       ((uint64_t)setup->length << 48);
-
   ring[first].parameter = packet;
   ring[first].status = 8U;
   ring[first].control =
-      (XHCI_TRB_SETUP_STAGE << XHCI_TRB_TYPE_SHIFT) |
-      XHCI_TRB_IDT |
-      (has_data ? XHCI_TRB_TRT_IN : 0U) |
-      cycle_bit;
+      (XHCI_TRB_SETUP_STAGE << XHCI_TRB_TYPE_SHIFT) | XHCI_TRB_IDT |
+      (has_data ? XHCI_TRB_TRT_IN : 0U) | cycle_bit;
 
   if (has_data) {
-    ring[first + 1U].parameter = control_buffer.bus;
+    ring[first + 1U].parameter = buffer->bus;
     ring[first + 1U].status = setup->length;
     ring[first + 1U].control =
         (XHCI_TRB_DATA_STAGE << XHCI_TRB_TYPE_SHIFT) |
@@ -2241,28 +2247,30 @@ static xhci_control_result_t xhci_control_transfer(
   }
 
   unsigned int status_index = first + count - 1U;
-  ring[status_index].parameter = 0;
-  ring[status_index].status = 0;
+  ring[status_index].parameter = 0U;
+  ring[status_index].status = 0U;
   ring[status_index].control =
-      (XHCI_TRB_STATUS_STAGE << XHCI_TRB_TYPE_SHIFT) | XHCI_TRB_IOC |
-      (has_data ? 0U : XHCI_TRB_DIR_IN) | cycle_bit;
+      (XHCI_TRB_STATUS_STAGE << XHCI_TRB_TYPE_SHIFT) |
+      XHCI_TRB_IOC | (has_data ? 0U : XHCI_TRB_DIR_IN) | cycle_bit;
 
-  uint64_t status_trb = internal_hub.ep0_ring.bus +
+  uint64_t status_trb = device->ep0_ring.bus +
       (uint64_t)status_index * sizeof(xhci_trb_t);
-  result->slot_id = internal_hub_slot;
+
+  result->slot_id = device->slot_id;
   result->status_trb = status_trb;
-  if (!xhci_ep0_publish(first, count, cache.data_line_size)) {
+  if (!xhci_ep0_publish(device, first, count, cache.data_line_size)) {
     if (has_data)
-      dma_end_device(&control_buffer);
-    ep0_failed = true;
+      dma_end_device(buffer);
+    device->ep0_failed = true;
     return XHCI_CONTROL_RING_FAILED;
   }
 
-  ep0_active = true;
+  device->ep0_active = true;
   __asm__ volatile("dsb sy" ::: "memory");
 
-  // Ring the addressed device's default control endpoint.
-  xhci_write(controller.doorbell_offset + 4U * internal_hub_slot, 1U);
+  // Doorbell index is the hardware slot ID.
+  // Target 1 selects the default control endpoint.
+  xhci_write(controller.doorbell_offset + 4U * device->slot_id, 1U);
 
   uint64_t started = timer_now_us();
   while (timer_now_us() - started < XHCI_TRANSFER_TIMEOUT_US) {
@@ -2294,57 +2302,55 @@ static xhci_control_result_t xhci_control_transfer(
     result->event_parameter = event.parameter;
     result->event_status = event.status;
     result->elapsed_us = timer_now_us() - started;
-    result->controller_status =
-        xhci_read(controller.capability_length + XHCI_USBSTS);
+    result->controller_status = xhci_read(
+        controller.capability_length + XHCI_USBSTS);
 
     if (event.type != XHCI_TRB_TRANSFER_EVENT ||
-        event.slot_id != internal_hub_slot ||
-        result->endpoint_id != 1U || event.parameter != status_trb)
+        event.slot_id != device->slot_id ||
+        result->endpoint_id != 1U ||
+        event.parameter != status_trb)
       goto event_failed;
 
     if (event.completion_code != XHCI_COMPLETION_SUCCESS) {
-      ep0_failed = true;
-      ep0_active = false;
+      device->ep0_failed = true;
+      device->ep0_active = false;
       return XHCI_CONTROL_TRANSFER_FAILED;
     }
-
     if (has_data) {
-      if (!dma_end_device(&control_buffer))
+      if (!dma_end_device(buffer))
         goto dma_failed;
 
-      uint8_t *bytes = control_buffer.virtual;
+      uint8_t *bytes = buffer->virtual;
       for (unsigned int i = 0; i < setup->length; i++)
         result->data[i] = bytes[i];
       result->length = setup->length;
     }
-
-    if (!xhci_ep0_advance(count, cache.data_line_size)) {
-      ep0_failed = true;
-      ep0_active = false;
+    if (!xhci_ep0_advance(device, count, cache.data_line_size)) {
+      device->ep0_failed = true;
+      device->ep0_active = false;
       return XHCI_CONTROL_RING_FAILED;
     }
-
-    ep0_active = false;
+    device->ep0_active = false;
     return XHCI_CONTROL_OK;
   }
-
   result->elapsed_us = timer_now_us() - started;
-  result->controller_status =
-      xhci_read(controller.capability_length + XHCI_USBSTS);
-  ep0_failed = true;
-  ep0_active = false;
+  result->controller_status = xhci_read(
+      controller.capability_length + XHCI_USBSTS);
+  device->ep0_failed = true;
+  device->ep0_active = false;
   return XHCI_CONTROL_TIMEOUT;
 
 event_failed:
-  ep0_failed = true;
-  ep0_active = false;
+  device->ep0_failed = true;
+  device->ep0_active = false;
   return XHCI_CONTROL_EVENT_FAILED;
 
 dma_failed:
-  ep0_failed = true;
-  ep0_active = false;
+  device->ep0_failed = true;
+  device->ep0_active = false;
   return XHCI_CONTROL_DMA_FAILED;
 }
+
 
 xhci_control_result_t xhci_control_in(
     const xhci_setup_packet_t *setup, xhci_control_info_t *result) {
@@ -2353,7 +2359,7 @@ xhci_control_result_t xhci_control_in(
       setup->length == 0U)
     return XHCI_CONTROL_NOT_READY;
 
-  return xhci_control_transfer(setup, result);
+  return xhci_control_transfer(&internal_hub, setup, result);
 }
 
 xhci_control_result_t xhci_control_no_data(
@@ -2362,7 +2368,16 @@ xhci_control_result_t xhci_control_no_data(
   if (!setup || setup->length != 0U)
     return XHCI_CONTROL_NOT_READY;
 
-  return xhci_control_transfer(setup, result);
+  return xhci_control_transfer(&internal_hub, setup, result);
+}
+
+xhci_control_result_t xhci_downstream_control_in(
+    const xhci_setup_packet_t *setup, xhci_control_info_t *result) {
+
+  if (!setup || !(setup->request_type & 0x80U) || setup->length == 0U)
+    return XHCI_CONTROL_NOT_READY;
+
+  return xhci_control_transfer(&devices[1], setup, result);
 }
 
 xhci_noop_result_t xhci_noop(xhci_noop_info_t *result) {

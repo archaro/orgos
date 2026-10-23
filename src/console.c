@@ -2053,9 +2053,81 @@ static void cmd_usb_secondaddress(void) {
     console_puts("Downstream addressing: FAILED\n");
 }
 
+
+static void cmd_usb_mididescriptor(void) {
+  // Start with the first eight bytes of the device
+  // descriptor, using the initial EP0 MPS of eight.
+  const xhci_setup_packet_t setup = {
+    .request_type = 0x80U,
+    .request = 0x06U,
+    .value = 0x0100U,
+    .index = 0U,
+    .length = 8U
+  };
+  xhci_control_info_t info;
+  xhci_control_result_t status = xhci_downstream_control_in(&setup, &info);
+  console_puts("Downstream USB device descriptor:\n");
+  console_puts("  Result          : ");
+  console_putu32((uint32_t)status);
+  console_putc('\n');
+  console_puts("  Slot ID         : ");
+  console_putu32(info.slot_id);
+  console_putc('\n');
+  console_puts("  Completion code : ");
+  console_putu32(info.completion_code);
+  console_putc('\n');
+  console_puts("  Event type      : ");
+  console_putu32(info.event_type);
+  console_putc('\n');
+  console_puts("  Event parameter : 0x");
+  console_puthex64(info.event_parameter);
+  console_putc('\n');
+  console_puts("  Expected TRB    : 0x");
+  console_puthex64(info.status_trb);
+  console_putc('\n');
+  console_puts("  Elapsed         : ");
+  console_putu32((uint32_t)info.elapsed_us);
+  console_puts(" us\n");
+  if (status != XHCI_CONTROL_OK) {
+    console_puts("MIDI device descriptor: FAILED\n");
+    return;
+  }
+  console_puts("  Raw bytes       :");
+  for (unsigned int i = 0; i < info.length; i++) {
+    console_putc(' ');
+    console_puthex(info.data[i], 2);
+  }
+  console_putc('\n');
+  if (info.length != 8U || info.data[0] != 18U || info.data[1] != 1U) {
+    console_puts("MIDI descriptor: INVALID\n");
+    return;
+  }
+  uint16_t version = (uint16_t)info.data[2] | ((uint16_t)info.data[3] << 8);
+  console_puts("  USB version     : 0x");
+  console_puthex(version, 4);
+  console_putc('\n');
+  console_puts("  Device class    : 0x");
+  console_puthex(info.data[4], 2);
+  console_putc('\n');
+  console_puts("  Device subclass : 0x");
+  console_puthex(info.data[5], 2);
+  console_putc('\n');
+  console_puts("  Device protocol : 0x");
+  console_puthex(info.data[6], 2);
+  console_putc('\n');
+  console_puts("  EP0 max packet  : ");
+  console_putu32(info.data[7]);
+  console_putc('\n');
+  console_puts("MIDI device descriptor: PASS\n");
+}
+
 static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
+  if (next_word_is(&args, "mididescriptor") && end_of_args(args)) {
+    cmd_usb_mididescriptor();
+    return;
+  }
   if (next_word_is(&args, "secondaddress") && end_of_args(args)) {
     cmd_usb_secondaddress();
     return;
