@@ -18,6 +18,7 @@
 #include "usb.h"
 #include "usb_hub.h"
 #include "usb_midi.h"
+#include "usb_enumerate.h"
 #include "midi.h"
 
 #define CONSOLE_LINE_SIZE 256
@@ -1952,10 +1953,73 @@ static void cmd_usb_midiconfig(void) {
   console_puts("MIDI configuration: PASS\n");
 }
 
+
+static void cmd_usb_enumerate(void) {
+  usb_enum_info_t info = {0};
+  usb_enum_result_t result = usb_enumerate(&info);
+  console_puts("USB enumeration:\n");
+  console_puts("  Result          : ");
+  console_putu32((uint32_t)result);
+  console_putc('\n');
+  console_puts("  Detail          : ");
+  console_putu32(info.detail);
+  console_putc('\n');
+  if (result == USB_ENUM_ALREADY_ATTEMPTED) {
+    console_puts("Enumeration already attempted.\n");
+    console_puts("Previous result  : ");
+    console_putu32((uint32_t)info.result);
+    console_putc('\n');
+    return;
+  }
+  if (result != USB_ENUM_OK) {
+    console_puts("USB enumeration: FAILED\n");
+    return;
+  }
+  console_puts("  Hub ports       : ");
+  console_putu32(info.hub_ports);
+  console_putc('\n');
+  console_puts("  Connected port  : ");
+  console_putu32(info.hub_port);
+  console_putc('\n');
+  console_puts("  Device slot     : ");
+  console_putu32(info.slot_id);
+  console_putc('\n');
+  console_puts("  USB address     : ");
+  console_putu32(info.address);
+  console_putc('\n');
+  console_puts("  Vendor ID       : 0x");
+  console_puthex(info.vendor_id, 4);
+  console_putc('\n');
+  console_puts("  Product ID      : 0x");
+  console_puthex(info.product_id, 4);
+  console_putc('\n');
+  console_puts("  Config length   : ");
+  console_putu32(info.configuration_length);
+  console_putc('\n');
+  console_puts("  MIDI interface  : ");
+  console_putu32(info.midi.midi_interface);
+  console_putc('\n');
+  console_puts("  Bulk OUT        : 0x");
+  console_puthex(info.midi.bulk_out, 2);
+  console_puts(", MPS ");
+  console_putu32(info.midi.bulk_out_mps);
+  console_putc('\n');
+  console_puts("  Bulk IN         : 0x");
+  console_puthex(info.midi.bulk_in, 2);
+  console_puts(", MPS ");
+  console_putu32(info.midi.bulk_in_mps);
+  console_putc('\n');
+  console_puts("USB enumeration: PASS\n");
+}
+
 static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
   const char *other_args = args;
+  if (next_word_is(&args, "enumerate") && end_of_args(args)) {
+    cmd_usb_enumerate();
+    return;
+  }
   if (next_word_is(&args, "midiconfig") && end_of_args(args)) {
     cmd_usb_midiconfig();
     return;
@@ -2048,7 +2112,7 @@ static void cmd_usb(const char *args) {
         "Usage: usb [state | ports | events | devices | descriptor | "
         "hubinfo | configure | hubports | hubpower | hubreset N | "
         "hubcontext | secondslot | secondprepare | secondaddress | "
-        "midimps | midifull | midiconfig | test noops]\n");
+        "midimps | midifull | midiconfig | test noops | enumerate]\n");
     return;
   }
 
