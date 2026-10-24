@@ -2092,6 +2092,8 @@ xhci_bulk_out_result_t xhci_downstream_bulk_out(
       device->bulk_out_cycle ^= 1U;
       device->bulk_out_wrap_pending = true;
     }
+
+    device->bulk_out_active = false;
     return XHCI_BULK_OUT_OK;
   }
 

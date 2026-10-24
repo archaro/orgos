@@ -1641,24 +1641,29 @@ static void cmd_usb_test_midiout(void) {
     console_puts("USB-MIDI device not enumerated.\n");
     return;
   }
-  // USB-MIDI 1.0 event packet:
-  // Cable 0, CIN 9, Note On, channel 1, C4, velocity 100.
-  const uint8_t packet[4] = {0x09U, 0x90U, 0x3cU, 0x64U};
+  const uint8_t note_on[4] = {0x09U, 0x90U, 0x3cU, 0x64U};
+  const uint8_t note_off[4] = {0x08U, 0x80U, 0x3cU, 0x00U};
   xhci_bulk_out_info_t info = {0};
+  console_puts("USB-MIDI Note On...\n");
   xhci_bulk_out_result_t result =
-      xhci_downstream_bulk_out(packet, sizeof(packet), &info);
-  console_printf("USB-MIDI Bulk OUT:\n");
+      xhci_downstream_bulk_out(note_on, sizeof(note_on), &info);
   console_printf("  Result          : %u\n", (unsigned int)result);
   console_printf("  Completion code : %u\n", info.completion_code);
-  console_printf("  Slot            : %u\n", info.slot_id);
-  console_printf("  Endpoint DCI    : %u\n", info.endpoint_id);
   console_printf("  TRB             : %016llx\n",
       (unsigned long long)info.transfer_trb);
-  console_printf("  Event parameter : %016llx\n",
-      (unsigned long long)info.event_parameter);
-  console_printf("  Elapsed         : %llu us\n",
-      (unsigned long long)info.elapsed_us);
-  console_printf("USB-MIDI Bulk OUT: %s\n",
+  if (result != XHCI_BULK_OUT_OK) {
+    console_puts("USB-MIDI Note On: FAILED\n");
+    return;
+  }
+  timer_delay_ms(250);
+  console_puts("USB-MIDI Note Off...\n");
+  info = (xhci_bulk_out_info_t){0};
+  result = xhci_downstream_bulk_out(note_off, sizeof(note_off), &info);
+  console_printf("  Result          : %u\n", (unsigned int)result);
+  console_printf("  Completion code : %u\n", info.completion_code);
+  console_printf("  TRB             : %016llx\n",
+      (unsigned long long)info.transfer_trb);
+  console_printf("USB-MIDI Note On/Off: %s\n",
       result == XHCI_BULK_OUT_OK ? "PASS" : "FAILED");
 }
 
