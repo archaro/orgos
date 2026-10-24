@@ -1667,6 +1667,65 @@ static void cmd_usb_test_midiout(void) {
       result == XHCI_BULK_OUT_OK ? "PASS" : "FAILED");
 }
 
+static void cmd_usb_test_midiwrap(void) {
+  usb_enum_info_t enumeration = {0};
+  if (!usb_get_enumeration(&enumeration) ||
+      enumeration.result != USB_ENUM_OK) {
+    console_puts("USB-MIDI device not enumerated.\n");
+    return;
+  }
+  const unsigned int transfers = 520U;
+  const unsigned int ring_entries = 255U;
+  const uint64_t trb_size = 16U;
+  uint64_t ring_base = 0U;
+  unsigned int completed = 0U;
+  unsigned int wraps = 0U;
+  uint64_t started = timer_now_us();
+  console_puts("USB-MIDI ring-wrap stress test\n");
+  for (unsigned int i = 0U; i < transfers; i++) {
+    // Cable 0, Control Change, channel 16, controller 102.
+    uint8_t packet[4] = { 0x0bU, 0xbfU, 0x66U, (uint8_t)(i & 0x7fU) };
+    xhci_bulk_out_info_t info = {0};
+    xhci_bulk_out_result_t result =
+        xhci_downstream_bulk_out(packet, sizeof(packet), &info);
+    if (result != XHCI_BULK_OUT_OK) {
+      console_printf("Transfer %u failed: %u, completion %u\n",
+          i + 1U, (unsigned int)result, info.completion_code);
+      break;
+    }
+    if (info.completion_code != 1U ||
+        info.event_parameter != info.transfer_trb) {
+      console_printf("Transfer %u: unexpected completion\n", i + 1U);
+      break;
+    }
+    if (i == 0U)
+      ring_base = info.transfer_trb;
+    uint64_t expected = ring_base + (uint64_t)(i % ring_entries) * trb_size;
+    if (info.transfer_trb != expected) {
+      console_printf("Transfer %u: incorrect TRB address\n", i + 1U);
+      console_printf("  Expected: %016llx\n", (unsigned long long)expected);
+      console_printf("  Actual  : %016llx\n",
+          (unsigned long long)info.transfer_trb);
+      break;
+    }
+    completed++;
+    if (i != 0U && i % ring_entries == 0U) {
+      wraps++;
+      console_printf("  Wrap %u: transfer %u, TRB %016llx\n", wraps, i + 1U,
+          (unsigned long long)info.transfer_trb);
+    }
+    // Allow the adapter's physical DIN output to keep up.
+    timer_delay_ms(4);
+  }
+  uint64_t elapsed = timer_now_us() - started;
+  console_printf("  Completed : %u / %u\n", completed, transfers);
+  console_printf("  Wraps     : %u\n", wraps);
+  console_printf("  Elapsed   : %llu ms\n",
+      (unsigned long long)(elapsed / 1000ULL));
+  console_printf("USB-MIDI ring-wrap: %s\n",
+      completed == transfers && wraps == 2U ? "PASS" : "FAILED");
+}
+
 static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
@@ -1718,7 +1777,12 @@ static void cmd_usb(const char *args) {
       cmd_usb_test_midiout();
       return;
     }
-    console_puts("Usage: usb test [noops | midiout]\n");
+    if (next_word_is(&other_args, "midiwrap") &&
+        end_of_args(other_args)) {
+      cmd_usb_test_midiwrap();
+      return;
+    }
+    console_puts("Usage: usb test [noops | midiout | midiwrap]\n");
     return;
   }
   if (next_word_is(&args, "state") && end_of_args(args)) {
