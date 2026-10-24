@@ -135,7 +135,11 @@ usb_init_result_t usb_init(usb_init_info_t *info) {
   xhci_address_info_t address;
   xhci_address_result_t address_result = xhci_address_device(&address);
   if (address_result != XHCI_ADDRESS_OK) {
-    state.detail = (uint32_t)address_result;
+    // Diagnostic: preserve the address result, xHCI
+    // command result and hardware completion code.
+    state.detail = (uint32_t)address_result |
+        ((uint32_t)address.command_result << 8) |
+        ((uint32_t)address.completion_code << 16);
     result = USB_INIT_ADDRESS_FAILED;
     goto complete;
   }

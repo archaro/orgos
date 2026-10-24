@@ -743,9 +743,6 @@ xhci_reset_result_t xhci_reset(xhci_reset_info_t *result) {
   if (!pcie_xhci_get_command(&pci_command))
     return XHCI_RESET_UNAVAILABLE;
 
-  if (pci_command & PCI_CMD_BUS_MASTER)
-    return XHCI_RESET_BUS_MASTER_ENABLED;
-
   uint32_t base = info.capability_length;
   uintptr_t command_address = (uintptr_t)(XHCI_BASE + base + XHCI_USBCMD);
   result->command_before = xhci_read(base + XHCI_USBCMD);

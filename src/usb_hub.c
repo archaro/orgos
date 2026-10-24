@@ -113,7 +113,6 @@ usb_hub_result_t usb_hub_power_on(usb_hub_port_t *result) {
   // Request PORT_POWER on every downstream port.
   // Even hubs advertising ganged switching may require
   // individual requests for correct power-status reporting.
-  bool power_requested = false;
   for (uint8_t port = 1U; port <= USB_HUB_PORTS; port++) {
     usb_hub_port_t current;
     usb_hub_result_t port_result = usb_hub_port_status(port, &current);
@@ -122,10 +121,6 @@ usb_hub_result_t usb_hub_power_on(usb_hub_port_t *result) {
       *result = current;
       return port_result;
     }
-
-    // Do not repeat a request on an already-powered port.
-    if (current.status & (1U << 8))
-      continue;
 
     setup.request_type = USB_RT_HUB_PORT_OUT;
     setup.request = USB_REQ_SET_FEATURE;
@@ -138,13 +133,9 @@ usb_hub_result_t usb_hub_power_on(usb_hub_port_t *result) {
     result->completion_code = transfer.completion_code;
     if (status != XHCI_CONTROL_OK)
       return USB_HUB_TRANSFER_FAILED;
-    power_requested = true;
   }
 
-  // The hub descriptor specifies a 100 ms power-good
-  // interval. Allow 120 ms after the last power request.
-  if (power_requested)
-    timer_delay_ms(USB_HUB_POWER_DELAY_MS);
+  timer_delay_ms(USB_HUB_POWER_DELAY_MS);
 
   // Verify that every downstream port reports power.
   for (uint8_t port = 1U; port <= USB_HUB_PORTS; port++) {

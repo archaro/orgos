@@ -28,14 +28,15 @@ static unsigned int current_el(void) {
   return (unsigned int)((value >> 2) & 3U);
 }
 
+
 bool pcie_subsystem_init(void) {
-  // Initialise the PCIe subsystem.
-  // First establish the link to the VL805, then
-  // configure its memory resources.
-  // PCIe failures are non-fatal for now: preserve
-  // the diagnostic console.
+  // Establish the PCIe link to the VL805.
   console_puts("\nInitialising PCIe... ");
+
+  uint64_t link_started = timer_now_us();
   pcie_init_result_t pcie_result = pcie_init_link();
+  uint64_t link_elapsed = timer_now_us() - link_started;
+
   switch (pcie_result) {
     case PCIE_INIT_OK:
       console_puts("Link established.\n");
@@ -50,56 +51,54 @@ bool pcie_subsystem_init(void) {
       console_puts("Failed: link timeout.\n");
       break;
   }
-  
-  // Only configure PCI resources when the link
-  // has been successfully established.
-  pcie_map_result_t map_result = PCIE_MAP_LINK_DOWN;
-  if (pcie_result == PCIE_INIT_OK ||
-      pcie_result == PCIE_INIT_ALREADY_UP) {
-    console_puts("Configuring VL805 PCI resources... ");
-    map_result = pcie_map_xhci();
-    switch (map_result) {
-      case PCIE_MAP_OK:
-        console_puts("OK.\n");
-        break;
-      case PCIE_MAP_LINK_DOWN:
-        console_puts("Failed: PCIe link down.\n");
-        break;
-      case PCIE_MAP_WRONG_DEVICE:
-        console_puts("Failed: unexpected PCIe device.\n");
-        break;
-      case PCIE_MAP_BAD_BAR:
-        console_puts("Failed: unexpected BAR type.\n");
-        break;
-      case PCIE_MAP_VERIFY_FAILED:
-        console_puts("Failed: BAR verification error.\n");
-        break;
-    }
+
+  console_printf("  PCIe link elapsed: %llu us\n",
+      (unsigned long long)link_elapsed);
+
+  if (pcie_result != PCIE_INIT_OK && pcie_result != PCIE_INIT_ALREADY_UP)
+    return false;
+
+  // Configure the VL805's PCI resources.
+  console_puts("Configuring VL805 PCI resources... ");
+
+  pcie_map_result_t map_result = pcie_map_xhci();
+
+  switch (map_result) {
+    case PCIE_MAP_OK:
+      console_puts("OK.\n");
+      break;
+    case PCIE_MAP_LINK_DOWN:
+      console_puts("Failed: PCIe link down.\n");
+      break;
+    case PCIE_MAP_BUS_FAILED:
+      console_puts("Failed: PCIe bus configuration.\n");
+      break;
+    case PCIE_MAP_WRONG_DEVICE:
+      console_puts("Failed: unexpected PCIe device.\n");
+      break;
+    case PCIE_MAP_BAD_BAR:
+      console_puts("Failed: unexpected BAR type.\n");
+      break;
+    case PCIE_MAP_VERIFY_FAILED:
+      console_puts("Failed: BAR verification error.\n");
+      break;
   }
 
   if (map_result != PCIE_MAP_OK)
-  return false;
+    return false;
 
-  // Configure the inbound PCIe DMA aperture.
-  // This must happen after the PCIe link and VL805
-  // resources are established, but before enabling
-  // bus mastering or starting the xHCI controller.
+  // Establish the inbound PCIe DMA aperture.
   console_puts("Configuring PCIe inbound DMA... ");
+
   if (!pcie_dma_init()) {
     console_puts("FAILED.\n");
     return false;
   }
+
   console_puts("OK.\n");
 
-  // A fundamental PCIe reset may leave the VL805
-  // without its internal firmware. On Raspberry Pi 4,
-  // VideoCore provides a mailbox property to restore it.
-  // Firmware initialisation must take place after PCIe
-  // link establishment and resource configuration, but
-  // before the xHCI controller is started.
-  // Do not request another load if the controller is
-  // already ready, for example when the bootloader has
-  // left the PCIe link operational.
+  // Determine whether the VL805 needs its firmware
+  // reloaded after PCIe initialisation.
   xhci_state_t state;
 
   if (!xhci_get_state(&state)) {
@@ -113,6 +112,7 @@ bool pcie_subsystem_init(void) {
 
   if (needs_firmware) {
     console_puts("Initialising VL805 firmware... ");
+
     uint16_t command;
     if (!pcie_xhci_get_command(&command) || (command & (1U << 2))) {
       console_puts("FAILED (invalid PCI state).\n");
@@ -120,75 +120,128 @@ bool pcie_subsystem_init(void) {
     }
 
     // Raspberry Pi 4B: bus 1, device 0, function 0.
-    acknowledged = mailbox_notify_xhci_reset(0x00100000U, &diagnostic);
-    // Firmware initialisation may restore PCI command
-    // bits asynchronously. First establish that the
-    // controller is ready, then revoke bus mastering.
+    acknowledged = mailbox_notify_xhci_reset( 0x00100000U, &diagnostic);
+
+    // Verify that the firmware has left the controller
+    // ready and halted.
     xhci_readiness_t readiness;
+
     if (!xhci_check_readiness(&readiness) ||
         !readiness.ready || !readiness.halted) {
       console_puts("FAILED (controller not ready).\n");
       return false;
     }
+
     uint32_t version;
-    if (!pcie_xhci_get_firmware_version(&version) || version == 0) {
+    if (!pcie_xhci_get_firmware_version(&version) || version == 0U) {
       console_puts("FAILED (firmware version).\n");
       return false;
     }
   }
 
-  // Firmware may have modified PCI configuration.
-  // The VL805 must not be permitted to perform DMA
-  // until OrgOS has installed its xHCI DMA structures.
+  // Verify that firmware loading has not altered
+  // the VL805's PCI BAR assignment.
   if (!pcie_xhci_bar_valid()) {
     console_puts("FAILED (VL805 BAR mapping).\n");
     return false;
   }
 
-  // Diagnostic settling interval. Keep until we
-  // establish whether firmware completion reliably
-  // precedes the ready and version observations.
+  // Temporary diagnostic:
+  // Keep PCI bus mastering enabled while attempting
+  // HCRST, in case VL805 firmware requires DMA access.
+  //
+  // DO NOT proceed into normal USB configuration
+  // using this experimental arrangement.
   timer_delay_ms(100);
-  if (!pcie_xhci_disable_bus_master()) {
-    console_puts("FAILED (bus mastering).\n");
+
+  if (!pcie_xhci_enable_bus_master()) {
+    console_puts("FAILED (enabling bus mastering).\n");
     return false;
   }
 
-  // Verify that the firmware has not subsequently
-  // restored bus mastering.
-  timer_delay_ms(100);
-  uint16_t final_command;
-  if (!pcie_xhci_get_command(&final_command) || (final_command & (1U << 2))) {
-    console_puts("FAILED (bus mastering restored).\n");
+  uint16_t final_command = 0;
+
+  if (!pcie_xhci_get_command(&final_command) ||
+      !(final_command & (1U << 2))) {
+    console_puts("FAILED (bus mastering not enabled).\n");
     return false;
   }
+
   if (!pcie_xhci_bar_valid()) {
     console_puts("FAILED (VL805 BAR mapping changed).\n");
     return false;
   }
+
   if (needs_firmware) {
     if (acknowledged) {
       console_puts("OK.\n");
     } else {
       console_puts("OK (mailbox anomaly).\n");
-      console_puts("  Mailbox result : ");
-      console_putu32((uint32_t)diagnostic.result);
-      console_putc('\n');
-      console_puts("  Response seen  : ");
-      console_puts(diagnostic.response_received ?
-          "Yes\n" : "No\n");
+      console_printf("  Mailbox result : %u\n",
+          (unsigned int)diagnostic.result);
+      console_printf("  Response seen  : %s\n",
+          diagnostic.response_received ? "Yes" : "No");
+
       if (diagnostic.response_received) {
-        console_puts("  Response code  : ");
-        console_putu32(diagnostic.response_code);
-        console_putc('\n');
-        console_puts("  Tag length     : ");
-        console_putu32(diagnostic.tag_length);
-        console_putc('\n');
+        console_printf("  Response code  : %u\n", diagnostic.response_code);
+        console_printf("  Tag length     : %u\n", diagnostic.tag_length);
       }
     }
   } else {
     console_puts("VL805 firmware already initialised.\n");
   }
+
+  console_printf("  Diagnostic PCI command: 0x%04x\n",
+      (unsigned int)final_command);
+
+  // Attempt a Host Controller Reset while PCI bus
+  // mastering remains enabled.
+  //
+  // The controller must be halted and must not
+  // have been configured with OrgOS DMA structures.
+  console_puts("Resetting xHCI controller... ");
+
+  xhci_reset_info_t reset = {0};
+  xhci_reset_result_t reset_result = xhci_reset(&reset);
+
+  if (reset_result != XHCI_RESET_OK) {
+    console_printf( "FAILED (%u, cmd 0x%08x, sts 0x%08x).\n",
+        (unsigned int)reset_result, reset.command_after, reset.status_after);
+
+    console_printf("  Reset elapsed: %llu us\n",
+        (unsigned long long)reset.reset_elapsed_us);
+
+    return false;
+  }
+
+  console_printf("OK (reset %llu us, ready %llu us).\n",
+      (unsigned long long)reset.reset_elapsed_us,
+      (unsigned long long)reset.ready_elapsed_us);
+
+    // HCRST completed with bus mastering enabled.
+  // Disable it before installing OrgOS DMA structures.
+  console_puts("Restoring pre-DMA PCI state... ");
+
+  if (!pcie_xhci_disable_bus_master()) {
+    console_puts("FAILED (bus mastering).\n");
+    return false;
+  }
+
+  uint16_t post_reset_command;
+  if (!pcie_xhci_get_command(&post_reset_command) ||
+      (post_reset_command & (1U << 2))) {
+    console_puts("FAILED (PCI command).\n");
+    return false;
+  }
+
+  xhci_readiness_t post_reset;
+  if (!xhci_check_readiness(&post_reset) ||
+      !post_reset.ready || !post_reset.halted) {
+    console_puts("FAILED (controller state).\n");
+    return false;
+  }
+
+  console_puts("OK.\n");
   return true;
 }
 

@@ -345,6 +345,28 @@ pcie_map_result_t pcie_map_xhci(void) {
   if (!info.link_up)
     return PCIE_MAP_LINK_DOWN;
 
+  // A fundamental bridge reset may clear its PCI bus
+  // numbers. The BCM2711 has one downstream bus, bus 1.
+  if (info.secondary_bus == 0U ||
+      info.subordinate_bus < info.secondary_bus) {
+    uint32_t buses = root_config_read(PCI_BUS_NUMBERS);
+
+    // Preserve the secondary latency timer. Assign
+    // primary bus 0, secondary 1 and subordinate 1.
+    buses = (buses & 0xff000000U) | 0x00010100U;
+
+    mmio_write(PCIE_BASE + PCI_BUS_NUMBERS, buses);
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    if ((root_config_read(PCI_BUS_NUMBERS) & 0x00ffffffU) !=
+        0x00010100U)
+      return PCIE_MAP_BUS_FAILED;
+
+    // Re-probe now that downstream configuration
+    // transactions can address bus 1.
+    pcie_probe(&info);
+  }
+
   // This code is tested on the CME U2MIDI Pro:
   // Other devices will need to be tested and enabled.
   if (!info.endpoint_present ||
