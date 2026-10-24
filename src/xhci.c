@@ -106,6 +106,13 @@ typedef struct {
   bool prepared;
   bool addressed;
   xhci_device_info_t info;
+  dma_buffer_t bulk_out_buffer;
+  unsigned int bulk_out_index;
+  unsigned int bulk_out_cycle;
+  bool bulk_out_ready;
+  bool bulk_out_active;
+  bool bulk_out_failed;
+  bool bulk_out_wrap_pending;
 } xhci_device_t;
 
 static bool hub_configuration_attempted;
@@ -1925,7 +1932,195 @@ xhci_bulk_config_result_t xhci_downstream_bulk_configure(
       ((output_out[1] >> 3) & 0x07U) != XHCI_EP_TYPE_OUT)
     return XHCI_BULK_CONFIG_VERIFY_FAILED;
 
+  device->bulk_out_index = 0U;
+  device->bulk_out_cycle = 1U;
+  device->bulk_out_active = false;
+  device->bulk_out_failed = false;
+  device->bulk_out_ready = true;
   return XHCI_BULK_CONFIG_OK;
+}
+
+static bool xhci_bulk_out_publish(xhci_device_t *device,
+    unsigned int index, size_t line) {
+
+  xhci_trb_t *ring = device->bulk_out_ring.virtual;
+  uintptr_t address = (uintptr_t)&ring[index];
+  address &= ~(uintptr_t)(line - 1U);
+
+  return cache_clean((const void *)address, line);
+}
+
+xhci_bulk_out_result_t xhci_downstream_bulk_out(
+    const uint8_t *data, uint32_t length,
+    xhci_bulk_out_info_t *result) {
+
+  if (!result)
+    return XHCI_BULK_OUT_NOT_READY;
+
+  *result = (xhci_bulk_out_info_t){0};
+  xhci_device_t *device = &devices[1];
+  if (!data || !device->bulk_out_ready ||
+      device->bulk_out_active || device->bulk_out_failed ||
+      !controller_running || !controller_verified ||
+      command_outstanding || command_ring_failed ||
+      device->bulk_out_ring.owner != DMA_OWNER_DEVICE)
+    return XHCI_BULK_OUT_NOT_READY;
+
+  if (length == 0U || length > 64U)
+    return XHCI_BULK_OUT_INVALID_LENGTH;
+
+  xhci_info_t controller;
+  xhci_port_t port;
+
+  if (!xhci_probe(&controller) ||
+      !xhci_port_read(device->root_port, &port) ||
+      !port.connected || !port.enabled || !port.powered ||
+      port.resetting || port.speed != 3U)
+    return XHCI_BULK_OUT_NOT_READY;
+
+  cache_info_t cache;
+  if (!cache_get_info(&cache) ||
+      cache.data_line_size == 0U ||
+      cache.data_line_size > PAGE_SIZE ||
+      (cache.data_line_size & (cache.data_line_size - 1U)))
+    return XHCI_BULK_OUT_NOT_READY;
+
+  dma_buffer_t *buffer = &device->bulk_out_buffer;
+
+  if (!buffer->pages && !dma_alloc(64U, 64U, buffer))
+    return XHCI_BULK_OUT_ALLOCATION_FAILED;
+
+  uint8_t *bytes = buffer->virtual;
+  for (uint32_t i = 0U; i < length; i++)
+    bytes[i] = data[i];
+
+  if (!dma_begin_device(buffer, DMA_TO_DEVICE))
+    return XHCI_BULK_OUT_DMA_FAILED;
+
+  unsigned int index = device->bulk_out_index;
+  uint32_t cycle = device->bulk_out_cycle ?  XHCI_TRB_CYCLE : 0U;
+
+  xhci_trb_t *ring = device->bulk_out_ring.virtual;
+  xhci_trb_t *trb = &ring[index];
+
+  // Normal TRB: one data buffer, one transfer event.
+  trb->parameter = buffer->bus;
+  trb->status = length;
+  trb->control = (1U << XHCI_TRB_TYPE_SHIFT) | XHCI_TRB_IOC | cycle;
+
+  result->slot_id = device->slot_id;
+  result->endpoint_id = XHCI_BULK_OUT_DCI;
+  result->transfer_trb = device->bulk_out_ring.bus +
+      (uint64_t)index * sizeof(xhci_trb_t);
+  result->length = length;
+
+  if (!xhci_bulk_out_publish(device, index, cache.data_line_size)) {
+    device->bulk_out_failed = true;
+    dma_end_device(buffer);
+    return XHCI_BULK_OUT_RING_FAILED;
+  }
+
+  device->bulk_out_active = true;
+  __asm__ volatile("dsb sy" ::: "memory");
+
+  // Device doorbell, target 4: EP2 OUT.
+  xhci_write(controller.doorbell_offset +
+      4U * device->slot_id, XHCI_BULK_OUT_DCI);
+
+  uint64_t started = timer_now_us();
+
+  while (timer_now_us() - started < XHCI_TRANSFER_TIMEOUT_US) {
+    xhci_event_t event;
+    xhci_event_result_t status = xhci_event_poll(&event);
+
+    if (status == XHCI_EVENT_ERROR)
+      goto event_failed;
+
+    if (status == XHCI_EVENT_NONE) {
+      uint32_t usbsts = xhci_read(
+          controller.capability_length + XHCI_USBSTS);
+
+      if (usbsts & (XHCI_STS_HALTED | XHCI_STS_HOST_ERROR)) {
+        result->controller_status = usbsts;
+        goto event_failed;
+      }
+
+      continue;
+    }
+
+    if (event.type == XHCI_TRB_PORT_STATUS_EVENT) {
+      if (!xhci_event_record(&event))
+        goto event_failed;
+      continue;
+    }
+
+    result->completion_code = event.completion_code;
+    result->event_parameter = event.parameter;
+    result->event_status = event.status;
+    result->elapsed_us = timer_now_us() - started;
+    result->controller_status = xhci_read(
+        controller.capability_length + XHCI_USBSTS);
+
+    uint8_t endpoint = (uint8_t)((event.control >> 16) & 0x1fU);
+    if (event.type != XHCI_TRB_TRANSFER_EVENT ||
+        event.slot_id != device->slot_id ||
+        endpoint != XHCI_BULK_OUT_DCI ||
+        event.parameter != result->transfer_trb)
+      goto event_failed;
+
+    if (event.completion_code != XHCI_COMPLETION_SUCCESS)
+      goto transfer_failed;
+
+    // The controller has finished reading the data buffer.
+    if (!dma_end_device(buffer))
+      goto dma_failed;
+
+    // Once a transfer in the new cycle completes, the
+    // controller must have traversed the old Link TRB.
+    if (device->bulk_out_wrap_pending) {
+      xhci_trb_t *link = &ring[XHCI_RING_TRBS - 1U];
+      link->control = (link->control & ~XHCI_TRB_CYCLE) |
+          (device->bulk_out_cycle ? XHCI_TRB_CYCLE : 0U);
+      if (!xhci_bulk_out_publish(device,
+          XHCI_RING_TRBS - 1U, cache.data_line_size))
+        goto ring_failed;
+      device->bulk_out_wrap_pending = false;
+    }
+    device->bulk_out_index++;
+    if (device->bulk_out_index == XHCI_RING_TRBS - 1U) {
+      device->bulk_out_index = 0U;
+      device->bulk_out_cycle ^= 1U;
+      device->bulk_out_wrap_pending = true;
+    }
+    return XHCI_BULK_OUT_OK;
+  }
+
+  result->elapsed_us = timer_now_us() - started;
+  result->controller_status = xhci_read(
+      controller.capability_length + XHCI_USBSTS);
+  device->bulk_out_failed = true;
+  device->bulk_out_active = false;
+  return XHCI_BULK_OUT_TIMEOUT;
+
+transfer_failed:
+  device->bulk_out_failed = true;
+  device->bulk_out_active = false;
+  return XHCI_BULK_OUT_TRANSFER_FAILED;
+
+event_failed:
+  device->bulk_out_failed = true;
+  device->bulk_out_active = false;
+  return XHCI_BULK_OUT_EVENT_FAILED;
+
+dma_failed:
+  device->bulk_out_failed = true;
+  device->bulk_out_active = false;
+  return XHCI_BULK_OUT_DMA_FAILED;
+
+ring_failed:
+  device->bulk_out_failed = true;
+  device->bulk_out_active = false;
+  return XHCI_BULK_OUT_RING_FAILED;
 }
 
 xhci_hub_result_t xhci_hub_configure(

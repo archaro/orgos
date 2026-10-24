@@ -394,6 +394,33 @@ xhci_bulk_config_result_t xhci_downstream_bulk_configure(
     xhci_bulk_config_info_t *result);
 
 typedef enum {
+  XHCI_BULK_OUT_OK,
+  XHCI_BULK_OUT_NOT_READY,
+  XHCI_BULK_OUT_INVALID_LENGTH,
+  XHCI_BULK_OUT_ALLOCATION_FAILED,
+  XHCI_BULK_OUT_DMA_FAILED,
+  XHCI_BULK_OUT_RING_FAILED,
+  XHCI_BULK_OUT_EVENT_FAILED,
+  XHCI_BULK_OUT_TIMEOUT,
+  XHCI_BULK_OUT_TRANSFER_FAILED
+} xhci_bulk_out_result_t;
+
+typedef struct {
+  uint8_t slot_id;
+  uint8_t endpoint_id;
+  uint8_t completion_code;
+  uint32_t event_status;
+  uint32_t controller_status;
+  uint64_t event_parameter;
+  uint64_t transfer_trb;
+  uint64_t elapsed_us;
+  uint32_t length;
+} xhci_bulk_out_info_t;
+
+xhci_bulk_out_result_t xhci_downstream_bulk_out(
+    const uint8_t *data, uint32_t length, xhci_bulk_out_info_t *result);
+
+typedef enum {
   XHCI_CONTROL_OK,
   XHCI_CONTROL_NOT_READY,
   XHCI_CONTROL_ALLOCATION_FAILED,

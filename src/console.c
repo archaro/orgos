@@ -1634,6 +1634,34 @@ static void cmd_usb_enumerate(void) {
   console_printf("USB enumeration: PASS\n");
 }
 
+static void cmd_usb_test_midiout(void) {
+  usb_enum_info_t enumeration = {0};
+  if (!usb_get_enumeration(&enumeration) ||
+      enumeration.result != USB_ENUM_OK) {
+    console_puts("USB-MIDI device not enumerated.\n");
+    return;
+  }
+  // USB-MIDI 1.0 event packet:
+  // Cable 0, CIN 9, Note On, channel 1, C4, velocity 100.
+  const uint8_t packet[4] = {0x09U, 0x90U, 0x3cU, 0x64U};
+  xhci_bulk_out_info_t info = {0};
+  xhci_bulk_out_result_t result =
+      xhci_downstream_bulk_out(packet, sizeof(packet), &info);
+  console_printf("USB-MIDI Bulk OUT:\n");
+  console_printf("  Result          : %u\n", (unsigned int)result);
+  console_printf("  Completion code : %u\n", info.completion_code);
+  console_printf("  Slot            : %u\n", info.slot_id);
+  console_printf("  Endpoint DCI    : %u\n", info.endpoint_id);
+  console_printf("  TRB             : %016llx\n",
+      (unsigned long long)info.transfer_trb);
+  console_printf("  Event parameter : %016llx\n",
+      (unsigned long long)info.event_parameter);
+  console_printf("  Elapsed         : %llu us\n",
+      (unsigned long long)info.elapsed_us);
+  console_printf("USB-MIDI Bulk OUT: %s\n",
+      result == XHCI_BULK_OUT_OK ? "PASS" : "FAILED");
+}
+
 static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
@@ -1680,7 +1708,12 @@ static void cmd_usb(const char *args) {
       cmd_usb_test_noops();
       return;
     }
-    console_puts("Usage: usb test noops\n");
+    if (next_word_is(&other_args, "midiout") &&
+        end_of_args(other_args)) {
+      cmd_usb_test_midiout();
+      return;
+    }
+    console_puts("Usage: usb test [noops | midiout]\n");
     return;
   }
   if (next_word_is(&args, "state") && end_of_args(args)) {
@@ -1692,7 +1725,7 @@ static void cmd_usb(const char *args) {
     console_puts(
         "Usage: usb [state | ports | events | devices | "
         "descriptor | hubinfo | hubports | midifull | "
-        "midiconfig | enumerate | test noops]\n");
+        "midiconfig | enumerate | test]\n");
     return;
   }
 
