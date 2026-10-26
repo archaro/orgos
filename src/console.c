@@ -1644,6 +1644,26 @@ static void cmd_usb_test_midiout(void) {
   const uint8_t note_on[4] = {0x09U, 0x90U, 0x3cU, 0x64U};
   const uint8_t note_off[4] = {0x08U, 0x80U, 0x3cU, 0x00U};
   xhci_bulk_out_info_t info = {0};
+
+  // Diagnostic: send MIDI Tune Request before
+  // the first Note On. This System Common status
+  // should discard an incomplete channel message.
+  const uint8_t sync[4] = {
+    0x05U, 0xF7U, 0x00U, 0x00U
+  };
+
+  xhci_bulk_out_info_t sync_info = {0};
+  console_puts("USB-MIDI synchronisation test...\n");
+  xhci_bulk_out_result_t sync_result =
+      xhci_downstream_bulk_out(sync, sizeof(sync), &sync_info);
+  console_printf("  Result          : %u\n", (unsigned int)sync_result);
+  console_printf("  Completion code : %u\n",
+      (unsigned int)sync_info.completion_code);
+  if (sync_result != XHCI_BULK_OUT_OK || sync_info.completion_code != 1U) {
+    console_puts("USB-MIDI synchronisation: FAILED\n");
+    return;
+  }
+  timer_delay_ms(20);
   console_puts("USB-MIDI Note On...\n");
   xhci_bulk_out_result_t result =
       xhci_downstream_bulk_out(note_on, sizeof(note_on), &info);

@@ -289,9 +289,31 @@ static usb_enum_result_t select_configuration( usb_enum_info_t *state) {
     return USB_ENUM_VERIFY_CONFIG_FAILED;
   }
 
+
   if (info.data[0] != configuration) {
     state->detail = info.data[0];
     return USB_ENUM_VERIFY_CONFIG_FAILED;
+  }
+
+  // Windows issues SET_INTERFACE after selecting the
+  // U2MIDI Pro's configuration, before the first MIDI
+  // transfer. Match that observed initialisation step.
+  xhci_setup_packet_t interface_setup = {
+    .request_type = 0x01U,
+    .request = 0x0bU,
+    .value = state->midi.midi_alternate,
+    .index = state->midi.midi_interface,
+    .length = 0U
+  };
+
+  xhci_control_info_t interface_info = {0};
+  xhci_control_result_t interface_result = xhci_downstream_control_no_data(
+          &interface_setup, &interface_info);
+
+  if (interface_result != XHCI_CONTROL_OK) {
+    state->detail = (uint32_t)interface_result |
+        ((uint32_t)interface_info.completion_code << 8);
+    return USB_ENUM_SET_INTERFACE_FAILED;
   }
 
   return USB_ENUM_OK;
