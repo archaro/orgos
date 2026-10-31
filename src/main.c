@@ -52,8 +52,6 @@ bool pcie_subsystem_init(void) {
       console_puts("Failed: link timeout.\n");
       break;
   }
-  console_printf("  PCIe link elapsed: %llu us\n",
-      (unsigned long long)link_elapsed);
 
   if (pcie_result != PCIE_INIT_OK && pcie_result != PCIE_INIT_ALREADY_UP)
     return false;
@@ -393,9 +391,7 @@ void main(void) {
         console_puts(").\n");
       } else {
         console_puts("OK.\n");
-
         console_puts("Enumerating internal USB hub... ");
-
         usb_init_info_t usb_info;
         usb_init_result_t usb_result = usb_init(&usb_info);
         if (usb_result == USB_INIT_OK) {
@@ -404,14 +400,13 @@ void main(void) {
         } else {
           console_printf("FAILED (stage %d, detail 0x%u).\n",
               (uint32_t)usb_result, usb_info.detail);
-        }
+	}
       }
     }
   }
 
   // USB failure is non-fatal. Retain the diagnostic
   // console even if the controller cannot start.
-  console_puts("\nOrgOS interactive console.\n");
   console_run();
 }
 
