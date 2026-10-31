@@ -2841,6 +2841,17 @@ static xhci_control_result_t xhci_control_transfer(
     return XHCI_CONTROL_RING_FAILED;
   }
 
+  // Register the status-stage completion before
+  // ringing the endpoint doorbell.
+  xhci_event_waiter_t *waiter = xhci_waiter_register(
+      XHCI_TRB_TRANSFER_EVENT, device->slot_id, 1U, status_trb);
+  if (!waiter) {
+    if (has_data)
+      dma_end_device(buffer);
+    device->ep0_failed = true;
+    return XHCI_CONTROL_EVENT_FAILED;
+  }
+
   device->ep0_active = true;
   __asm__ volatile("dsb sy" ::: "memory");
 
@@ -2850,15 +2861,13 @@ static xhci_control_result_t xhci_control_transfer(
 
   uint64_t started = timer_now_us();
   while (timer_now_us() - started < XHCI_TRANSFER_TIMEOUT_US) {
-    xhci_event_t event;
-    xhci_event_result_t status = xhci_event_poll(&event);
-
-    if (status == XHCI_EVENT_ERROR)
+    xhci_dispatch_result_t status = xhci_dispatch_one();
+    if (status == XHCI_DISPATCH_READ_ERROR ||
+        status == XHCI_DISPATCH_UNHANDLED)
       goto event_failed;
 
-    if (status == XHCI_EVENT_NONE) {
+    if (!waiter->completed) {
       uint32_t usbsts = xhci_read(controller.capability_length + XHCI_USBSTS);
-
       if (usbsts & (XHCI_STS_HALTED | XHCI_STS_HOST_ERROR)) {
         result->controller_status = usbsts;
         goto event_failed;
@@ -2866,11 +2875,10 @@ static xhci_control_result_t xhci_control_transfer(
       continue;
     }
 
-    if (event.type == XHCI_TRB_PORT_STATUS_EVENT) {
-      if (!xhci_event_record(&event))
-        goto event_failed;
-      continue;
-    }
+    // The dispatcher has matched the transfer event
+    // to our slot, endpoint and Status Stage TRB.
+    xhci_event_t event = waiter->event;
+    xhci_waiter_release(waiter);
 
     result->event_type = event.type;
     result->completion_code = event.completion_code;
@@ -2881,42 +2889,40 @@ static xhci_control_result_t xhci_control_transfer(
     result->controller_status = xhci_read(
         controller.capability_length + XHCI_USBSTS);
 
-    if (event.type != XHCI_TRB_TRANSFER_EVENT ||
-        event.slot_id != device->slot_id ||
-        result->endpoint_id != 1U ||
-        event.parameter != status_trb)
-      goto event_failed;
-
     if (event.completion_code != XHCI_COMPLETION_SUCCESS) {
       device->ep0_failed = true;
       device->ep0_active = false;
       return XHCI_CONTROL_TRANSFER_FAILED;
     }
+
     if (has_data) {
       if (!dma_end_device(buffer))
         goto dma_failed;
-
       uint8_t *bytes = buffer->virtual;
       for (unsigned int i = 0; i < setup->length; i++)
         result->data[i] = bytes[i];
       result->length = setup->length;
     }
+
     if (!xhci_ep0_advance(device, count, cache.data_line_size)) {
       device->ep0_failed = true;
       device->ep0_active = false;
       return XHCI_CONTROL_RING_FAILED;
     }
+
     device->ep0_active = false;
     return XHCI_CONTROL_OK;
   }
   result->elapsed_us = timer_now_us() - started;
   result->controller_status = xhci_read(
       controller.capability_length + XHCI_USBSTS);
+  xhci_waiter_release(waiter);
   device->ep0_failed = true;
   device->ep0_active = false;
   return XHCI_CONTROL_TIMEOUT;
 
 event_failed:
+  xhci_waiter_release(waiter);
   device->ep0_failed = true;
   device->ep0_active = false;
   return XHCI_CONTROL_EVENT_FAILED;
@@ -2926,7 +2932,6 @@ dma_failed:
   device->ep0_active = false;
   return XHCI_CONTROL_DMA_FAILED;
 }
-
 
 xhci_control_result_t xhci_control_in(
     const xhci_setup_packet_t *setup, xhci_control_info_t *result) {
