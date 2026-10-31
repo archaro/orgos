@@ -36,7 +36,7 @@
 #define USB_HUB_RESET_RECOVERY_MS 50U
 
 #define USB_HUB_PORT_POWER 8U
-#define USB_HUB_POWER_DELAY_MS 120U
+#define USB_HUB_POWER_MIN_DELAY_MS 120U
 
 usb_hub_result_t usb_hub_port_status(uint8_t port, usb_hub_port_t *result) {
 
@@ -85,8 +85,8 @@ usb_hub_result_t usb_hub_port_status(uint8_t port, usb_hub_port_t *result) {
 }
 
 
-usb_hub_result_t usb_hub_power_on(usb_hub_port_t *result) {
-
+usb_hub_result_t usb_hub_power_on(
+    uint32_t power_good_ms, usb_hub_port_t *result) {
   if (!result)
     return USB_HUB_NOT_READY;
 
@@ -141,7 +141,12 @@ usb_hub_result_t usb_hub_power_on(usb_hub_port_t *result) {
       return USB_HUB_TRANSFER_FAILED;
   }
 
-  timer_delay_ms(USB_HUB_POWER_DELAY_MS);
+  // Honour the hub's advertised power-good interval,
+  // but always wait at least 120ms.
+  uint32_t delay_ms = power_good_ms;
+  if (delay_ms < USB_HUB_POWER_MIN_DELAY_MS)
+    delay_ms = USB_HUB_POWER_MIN_DELAY_MS;
+  timer_delay_ms(delay_ms);
 
   // Verify that every downstream port reports power.
   for (uint8_t port = 1U; port <= USB_HUB_PORTS; port++) {

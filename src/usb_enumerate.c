@@ -88,6 +88,9 @@ static usb_enum_result_t configure_hub(usb_enum_info_t *state) {
   uint8_t ports = info.data[2];
   uint16_t characteristics = read_u16(&info.data[3]);
   uint8_t ttt = (uint8_t)((characteristics >> 5) & 3U);
+  // bPwrOn2PwrGood is expressed in units of 2 ms.
+  uint32_t power_good_ms = (uint32_t)info.data[5] * 2U;
+
   // Current USB hub driver supports precisely four ports.
   if (ports != 4U) {
     state->detail = ports;
@@ -103,8 +106,7 @@ static usb_enum_result_t configure_hub(usb_enum_info_t *state) {
   }
 
   usb_hub_port_t power;
-  usb_hub_result_t power_result = usb_hub_power_on(&power);
-
+  usb_hub_result_t power_result = usb_hub_power_on(power_good_ms, &power);
   if (power_result != USB_HUB_OK) {
     state->detail = (uint32_t)power_result;
     return USB_ENUM_HUB_POWER_FAILED;

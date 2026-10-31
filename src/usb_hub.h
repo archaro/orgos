@@ -45,4 +45,5 @@ typedef struct {
 usb_hub_result_t usb_hub_port_reset(
     uint8_t port, usb_hub_reset_info_t *result);
 
-usb_hub_result_t usb_hub_power_on(usb_hub_port_t *result);
+usb_hub_result_t usb_hub_power_on(
+    uint32_t power_good_ms, usb_hub_port_t *result);
