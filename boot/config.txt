@@ -13,3 +13,5 @@ dtoverlay=disable-bt
 # Enable GIC-400
 enable_gic=1
 
+# Match Raspberry Pi OS clock configuration
+arm_boost=1
