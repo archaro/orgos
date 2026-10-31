@@ -5,6 +5,7 @@
 
 #include "format.h"
 #include "console.h"
+#include "board.h"
 #include "mailbox.h"
 #include "timer.h"
 #include "uart.h"
@@ -2636,28 +2637,6 @@ typedef struct {
   console_command_fn handler;
   const char *description;
 } console_command_t;
-
-
-// Decode the RAM capacity field in the modern
-// Raspberry Pi board revision encoding.
-// Bits [22:20] identify the installed RAM size.
-// Bit 23 distinguishes the modern encoding from
-// the original revision-number scheme.
-// Return zero if the code cannot be decoded.
-static uint32_t board_ram_mib(uint32_t revision) {
-  if (!(revision & (1U << 23)))
-    return 0;
-
-  static const uint32_t sizes[] = {
-    256, 512, 1024, 2048, 4096, 8192, 16384
-  };
-
-  uint32_t code = (revision >> 20) & 7U;
-  if (code >= sizeof(sizes) / sizeof(sizes[0]))
-    return 0;
-
-  return sizes[code];
-}
 
 static void cmd_memory(const char *args) {
   (void)args;

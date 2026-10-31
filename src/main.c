@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#include "board.h"
 #include "mailbox.h"
 #include "timer.h"
 #include "fdt.h"
@@ -38,7 +39,8 @@ bool pcie_subsystem_init(void) {
   uint64_t link_elapsed = timer_now_us() - link_started;
   switch (pcie_result) {
     case PCIE_INIT_OK:
-      console_puts("Link established.\n");
+      console_printf("Link established (%llu ms).\n",
+          (unsigned long long)(link_elapsed / 1000ULL));
       break;
     case PCIE_INIT_ALREADY_UP:
       console_puts("Link already active.\n");
@@ -180,9 +182,6 @@ bool pcie_subsystem_init(void) {
     console_puts("VL805 firmware already initialised.\n");
   }
 
-  console_printf("  Diagnostic PCI command: 0x%04x\n",
-      (unsigned int)final_command);
-
   // Attempt a Host Controller Reset while PCI bus
   // mastering remains enabled.
   //
@@ -191,25 +190,18 @@ bool pcie_subsystem_init(void) {
   console_puts("Resetting xHCI controller... ");
   xhci_reset_info_t reset = {0};
   xhci_reset_result_t reset_result = xhci_reset(&reset);
-
   if (reset_result != XHCI_RESET_OK) {
     console_printf( "FAILED (%u, cmd 0x%08x, sts 0x%08x).\n",
         (unsigned int)reset_result, reset.command_after, reset.status_after);
-
     console_printf("  Reset elapsed: %llu us\n",
         (unsigned long long)reset.reset_elapsed_us);
-
     return false;
   }
+  console_puts("OK.\n");
 
-  console_printf("OK (reset %llu us, ready %llu us).\n",
-      (unsigned long long)reset.reset_elapsed_us,
-      (unsigned long long)reset.ready_elapsed_us);
-
+  console_puts("Restoring PCI state: ");
   // HCRST completed with bus mastering enabled.
   // Disable it before installing OrgOS DMA structures.
-  console_puts("Restoring pre-DMA PCI state... ");
-
   if (!pcie_xhci_disable_bus_master()) {
     console_puts("FAILED (bus mastering).\n");
     return false;
@@ -228,7 +220,6 @@ bool pcie_subsystem_init(void) {
     console_puts("FAILED (controller state).\n");
     return false;
   }
-
   console_puts("OK.\n");
   return true;
 }
@@ -252,58 +243,34 @@ void main(void) {
 
   console_puts("\nWelcome to OrgOS\n");
   console_puts("----------------\n");
-  // Identify the Raspberry Pi hardware.
-  // The board revision includes the model, processor
-  // and installed RAM capacity in its modern encoding.
-  // Query the firmware before enabling the MMU,
-  // while mailbox access is still straightforward.
-  uint32_t board_revision;
-  console_puts("Board revision: ");
-  if (mailbox_get_board_revision(&board_revision)) {
-    static const char hex[] = "0123456789ABCDEF";
-    console_puts("0x");
-    for (int shift = 28; shift >= 0; shift -= 4)
-      console_putc(hex[(board_revision >> shift) & 0x0fU]);
-    console_putc('\n');
+
+  uint32_t board_revision = 0U;
+  bool board_ok = mailbox_get_board_revision(&board_revision);
+  if (board_ok && (board_revision & (1U << 23)) &&
+      ((board_revision >> 4) & 0xffU) == 0x11U) {
+    console_printf("Hardware: Raspberry Pi 4 Model B (rev 0x%08x, EL%u)\n",
+        board_revision, current_el());
+  } else if (board_ok) {
+    console_printf("Hardware: board rev 0x%08x, EL%u\n",
+        board_revision, current_el());
   } else {
-    console_puts("Unavailable\n");
+    console_printf("Hardware: unknown board, EL%u\n", current_el());
   }
 
-  // What EL are we at?
-  console_puts("Current exception level: EL");
-  console_putu32(current_el());
-  console_puts("\n");
-
-  // Configure the UART clock
-  if (clock_ok) {
-    console_puts("Firmware mailbox: OK\n");
-  } else {
-    console_puts("Firmware mailbox: FAILED (using fallback)\n");
-  }
-
-  console_puts("UART clock: ");
-  console_putu32(clock_hz);
-  console_puts(" Hz\n");
-
-  console_puts("Baud rate: ");
-  console_putu32(UART_BAUD);
-  console_puts("\n");
+  if (!clock_ok)
+    console_puts("UART: firmware clock query failed; using fallback.\n");
 
   // Inspect the firmware-supplied Device Tree
   // before enabling address translation.
   // This is diagnostic only. An absent or invalid
   // FDT must not prevent OrgOS from booting.
-  console_puts("\nChecking firmware Device Tree... ");
-  if (fdt_init()) {
-    console_puts("Valid FDT detected.\n");
-    console_puts("Relocating Device Tree... ");
-    if (fdt_relocate()) {
-      console_puts("OK.\n");
-    } else {
-      console_puts("FAILED.\n");
-    }
+  console_puts("\nFirmware Device Tree... ");
+  if (!fdt_init()) {
+    console_puts("Unavailable or invalid.\n");
+  } else if (!fdt_relocate()) {
+    console_puts("FAILED (relocation).\n");
   } else {
-    console_puts("Not available or invalid.\n");
+    console_puts("OK (relocated).\n");
   }
 
   // Discover the firmware-reported ARM memory region
@@ -313,17 +280,19 @@ void main(void) {
   //   - Data caches are disabled.
   //   - UART is available for diagnostics.
   //   - CPU interrupts remain masked.
-  uint32_t arm_base = 0;
-  uint32_t arm_size = 0;
-
-  console_puts("\nDiscovering ARM memory... ");
+  uint32_t arm_base = 0U;
+  uint32_t arm_size = 0U;
   bool memory_ok = mailbox_get_arm_memory(&arm_base, &arm_size);
+  uint32_t installed_mib = board_ok ? board_ram_mib(board_revision) : 0U;
+  console_puts("Memory: ");
+  if (installed_mib)
+    console_printf("%u MiB installed", installed_mib);
+  else
+    console_puts("installed RAM unknown");
   if (memory_ok) {
-    console_puts("OK (");
-    console_putu32(arm_size / (1024U * 1024U));
-    console_puts(" MiB).\n");
+    console_printf(", %u MiB ARM low\n", arm_size / (1024U * 1024U));
   } else {
-    console_puts("FAILED.\n");
+    console_puts(", ARM low memory query FAILED\n");
   }
 
   // Build our physical-memory inventory before
@@ -348,7 +317,7 @@ void main(void) {
   // later subsystems will depend on translation.
   console_puts("Initialising MMU... ");
   if (memory_ok && mmu_init(physmem_get_map())) {
-    console_puts("Translation enabled.\n");
+    console_puts("OK.\n");
   } else {
     console_puts("FAILED.\n");
     console_puts("System halted.\n");
@@ -429,19 +398,12 @@ void main(void) {
 
         usb_init_info_t usb_info;
         usb_init_result_t usb_result = usb_init(&usb_info);
-
         if (usb_result == USB_INIT_OK) {
-          console_puts("OK (Slot ");
-          console_putu32(usb_info.slot_id);
-          console_puts(", Address ");
-          console_putu32(usb_info.address);
-          console_puts(").\n");
+          console_printf("OK (address %u).\n",
+              (unsigned int)usb_info.address);
         } else {
-          console_puts("FAILED (stage ");
-          console_putu32((uint32_t)usb_result);
-          console_puts(", detail 0x");
-          console_puthex(usb_info.detail, 8);
-          console_puts(").\n");
+          console_printf("FAILED (stage %d, detail 0x%u).\n",
+              (uint32_t)usb_result, usb_info.detail);
         }
       }
     }
