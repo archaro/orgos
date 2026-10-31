@@ -111,6 +111,7 @@
 
 static bool xhci_resources_ready;
 static bool dma_window_ready;
+static bool pcie_link_initialised;
 
 bool pcie_xhci_ready(void) {
   return xhci_resources_ready;
@@ -260,26 +261,22 @@ static void pcie_update_bits(uintptr_t address, uint32_t clear_mask, uint32_t se
   __asm__ volatile("dsb sy" ::: "memory");
 }
 
-
 pcie_init_result_t pcie_init_link(void) {
-  uint32_t status = mmio_read(PCIE_STATUS);
 
-  // Avoid resetting an already functioning link.
-  // In the future, xHCI may be running on it,
-  // so an unnecessary reset would be destructive.
-  if ((status & (PCIE_STATUS_RC | PCIE_STATUS_DL | PCIE_STATUS_PHY)) ==
-                (PCIE_STATUS_RC | PCIE_STATUS_DL | PCIE_STATUS_PHY))
+  // Do not reset a PCIe link already initialised
+  // by OrgOS. This would disrupt the running xHCI.
+  if (pcie_link_initialised)
     return PCIE_INIT_ALREADY_UP;
 
+  // The PCIe status register must not be read
+  // before initialising the bridge. On some firmware
+  // revisions an early read stalls for 10.8 seconds.
+
   // Assert bridge reset and endpoint PERST#.
-  // On BCM2711 both are controlled through the
-  // RGR1 software initialization register.
   pcie_update_bits(PCIE_SW_INIT, 0, PCIE_SW_INIT_BRIDGE | PCIE_SW_INIT_PERST);
   timer_delay_us(150);
 
-  // Release the bridge itself from reset.
-  // Keep the downstream VL805 in reset while
-  // configuring the root complex.
+  // Release the bridge, keeping the VL805 in reset.
   pcie_update_bits(PCIE_SW_INIT, PCIE_SW_INIT_BRIDGE, 0);
 
   // Wake the PCIe SerDes from IDDQ power-down.
@@ -287,51 +284,37 @@ pcie_init_result_t pcie_init_link(void) {
   timer_delay_us(150);
 
   // Configure the basic PCIe controller mode.
-  // BCM2711:
-  //   SCB maximum burst size = 128 bytes (00)
-  //   Unsupported config reads permitted to report UR
-  //   SCB access enabled
-  //   RCB modes enabled
-  // This does not configure DMA translation windows.
+  // DMA translation windows are configured later.
   pcie_update_bits(PCIE_MISC_CTRL, PCIE_BURST_MASK,
-      PCIE_SCB_ACCESS | PCIE_CFG_READ_UR | PCIE_RCB_MPS | PCIE_RCB_64B);
+      PCIE_SCB_ACCESS | PCIE_CFG_READ_UR |
+      PCIE_RCB_MPS | PCIE_RCB_64B);
 
-  // Verify the controller is in root-complex mode
-  // before releasing the endpoint.
-  status = mmio_read(PCIE_STATUS);
-
+  // The bridge is now initialised and its status
+  // register can be accessed without the startup stall.
+  uint32_t status = mmio_read(PCIE_STATUS);
   if (!(status & PCIE_STATUS_RC))
     return PCIE_INIT_NOT_ROOT_COMPLEX;
 
   // Release the VL805 from fundamental reset.
-  // This is the point at which its PCIe link
-  // can begin training.
-  pcie_update_bits( PCIE_SW_INIT, PCIE_SW_INIT_PERST, 0);
+  pcie_update_bits(PCIE_SW_INIT, PCIE_SW_INIT_PERST, 0);
 
-  // Give the downstream device time to respond
-  // after reset, as required by PCIe.
+  // Allow the downstream device to settle.
   timer_delay_ms(100);
 
-  // Poll for link establishment for up to a
-  // further 100 milliseconds.
-  // Both physical link-up and data-link-active
-  // must be reported.
+  // Allow up to another 100 ms for link establishment.
   uint64_t deadline = timer_now_us() + 100000U;
-
   do {
     status = mmio_read(PCIE_STATUS);
-
     if ((status & (PCIE_STATUS_PHY | PCIE_STATUS_DL)) ==
-                  (PCIE_STATUS_PHY | PCIE_STATUS_DL))
+        (PCIE_STATUS_PHY | PCIE_STATUS_DL)) {
+      pcie_link_initialised = true;
       return PCIE_INIT_OK;
-
+    }
     timer_delay_ms(5);
-
   } while (timer_now_us() < deadline);
 
   return PCIE_INIT_LINK_TIMEOUT;
 }
-
 
 pcie_map_result_t pcie_map_xhci(void) {
   pcie_info_t info;

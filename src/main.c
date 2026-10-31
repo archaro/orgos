@@ -36,7 +36,6 @@ bool pcie_subsystem_init(void) {
   uint64_t link_started = timer_now_us();
   pcie_init_result_t pcie_result = pcie_init_link();
   uint64_t link_elapsed = timer_now_us() - link_started;
-
   switch (pcie_result) {
     case PCIE_INIT_OK:
       console_puts("Link established.\n");
@@ -51,7 +50,6 @@ bool pcie_subsystem_init(void) {
       console_puts("Failed: link timeout.\n");
       break;
   }
-
   console_printf("  PCIe link elapsed: %llu us\n",
       (unsigned long long)link_elapsed);
 
@@ -60,9 +58,7 @@ bool pcie_subsystem_init(void) {
 
   // Configure the VL805's PCI resources.
   console_puts("Configuring VL805 PCI resources... ");
-
   pcie_map_result_t map_result = pcie_map_xhci();
-
   switch (map_result) {
     case PCIE_MAP_OK:
       console_puts("OK.\n");
@@ -83,24 +79,20 @@ bool pcie_subsystem_init(void) {
       console_puts("Failed: BAR verification error.\n");
       break;
   }
-
   if (map_result != PCIE_MAP_OK)
     return false;
 
   // Establish the inbound PCIe DMA aperture.
   console_puts("Configuring PCIe inbound DMA... ");
-
   if (!pcie_dma_init()) {
     console_puts("FAILED.\n");
     return false;
   }
-
   console_puts("OK.\n");
 
   // Determine whether the VL805 needs its firmware
   // reloaded after PCIe initialisation.
   xhci_state_t state;
-
   if (!xhci_get_state(&state)) {
     console_puts("VL805 state unavailable.\n");
     return false;
@@ -125,7 +117,6 @@ bool pcie_subsystem_init(void) {
     // Verify that the firmware has left the controller
     // ready and halted.
     xhci_readiness_t readiness;
-
     if (!xhci_check_readiness(&readiness) ||
         !readiness.ready || !readiness.halted) {
       console_puts("FAILED (controller not ready).\n");
@@ -160,7 +151,6 @@ bool pcie_subsystem_init(void) {
   }
 
   uint16_t final_command = 0;
-
   if (!pcie_xhci_get_command(&final_command) ||
       !(final_command & (1U << 2))) {
     console_puts("FAILED (bus mastering not enabled).\n");
@@ -181,7 +171,6 @@ bool pcie_subsystem_init(void) {
           (unsigned int)diagnostic.result);
       console_printf("  Response seen  : %s\n",
           diagnostic.response_received ? "Yes" : "No");
-
       if (diagnostic.response_received) {
         console_printf("  Response code  : %u\n", diagnostic.response_code);
         console_printf("  Tag length     : %u\n", diagnostic.tag_length);
@@ -200,7 +189,6 @@ bool pcie_subsystem_init(void) {
   // The controller must be halted and must not
   // have been configured with OrgOS DMA structures.
   console_puts("Resetting xHCI controller... ");
-
   xhci_reset_info_t reset = {0};
   xhci_reset_result_t reset_result = xhci_reset(&reset);
 
@@ -218,7 +206,7 @@ bool pcie_subsystem_init(void) {
       (unsigned long long)reset.reset_elapsed_us,
       (unsigned long long)reset.ready_elapsed_us);
 
-    // HCRST completed with bus mastering enabled.
+  // HCRST completed with bus mastering enabled.
   // Disable it before installing OrgOS DMA structures.
   console_puts("Restoring pre-DMA PCI state... ");
 
