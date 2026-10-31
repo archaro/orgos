@@ -19,8 +19,12 @@
 #define USB_HUB_PORT_REQUEST_OUT  0x23U
 
 #define USB_HUB_C_CONNECTION       (1U << 0)
+#define USB_HUB_C_ENABLE           (1U << 1)
+#define USB_HUB_C_RESET            (1U << 4)
+
 #define USB_HUB_FEATURE_RESET       4U
 #define USB_HUB_CHANGE_CONNECTION  16U
+#define USB_HUB_CHANGE_ENABLE      17U
 #define USB_HUB_CHANGE_RESET       20U
 
 #define USB_HUB_STATUS_CONNECTION (1U << 0)
@@ -309,7 +313,7 @@ usb_hub_result_t usb_hub_port_reset(
     if (current.status & USB_HUB_STATUS_RESET)
       continue;
 
-    if (!(current.change & (1U << 4)))
+    if (!(current.change & USB_HUB_C_RESET))
       continue;
 
     if (!(current.status & USB_HUB_STATUS_ENABLE))
@@ -331,7 +335,7 @@ usb_hub_result_t usb_hub_port_reset(
 
     // Acknowledge any connection change observed
     // during this reset sequence.
-    if (current.change & (1U << 0)) {
+    if (current.change & USB_HUB_C_CONNECTION) {
       status = usb_hub_port_feature(
           port, USB_HUB_REQ_CLEAR_FEATURE,
           USB_HUB_CHANGE_CONNECTION, &transfer);
@@ -340,16 +344,48 @@ usb_hub_result_t usb_hub_port_reset(
     }
 
     // Verify the resulting port state and change flags.
+    // Read the port state after acknowledging reset
+    // and any connection change detected during reset.
     status = usb_hub_port_status(port, &current);
     if (status != USB_HUB_OK)
       return status;
 
+    // Do not acknowledge an enable change if the
+    // port is no longer in a valid operational state.
+    if (!(current.status & USB_HUB_STATUS_ENABLE) ||
+        !(current.status & USB_HUB_STATUS_CONNECTION) ||
+        (current.status & USB_HUB_STATUS_RESET) ||
+        (current.change & (USB_HUB_C_CONNECTION | USB_HUB_C_RESET))) {
+      result->final_change = current.change;
+      return USB_HUB_RESET_FAILED;
+    }
+
+    // Reset may also produce a port-enable change.
+    // We have verified that the port is enabled,
+    // so this transition can now be acknowledged.
+    if (current.change & USB_HUB_C_ENABLE) {
+      status = usb_hub_port_feature(port, USB_HUB_REQ_CLEAR_FEATURE,
+          USB_HUB_CHANGE_ENABLE, &transfer);
+
+      if (status != USB_HUB_OK) {
+        result->transfer_result = XHCI_CONTROL_TRANSFER_FAILED;
+        result->completion_code = transfer.completion_code;
+        return status;
+      }
+
+      // Re-read to verify the acknowledgement and
+      // detect any further change during the request.
+      status = usb_hub_port_status(port, &current);
+      if (status != USB_HUB_OK)
+        return status;
+    }
+
     result->final_change = current.change;
     if (!(current.status & USB_HUB_STATUS_ENABLE) ||
         !(current.status & USB_HUB_STATUS_CONNECTION) ||
-        (current.status & USB_HUB_STATUS_RESET))
-      return USB_HUB_RESET_FAILED;
-    if (current.change & ((1U << 0) | (1U << 4)))
+        (current.status & USB_HUB_STATUS_RESET) ||
+        (current.change &
+            (USB_HUB_C_CONNECTION | USB_HUB_C_ENABLE | USB_HUB_C_RESET)))
       return USB_HUB_RESET_FAILED;
 
     // USB 2.0 reset recovery: allow at least 10 ms
