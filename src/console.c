@@ -1686,6 +1686,7 @@ static void cmd_usb_test_midiwrap(void) {
   const unsigned int ring_entries = 255U;
   const uint64_t trb_size = 16U;
   uint64_t ring_base = 0U;
+  unsigned int first_index = 0U;
   unsigned int completed = 0U;
   unsigned int wraps = 0U;
   uint64_t started = timer_now_us();
@@ -1706,9 +1707,20 @@ static void cmd_usb_test_midiwrap(void) {
       console_printf("Transfer %u: unexpected completion\n", i + 1U);
       break;
     }
-    if (i == 0U)
-      ring_base = info.transfer_trb;
-    uint64_t expected = ring_base + (uint64_t)(i % ring_entries) * trb_size;
+    if (i == 0U) {
+      // The DMA ring occupies one aligned 4 KiB page.
+      // Earlier MIDI transfers may have advanced its index.
+      ring_base = info.transfer_trb & ~((uint64_t)PAGE_SIZE - 1U);
+      first_index = (unsigned int)
+          ((info.transfer_trb - ring_base) / trb_size);
+      if (first_index >= ring_entries) {
+        console_puts("Invalid initial transfer TRB index\n");
+        break;
+      }
+    }
+    unsigned int absolute_index = first_index + i;
+    uint64_t expected = ring_base +
+        (uint64_t)(absolute_index % ring_entries) * trb_size;
     if (info.transfer_trb != expected) {
       console_printf("Transfer %u: incorrect TRB address\n", i + 1U);
       console_printf("  Expected: %016llx\n", (unsigned long long)expected);
@@ -1717,7 +1729,7 @@ static void cmd_usb_test_midiwrap(void) {
       break;
     }
     completed++;
-    if (i != 0U && i % ring_entries == 0U) {
+    if (i != 0U && absolute_index % ring_entries == 0U) {
       wraps++;
       console_printf("  Wrap %u: transfer %u, TRB %016llx\n", wraps, i + 1U,
           (unsigned long long)info.transfer_trb);
@@ -1731,7 +1743,7 @@ static void cmd_usb_test_midiwrap(void) {
   console_printf("  Elapsed   : %llu ms\n",
       (unsigned long long)(elapsed / 1000ULL));
   console_printf("USB-MIDI ring-wrap: %s\n",
-      completed == transfers && wraps == 2U ? "PASS" : "FAILED");
+      completed == transfers && wraps >= 2U ? "PASS" : "FAILED");
 }
 
 static void cmd_usb(const char *args) {

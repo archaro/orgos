@@ -2132,6 +2132,19 @@ xhci_bulk_out_result_t xhci_downstream_bulk_out(
     return XHCI_BULK_OUT_RING_FAILED;
   }
 
+  // Register the transfer completion before
+  // ringing the Bulk OUT endpoint doorbell.
+  xhci_event_waiter_t *waiter = xhci_waiter_register(
+      XHCI_TRB_TRANSFER_EVENT, device->slot_id,
+      XHCI_BULK_OUT_DCI, result->transfer_trb);
+
+  if (!waiter) {
+    device->bulk_out_failed = true;
+    if (!dma_end_device(buffer))
+      return XHCI_BULK_OUT_DMA_FAILED;
+    return XHCI_BULK_OUT_EVENT_FAILED;
+  }
+
   device->bulk_out_active = true;
   __asm__ volatile("dsb sy" ::: "memory");
 
@@ -2140,31 +2153,27 @@ xhci_bulk_out_result_t xhci_downstream_bulk_out(
       4U * device->slot_id, XHCI_BULK_OUT_DCI);
 
   uint64_t started = timer_now_us();
-
   while (timer_now_us() - started < XHCI_TRANSFER_TIMEOUT_US) {
-    xhci_event_t event;
-    xhci_event_result_t status = xhci_event_poll(&event);
+    xhci_dispatch_result_t status = xhci_dispatch_one();
 
-    if (status == XHCI_EVENT_ERROR)
+    if (status == XHCI_DISPATCH_READ_ERROR ||
+        status == XHCI_DISPATCH_UNHANDLED)
       goto event_failed;
 
-    if (status == XHCI_EVENT_NONE) {
+    if (!waiter->completed) {
       uint32_t usbsts = xhci_read(
           controller.capability_length + XHCI_USBSTS);
-
       if (usbsts & (XHCI_STS_HALTED | XHCI_STS_HOST_ERROR)) {
         result->controller_status = usbsts;
         goto event_failed;
       }
-
       continue;
     }
 
-    if (event.type == XHCI_TRB_PORT_STATUS_EVENT) {
-      if (!xhci_event_record(&event))
-        goto event_failed;
-      continue;
-    }
+    // The dispatcher has matched the event to
+    // our slot, endpoint and submitted transfer TRB.
+    xhci_event_t event = waiter->event;
+    xhci_waiter_release(waiter);
 
     result->completion_code = event.completion_code;
     result->event_parameter = event.parameter;
@@ -2172,13 +2181,6 @@ xhci_bulk_out_result_t xhci_downstream_bulk_out(
     result->elapsed_us = timer_now_us() - started;
     result->controller_status = xhci_read(
         controller.capability_length + XHCI_USBSTS);
-
-    uint8_t endpoint = (uint8_t)((event.control >> 16) & 0x1fU);
-    if (event.type != XHCI_TRB_TRANSFER_EVENT ||
-        event.slot_id != device->slot_id ||
-        endpoint != XHCI_BULK_OUT_DCI ||
-        event.parameter != result->transfer_trb)
-      goto event_failed;
 
     if (event.completion_code != XHCI_COMPLETION_SUCCESS)
       goto transfer_failed;
@@ -2212,6 +2214,7 @@ xhci_bulk_out_result_t xhci_downstream_bulk_out(
   result->elapsed_us = timer_now_us() - started;
   result->controller_status = xhci_read(
       controller.capability_length + XHCI_USBSTS);
+  xhci_waiter_release(waiter);
   device->bulk_out_failed = true;
   device->bulk_out_active = false;
   return XHCI_BULK_OUT_TIMEOUT;
@@ -2222,6 +2225,7 @@ transfer_failed:
   return XHCI_BULK_OUT_TRANSFER_FAILED;
 
 event_failed:
+  xhci_waiter_release(waiter);
   device->bulk_out_failed = true;
   device->bulk_out_active = false;
   return XHCI_BULK_OUT_EVENT_FAILED;
