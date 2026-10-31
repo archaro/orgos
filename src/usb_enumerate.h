@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "usb_midi.h"
+#include "usb_midi_quirks.h"
 
 typedef enum {
   USB_ENUM_OK,
@@ -27,7 +28,8 @@ typedef enum {
   USB_ENUM_SET_CONFIG_FAILED,
   USB_ENUM_VERIFY_CONFIG_FAILED,
   USB_ENUM_BULK_CONFIG_FAILED,
-  USB_ENUM_SET_INTERFACE_FAILED
+  USB_ENUM_SET_INTERFACE_FAILED,
+  USB_ENUM_MIDI_QUIRK_FAILED
 } usb_enum_result_t;
 
 typedef struct {
@@ -40,6 +42,7 @@ typedef struct {
   uint8_t address;
   uint16_t vendor_id;
   uint16_t product_id;
+  uint32_t quirks;
   uint16_t configuration_length;
   usb_midi_config_t midi;
 } usb_enum_info_t;

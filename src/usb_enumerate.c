@@ -378,6 +378,7 @@ usb_enum_result_t usb_enumerate(usb_enum_info_t *info) {
   if (result != USB_ENUM_OK)
     goto complete;
 
+  state.quirks = usb_midi_quirks_lookup(state.vendor_id, state.product_id);
   result = read_configuration(&state);
   if (result != USB_ENUM_OK)
     goto complete;
@@ -387,6 +388,11 @@ usb_enum_result_t usb_enumerate(usb_enum_info_t *info) {
     goto complete;
 
   result = configure_bulk(&state);
+  if (result != USB_ENUM_OK)
+    goto complete;
+
+  if (!usb_midi_quirks_apply(state.quirks, &state.detail))
+    result = USB_ENUM_MIDI_QUIRK_FAILED;
 
 complete:
   state.result = result;

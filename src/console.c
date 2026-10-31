@@ -1621,6 +1621,10 @@ static void cmd_usb_enumerate(void) {
       (unsigned int)info.vendor_id);
   console_printf("  Product ID      : 0x%04x\n",
       (unsigned int)info.product_id);
+  if (info.quirks & USB_MIDI_QUIRK_STARTUP_EOX)
+    console_puts("  MIDI quirk      : startup EOX\n");
+  else
+    console_puts("  MIDI quirk      : none\n");
   console_printf("  Config length   : %u\n",
       (unsigned int)info.configuration_length);
   console_printf("  MIDI interface  : %u\n",
@@ -1644,47 +1648,30 @@ static void cmd_usb_test_midiout(void) {
   const uint8_t note_on[4] = {0x09U, 0x90U, 0x3cU, 0x64U};
   const uint8_t note_off[4] = {0x08U, 0x80U, 0x3cU, 0x00U};
   xhci_bulk_out_info_t info = {0};
-
-  // Diagnostic: send MIDI Tune Request before
-  // the first Note On. This System Common status
-  // should discard an incomplete channel message.
-  const uint8_t sync[4] = {
-    0x05U, 0xF7U, 0x00U, 0x00U
-  };
-
-  xhci_bulk_out_info_t sync_info = {0};
-  console_puts("USB-MIDI synchronisation test...\n");
-  xhci_bulk_out_result_t sync_result =
-      xhci_downstream_bulk_out(sync, sizeof(sync), &sync_info);
-  console_printf("  Result          : %u\n", (unsigned int)sync_result);
-  console_printf("  Completion code : %u\n",
-      (unsigned int)sync_info.completion_code);
-  if (sync_result != XHCI_BULK_OUT_OK || sync_info.completion_code != 1U) {
-    console_puts("USB-MIDI synchronisation: FAILED\n");
-    return;
-  }
-  timer_delay_ms(20);
   console_puts("USB-MIDI Note On...\n");
   xhci_bulk_out_result_t result =
       xhci_downstream_bulk_out(note_on, sizeof(note_on), &info);
   console_printf("  Result          : %u\n", (unsigned int)result);
-  console_printf("  Completion code : %u\n", info.completion_code);
+  console_printf("  Completion code : %u\n",
+      (unsigned int)info.completion_code);
   console_printf("  TRB             : %016llx\n",
       (unsigned long long)info.transfer_trb);
-  if (result != XHCI_BULK_OUT_OK) {
+  if (result != XHCI_BULK_OUT_OK || info.completion_code != 1U) {
     console_puts("USB-MIDI Note On: FAILED\n");
     return;
   }
-  timer_delay_ms(250);
+  timer_delay_ms(250U);
   console_puts("USB-MIDI Note Off...\n");
   info = (xhci_bulk_out_info_t){0};
-  result = xhci_downstream_bulk_out(note_off, sizeof(note_off), &info);
+  result = xhci_downstream_bulk_out( note_off, sizeof(note_off), &info);
   console_printf("  Result          : %u\n", (unsigned int)result);
-  console_printf("  Completion code : %u\n", info.completion_code);
+  console_printf("  Completion code : %u\n",
+      (unsigned int)info.completion_code);
   console_printf("  TRB             : %016llx\n",
       (unsigned long long)info.transfer_trb);
   console_printf("USB-MIDI Note On/Off: %s\n",
-      result == XHCI_BULK_OUT_OK ? "PASS" : "FAILED");
+      result == XHCI_BULK_OUT_OK &&
+      info.completion_code == 1U ? "PASS" : "FAILED");
 }
 
 static void cmd_usb_test_midiwrap(void) {
