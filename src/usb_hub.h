@@ -14,7 +14,8 @@ typedef enum {
   USB_HUB_DISCONNECTED,
   USB_HUB_NOT_POWERED,
   USB_HUB_RESET_TIMEOUT,
-  USB_HUB_RESET_FAILED
+  USB_HUB_RESET_FAILED,
+  USB_HUB_DEBOUNCE_TIMEOUT
 } usb_hub_result_t;
 
 typedef struct {
@@ -26,6 +27,8 @@ typedef struct {
 } usb_hub_port_t;
 
 usb_hub_result_t usb_hub_port_status(uint8_t port, usb_hub_port_t *result);
+usb_hub_result_t usb_hub_port_debounce(uint8_t port, usb_hub_port_t *result);
+
 typedef struct {
   uint8_t port;
   uint8_t speed;

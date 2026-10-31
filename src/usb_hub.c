@@ -18,6 +18,7 @@
 #define USB_HUB_REQ_SET_FEATURE   0x03U
 #define USB_HUB_PORT_REQUEST_OUT  0x23U
 
+#define USB_HUB_C_CONNECTION       (1U << 0)
 #define USB_HUB_FEATURE_RESET       4U
 #define USB_HUB_CHANGE_CONNECTION  16U
 #define USB_HUB_CHANGE_RESET       20U
@@ -26,6 +27,10 @@
 #define USB_HUB_STATUS_ENABLE     (1U << 1)
 #define USB_HUB_STATUS_RESET      (1U << 4)
 #define USB_HUB_STATUS_POWER      (1U << 8)
+
+#define USB_HUB_DEBOUNCE_STEP_MS    25U
+#define USB_HUB_DEBOUNCE_STABLE_US  100000ULL
+#define USB_HUB_DEBOUNCE_TIMEOUT_US 2000000ULL
 
 #define USB_HUB_RESET_TIMEOUT_MS 500U
 
@@ -173,6 +178,64 @@ static usb_hub_result_t usb_hub_port_feature(
     return USB_HUB_TRANSFER_FAILED;
 
   return USB_HUB_OK;
+}
+
+usb_hub_result_t usb_hub_port_debounce(uint8_t port, usb_hub_port_t *result) {
+  if (!result)
+    return USB_HUB_NOT_READY;
+
+  *result = (usb_hub_port_t){0};
+  result->port = port;
+  uint64_t started = timer_now_us();
+  uint64_t stable_since = started;
+  bool have_connection = false;
+  bool was_connected = false;
+
+  for (;;) {
+    usb_hub_port_t current;
+    usb_hub_result_t status = usb_hub_port_status(port, &current);
+    *result = current;
+
+    if (status != USB_HUB_OK)
+      return status;
+
+    if (!(current.status & USB_HUB_STATUS_POWER))
+      return USB_HUB_NOT_POWERED;
+
+    bool connected = (current.status & USB_HUB_STATUS_CONNECTION) != 0U;
+    bool changed = (current.change & USB_HUB_C_CONNECTION) != 0U;
+    // Acknowledge any connection change. Its presence
+    // invalidates the current stability interval.
+    if (changed) {
+      xhci_control_info_t transfer = {0};
+      status = usb_hub_port_feature(port, USB_HUB_REQ_CLEAR_FEATURE,
+          USB_HUB_CHANGE_CONNECTION, &transfer);
+
+      if (status != USB_HUB_OK) {
+        result->transfer_result = transfer.completion_code == 1U ?
+            XHCI_CONTROL_OK : XHCI_CONTROL_TRANSFER_FAILED;
+        result->completion_code = transfer.completion_code;
+        return status;
+      }
+    }
+
+    uint64_t now = timer_now_us();
+    // Require an uninterrupted 100 ms of stable,
+    // connected status with no latched changes.
+    if (!have_connection || changed || connected != was_connected) {
+      stable_since = now;
+    } else if (connected &&
+        now - stable_since >= USB_HUB_DEBOUNCE_STABLE_US) {
+      return USB_HUB_OK;
+    }
+
+    if (now - started >= USB_HUB_DEBOUNCE_TIMEOUT_US)
+      return USB_HUB_DEBOUNCE_TIMEOUT;
+
+    was_connected = connected;
+    have_connection = true;
+    timer_delay_ms(USB_HUB_DEBOUNCE_STEP_MS);
+  }
 }
 
 usb_hub_result_t usb_hub_port_reset(

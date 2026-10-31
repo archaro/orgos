@@ -143,8 +143,17 @@ static usb_enum_result_t discover_port(usb_enum_info_t *state) {
 
   state->hub_port = found;
 
+  // Confirm a stable connection before resetting
+  // the downstream port and addressing its device.
+  usb_hub_port_t stable;
+  usb_hub_result_t result = usb_hub_port_debounce(found, &stable);
+  if (result != USB_HUB_OK) {
+    state->detail = (uint32_t)result;
+    return USB_ENUM_DEBOUNCE_FAILED;
+  }
+
   usb_hub_reset_info_t reset;
-  usb_hub_result_t result = usb_hub_port_reset(found, &reset);
+  result = usb_hub_port_reset(found, &reset);
   if (result != USB_HUB_OK) {
     state->detail = (uint32_t)result;
     return USB_ENUM_RESET_FAILED;
