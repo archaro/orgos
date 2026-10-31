@@ -140,6 +140,19 @@ static uint32_t completed_commands;
 static bool command_outstanding;
 static bool command_ring_failed;
 static xhci_event_stats_t event_stats;
+
+#define XHCI_EVENT_WAITERS 8U
+typedef struct {
+  bool active;
+  bool completed;
+  uint8_t type;
+  uint8_t slot_id;
+  uint8_t endpoint_id;
+  uint64_t trb_address;
+  xhci_event_t event;
+} xhci_event_waiter_t;
+static xhci_event_waiter_t event_waiters[XHCI_EVENT_WAITERS];
+
 static bool slot_requested;
 static bool downstream_slot_requested;
 static uint8_t internal_hub_slot;
@@ -1216,6 +1229,105 @@ bool xhci_event_get_stats(xhci_event_stats_t *stats) {
   return true;
 }
 
+static xhci_event_waiter_t *xhci_waiter_register(
+    uint8_t type, uint8_t slot_id, uint8_t endpoint_id,
+    uint64_t trb_address) {
+
+  if (trb_address == 0U)
+    return NULL;
+
+  // A completion must have exactly one owner.
+  for (unsigned int i = 0; i < XHCI_EVENT_WAITERS; i++) {
+    xhci_event_waiter_t *waiter = &event_waiters[i];
+    if (waiter->active &&
+        waiter->type == type &&
+        waiter->slot_id == slot_id &&
+        waiter->endpoint_id == endpoint_id &&
+        waiter->trb_address == trb_address)
+      return NULL;
+  }
+
+  for (unsigned int i = 0; i < XHCI_EVENT_WAITERS; i++) {
+    xhci_event_waiter_t *waiter = &event_waiters[i];
+    if (waiter->active)
+      continue;
+    *waiter = (xhci_event_waiter_t){
+      .active = true,
+      .type = type,
+      .slot_id = slot_id,
+      .endpoint_id = endpoint_id,
+      .trb_address = trb_address
+    };
+    return waiter;
+  }
+
+  return NULL;
+}
+
+typedef enum {
+  XHCI_DISPATCH_NONE,
+  XHCI_DISPATCH_OK,
+  XHCI_DISPATCH_READ_ERROR,
+  XHCI_DISPATCH_UNHANDLED
+} xhci_dispatch_result_t;
+
+static xhci_dispatch_result_t xhci_dispatch_one(void) {
+  xhci_event_t event;
+  xhci_event_result_t status = xhci_event_poll(&event);
+
+  if (status == XHCI_EVENT_NONE)
+    return XHCI_DISPATCH_NONE;
+
+  if (status == XHCI_EVENT_ERROR)
+    return XHCI_DISPATCH_READ_ERROR;
+
+  // Port events are recorded independently of
+  // whichever transfer is currently waiting.
+  if (event.type == XHCI_TRB_PORT_STATUS_EVENT) {
+    return xhci_event_record(&event) ?
+        XHCI_DISPATCH_OK : XHCI_DISPATCH_UNHANDLED;
+  }
+
+  // Only registered command or transfer completions
+  // can currently be delivered to waiters.
+  if (event.type != XHCI_TRB_COMMAND_EVENT &&
+      event.type != XHCI_TRB_TRANSFER_EVENT)
+    return XHCI_DISPATCH_UNHANDLED;
+
+  uint8_t endpoint_id = 0U;
+
+  if (event.type == XHCI_TRB_TRANSFER_EVENT)
+    endpoint_id = (uint8_t)((event.control >> 16) & 0x1fU);
+
+  for (unsigned int i = 0; i < XHCI_EVENT_WAITERS; i++) {
+    xhci_event_waiter_t *waiter = &event_waiters[i];
+    if (!waiter->active || waiter->type != event.type ||
+        waiter->trb_address != event.parameter)
+      continue;
+
+    if (event.type == XHCI_TRB_TRANSFER_EVENT &&
+        (waiter->slot_id != event.slot_id ||
+         waiter->endpoint_id != endpoint_id))
+      continue;
+
+    // A duplicate completion is a protocol error.
+    if (waiter->completed)
+      return XHCI_DISPATCH_UNHANDLED;
+    waiter->event = event;
+    waiter->completed = true;
+    return XHCI_DISPATCH_OK;
+  }
+
+  // Never silently discard a completion for which
+  // no registered owner exists.
+  return XHCI_DISPATCH_UNHANDLED;
+}
+
+static void xhci_waiter_release(xhci_event_waiter_t *waiter) {
+  if (waiter)
+    *waiter = (xhci_event_waiter_t){0};
+}
+
 xhci_command_result_t xhci_command_submit(const xhci_trb_t *command,
     xhci_command_completion_t *result) {
 
@@ -1277,6 +1389,13 @@ xhci_command_result_t xhci_command_submit(const xhci_trb_t *command,
   if (!cache_clean((const void *)command_line, line))
     return XHCI_COMMAND_CACHE_ERROR;
 
+  // Register before ringing the command doorbell.
+  xhci_event_waiter_t *waiter = xhci_waiter_register(
+      XHCI_TRB_COMMAND_EVENT, 0U, 0U, command_address);
+
+  if (!waiter)
+    return XHCI_COMMAND_BUSY;
+
   command_outstanding = true;
   uint64_t started = timer_now_us();
   // Doorbell 0 selects the host-controller command ring.
@@ -1284,23 +1403,24 @@ xhci_command_result_t xhci_command_submit(const xhci_trb_t *command,
 
   __asm__ volatile("dsb sy" ::: "memory");
 
-    while (timer_now_us() - started < XHCI_COMMAND_TIMEOUT_US) {
-    xhci_event_t event;
-    xhci_event_result_t status = xhci_event_poll(&event);
+  while (timer_now_us() - started < XHCI_COMMAND_TIMEOUT_US) {
+    xhci_dispatch_result_t status = xhci_dispatch_one();
 
-    if (status == XHCI_EVENT_ERROR) {
+    if (status == XHCI_DISPATCH_READ_ERROR) {
+      xhci_waiter_release(waiter);
       command_ring_failed = true;
       return XHCI_COMMAND_CACHE_ERROR;
     }
 
-    if (status == XHCI_EVENT_READY) {
-      if (event.type == XHCI_TRB_PORT_STATUS_EVENT) {
-        if (!xhci_event_record(&event)) {
-          command_ring_failed = true;
-          return XHCI_COMMAND_BAD_EVENT;
-        }
-        continue;
-      }
+    if (status == XHCI_DISPATCH_UNHANDLED) {
+      xhci_waiter_release(waiter);
+      command_ring_failed = true;
+      return XHCI_COMMAND_BAD_EVENT;
+    }
+
+    if (waiter->completed) {
+      xhci_event_t event = waiter->event;
+      xhci_waiter_release(waiter);
 
       result->event_parameter = event.parameter;
       result->event_status = event.status;
@@ -1310,12 +1430,6 @@ xhci_command_result_t xhci_command_submit(const xhci_trb_t *command,
       result->slot_id = event.slot_id;
       result->elapsed_us = timer_now_us() - started;
       result->controller_status = xhci_read(op + XHCI_USBSTS);
-
-      if (event.type != XHCI_TRB_COMMAND_EVENT ||
-          event.parameter != command_address) {
-        command_ring_failed = true;
-        return XHCI_COMMAND_BAD_EVENT;
-      }
 
       if (event.completion_code != XHCI_COMPLETION_SUCCESS) {
         command_ring_failed = true;
@@ -1336,7 +1450,6 @@ xhci_command_result_t xhci_command_submit(const xhci_trb_t *command,
         command_index = 0;
         command_cycle ^= 1U;
       }
-
       completed_commands++;
       result->command_number = completed_commands;
       return XHCI_COMMAND_OK;
@@ -1346,6 +1459,7 @@ xhci_command_result_t xhci_command_submit(const xhci_trb_t *command,
     if (current_status & (XHCI_STS_HALTED | XHCI_STS_HOST_ERROR)) {
       result->controller_status = current_status;
       result->elapsed_us = timer_now_us() - started;
+      xhci_waiter_release(waiter);
       command_ring_failed = true;
       return XHCI_COMMAND_FAILED;
     }
@@ -1353,6 +1467,7 @@ xhci_command_result_t xhci_command_submit(const xhci_trb_t *command,
 
   result->elapsed_us = timer_now_us() - started;
   result->controller_status = xhci_read(op + XHCI_USBSTS);
+  xhci_waiter_release(waiter);
   command_ring_failed = true;
   return XHCI_COMMAND_TIMEOUT;
 }
