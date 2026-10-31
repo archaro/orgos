@@ -33,6 +33,7 @@
 #define USB_HUB_DEBOUNCE_TIMEOUT_US 2000000ULL
 
 #define USB_HUB_RESET_TIMEOUT_MS 500U
+#define USB_HUB_RESET_RECOVERY_MS 50U
 
 #define USB_HUB_PORT_POWER 8U
 #define USB_HUB_POWER_DELAY_MS 120U
@@ -345,6 +346,12 @@ usb_hub_result_t usb_hub_port_reset(
       return USB_HUB_RESET_FAILED;
     if (current.change & ((1U << 0) | (1U << 4)))
       return USB_HUB_RESET_FAILED;
+
+    // USB 2.0 reset recovery: allow at least 10 ms
+    // for the device to settle, plus a 40 ms margin.
+    // Match Linux's normal hub-port reset recovery.
+    timer_delay_ms(USB_HUB_RESET_RECOVERY_MS);
+
     return USB_HUB_OK;
   }
 
