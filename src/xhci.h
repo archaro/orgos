@@ -106,6 +106,16 @@ typedef struct {
   uint8_t last_port;
   uint32_t last_status;
   uint32_t last_control;
+  uint32_t command_events;
+  uint32_t transfer_events;
+  uint32_t read_errors;
+  uint32_t unhandled_events;
+  uint32_t unsupported_events;
+  uint32_t unmatched_events;
+  uint32_t duplicate_events;
+  uint64_t last_unhandled_parameter;
+  uint32_t last_unhandled_status;
+  uint32_t last_unhandled_control;
 } xhci_event_stats_t;
 
 bool xhci_event_get_stats(xhci_event_stats_t *stats);

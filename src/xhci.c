@@ -1287,9 +1287,30 @@ typedef enum {
   XHCI_DISPATCH_UNHANDLED
 } xhci_dispatch_result_t;
 
+// An event-stream fault cannot safely be recovered
+// without resetting and rebuilding controller state.
+static xhci_dispatch_result_t dispatch_fault = XHCI_DISPATCH_NONE;
+
+static xhci_dispatch_result_t xhci_dispatch_unhandled(
+    const xhci_event_t *event) {
+
+  event_stats.unhandled_events++;
+  event_stats.last_unhandled_parameter = event->parameter;
+  event_stats.last_unhandled_status = event->status;
+  event_stats.last_unhandled_control = event->control;
+
+  dispatch_fault = XHCI_DISPATCH_UNHANDLED;
+  return dispatch_fault;
+}
+
 static xhci_dispatch_result_t xhci_dispatch_one(xhci_event_t *port_event) {
   if (port_event)
     *port_event = (xhci_event_t){0};
+
+  // Never consume further events after a fatal
+  // dispatch error. Preserve the original fault.
+  if (dispatch_fault != XHCI_DISPATCH_NONE)
+    return dispatch_fault;
 
   xhci_event_t event;
   xhci_event_result_t status = xhci_event_poll(&event);
@@ -1297,14 +1318,19 @@ static xhci_dispatch_result_t xhci_dispatch_one(xhci_event_t *port_event) {
   if (status == XHCI_EVENT_NONE)
     return XHCI_DISPATCH_NONE;
 
-  if (status == XHCI_EVENT_ERROR)
-    return XHCI_DISPATCH_READ_ERROR;
+  if (status == XHCI_EVENT_ERROR) {
+    event_stats.read_errors++;
+    dispatch_fault = XHCI_DISPATCH_READ_ERROR;
+    return dispatch_fault;
+  }
 
   // Port events are recorded independently of
   // whichever transfer is currently waiting.
   if (event.type == XHCI_TRB_PORT_STATUS_EVENT) {
-    if (!xhci_event_record(&event))
-      return XHCI_DISPATCH_UNHANDLED;
+    if (!xhci_event_record(&event)) {
+      event_stats.unsupported_events++;
+      return xhci_dispatch_unhandled(&event);
+    }
 
     if (port_event)
       *port_event = event;
@@ -1315,8 +1341,10 @@ static xhci_dispatch_result_t xhci_dispatch_one(xhci_event_t *port_event) {
   // Only registered command or transfer completions
   // can currently be delivered to waiters.
   if (event.type != XHCI_TRB_COMMAND_EVENT &&
-      event.type != XHCI_TRB_TRANSFER_EVENT)
-    return XHCI_DISPATCH_UNHANDLED;
+      event.type != XHCI_TRB_TRANSFER_EVENT) {
+    event_stats.unsupported_events++;
+    return xhci_dispatch_unhandled(&event);
+  }
 
   uint8_t endpoint_id = 0U;
 
@@ -1335,16 +1363,24 @@ static xhci_dispatch_result_t xhci_dispatch_one(xhci_event_t *port_event) {
       continue;
 
     // A duplicate completion is a protocol error.
-    if (waiter->completed)
-      return XHCI_DISPATCH_UNHANDLED;
+    // A duplicate completion is a protocol error.
+    if (waiter->completed) {
+      event_stats.duplicate_events++;
+      return xhci_dispatch_unhandled(&event);
+    }
     waiter->event = event;
     waiter->completed = true;
+    if (event.type == XHCI_TRB_COMMAND_EVENT)
+      event_stats.command_events++;
+    else
+      event_stats.transfer_events++;
     return XHCI_DISPATCH_OK;
   }
 
-  // Never silently discard a completion for which
-  // no registered owner exists.
-  return XHCI_DISPATCH_UNHANDLED;
+  // The hardware event has no registered owner.
+  // Retain its contents and prevent further dispatch.
+  event_stats.unmatched_events++;
+  return xhci_dispatch_unhandled(&event);
 }
 
 xhci_port_event_result_t xhci_port_event_wait(

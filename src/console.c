@@ -1000,6 +1000,29 @@ static void cmd_usb_events(void) {
   console_puts("  Last event ctrl  : 0x");
   console_puthex(stats.last_control, 8);
   console_putc('\n');
+  console_printf("  Routed commands : %u\n",
+      (unsigned int)stats.command_events);
+  console_printf("  Routed transfers: %u\n",
+      (unsigned int)stats.transfer_events);
+  console_printf("  Event read errors: %u\n",
+      (unsigned int)stats.read_errors);
+  console_printf("  Unhandled events: %u\n",
+      (unsigned int)stats.unhandled_events);
+  console_printf("    Unsupported   : %u\n",
+      (unsigned int)stats.unsupported_events);
+  console_printf("    Unmatched     : %u\n",
+      (unsigned int)stats.unmatched_events);
+  console_printf("    Duplicate     : %u\n",
+      (unsigned int)stats.duplicate_events);
+  if (stats.unhandled_events != 0U) {
+    console_puts("  Last unhandled event:\n");
+    console_printf("    Parameter: %016llx\n",
+        (unsigned long long)stats.last_unhandled_parameter);
+    console_printf("    Status   : %08x\n",
+        (unsigned int)stats.last_unhandled_status);
+    console_printf("    Control  : %08x\n",
+        (unsigned int)stats.last_unhandled_control);
+  }
 }
 
 static void cmd_usb_descriptor(void) {
