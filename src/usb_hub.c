@@ -20,6 +20,7 @@
 
 #define USB_HUB_C_CONNECTION       (1U << 0)
 #define USB_HUB_C_ENABLE           (1U << 1)
+#define USB_HUB_C_OVERCURRENT      (1U << 3)
 #define USB_HUB_C_RESET            (1U << 4)
 
 #define USB_HUB_FEATURE_RESET       4U
@@ -29,6 +30,7 @@
 
 #define USB_HUB_STATUS_CONNECTION (1U << 0)
 #define USB_HUB_STATUS_ENABLE     (1U << 1)
+#define USB_HUB_STATUS_OVERCURRENT (1U << 3)
 #define USB_HUB_STATUS_RESET      (1U << 4)
 #define USB_HUB_STATUS_POWER      (1U << 8)
 
@@ -88,6 +90,10 @@ usb_hub_result_t usb_hub_port_status(uint8_t port, usb_hub_port_t *result) {
   return USB_HUB_OK;
 }
 
+static bool usb_hub_overcurrent(const usb_hub_port_t *port) {
+  return (port->status & USB_HUB_STATUS_OVERCURRENT) != 0U ||
+      (port->change & USB_HUB_C_OVERCURRENT) != 0U;
+}
 
 usb_hub_result_t usb_hub_power_on(
     uint32_t power_good_ms, usb_hub_port_t *result) {
@@ -132,6 +138,11 @@ usb_hub_result_t usb_hub_power_on(
       return port_result;
     }
 
+    if (usb_hub_overcurrent(&current)) {
+      *result = current;
+      return USB_HUB_OVERCURRENT;
+    }
+
     setup.request_type = USB_RT_HUB_PORT_OUT;
     setup.request = USB_REQ_SET_FEATURE;
     setup.value = USB_HUB_PORT_POWER;
@@ -163,7 +174,11 @@ usb_hub_result_t usb_hub_power_on(
     }
 
     *result = current;
-    if (!(current.status & (1U << 8)))
+
+    if (usb_hub_overcurrent(&current))
+      return USB_HUB_OVERCURRENT;
+
+    if (!(current.status & USB_HUB_STATUS_POWER))
       return USB_HUB_INVALID_RESPONSE;
   }
 
@@ -209,6 +224,9 @@ usb_hub_result_t usb_hub_port_debounce(uint8_t port, usb_hub_port_t *result) {
     if (status != USB_HUB_OK)
       return status;
 
+    if (usb_hub_overcurrent(&current))
+      return USB_HUB_OVERCURRENT;
+    
     if (!(current.status & USB_HUB_STATUS_POWER))
       return USB_HUB_NOT_POWERED;
 
@@ -270,6 +288,9 @@ usb_hub_result_t usb_hub_port_reset(
   result->before_status = before.status;
   result->before_change = before.change;
 
+  if (usb_hub_overcurrent(&before))
+    return USB_HUB_OVERCURRENT;
+
   if (!(before.status & USB_HUB_STATUS_POWER))
     return USB_HUB_NOT_POWERED;
 
@@ -306,6 +327,9 @@ usb_hub_result_t usb_hub_port_reset(
     result->after_status = current.status;
     result->after_change = current.change;
     result->elapsed_ms = (uint32_t)((timer_now_us() - started) / 1000ULL);
+
+    if (usb_hub_overcurrent(&current))
+      return USB_HUB_OVERCURRENT;
 
     if (!(current.status & USB_HUB_STATUS_CONNECTION))
       return USB_HUB_DISCONNECTED;
@@ -381,6 +405,10 @@ usb_hub_result_t usb_hub_port_reset(
     }
 
     result->final_change = current.change;
+
+    if (usb_hub_overcurrent(&current))
+      return USB_HUB_OVERCURRENT;
+
     if (!(current.status & USB_HUB_STATUS_ENABLE) ||
         !(current.status & USB_HUB_STATUS_CONNECTION) ||
         (current.status & USB_HUB_STATUS_RESET) ||
