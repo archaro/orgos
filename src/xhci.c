@@ -115,6 +115,22 @@ typedef struct {
   bool bulk_out_wrap_pending;
 } xhci_device_t;
 
+typedef enum {
+  XHCI_EVENT_NONE,
+  XHCI_EVENT_READY,
+  XHCI_EVENT_ERROR
+} xhci_event_result_t;
+
+typedef struct {
+  uint64_t parameter;
+  uint32_t status;
+  uint32_t control;
+  uint8_t type;
+  uint8_t completion_code;
+  uint8_t slot_id;
+  uint8_t port_id;
+} xhci_event_t;
+
 static bool hub_configuration_attempted;
 static bool hub_configured;
 #define XHCI_MAX_DEVICES 2U
@@ -1148,7 +1164,7 @@ xhci_start_result_t xhci_start(xhci_start_info_t *result) {
   return XHCI_START_OK;
 }
 
-xhci_event_result_t xhci_event_poll(xhci_event_t *result) {
+static xhci_event_result_t xhci_event_poll(xhci_event_t *result) {
   if (!result || !controller_running || !controller_verified)
     return XHCI_EVENT_ERROR;
 
@@ -1209,7 +1225,7 @@ xhci_event_result_t xhci_event_poll(xhci_event_t *result) {
   return XHCI_EVENT_READY;
 }
 
-bool xhci_event_record(const xhci_event_t *event) {
+static bool xhci_event_record(const xhci_event_t *event) {
   if (!event || event->type != XHCI_TRB_PORT_STATUS_EVENT)
     return false;
 
@@ -1271,7 +1287,10 @@ typedef enum {
   XHCI_DISPATCH_UNHANDLED
 } xhci_dispatch_result_t;
 
-static xhci_dispatch_result_t xhci_dispatch_one(void) {
+static xhci_dispatch_result_t xhci_dispatch_one(xhci_event_t *port_event) {
+  if (port_event)
+    *port_event = (xhci_event_t){0};
+
   xhci_event_t event;
   xhci_event_result_t status = xhci_event_poll(&event);
 
@@ -1284,8 +1303,13 @@ static xhci_dispatch_result_t xhci_dispatch_one(void) {
   // Port events are recorded independently of
   // whichever transfer is currently waiting.
   if (event.type == XHCI_TRB_PORT_STATUS_EVENT) {
-    return xhci_event_record(&event) ?
-        XHCI_DISPATCH_OK : XHCI_DISPATCH_UNHANDLED;
+    if (!xhci_event_record(&event))
+      return XHCI_DISPATCH_UNHANDLED;
+
+    if (port_event)
+      *port_event = event;
+
+    return XHCI_DISPATCH_OK;
   }
 
   // Only registered command or transfer completions
@@ -1321,6 +1345,41 @@ static xhci_dispatch_result_t xhci_dispatch_one(void) {
   // Never silently discard a completion for which
   // no registered owner exists.
   return XHCI_DISPATCH_UNHANDLED;
+}
+
+xhci_port_event_result_t xhci_port_event_wait(
+    uint8_t port, uint32_t timeout_ms) {
+
+  if (!controller_running || !controller_verified || port == 0U)
+    return XHCI_PORT_EVENT_UNAVAILABLE;
+
+  xhci_info_t info;
+  if (!xhci_probe(&info) || port > info.max_ports)
+    return XHCI_PORT_EVENT_UNAVAILABLE;
+
+  uint64_t started = timer_now_us();
+  uint64_t timeout_us = (uint64_t)timeout_ms * 1000ULL;
+  while (timer_now_us() - started < timeout_us) {
+    xhci_event_t port_event;
+    xhci_dispatch_result_t status = xhci_dispatch_one(&port_event);
+
+    if (status == XHCI_DISPATCH_READ_ERROR ||
+        status == XHCI_DISPATCH_UNHANDLED)
+      return XHCI_PORT_EVENT_FAILED;
+
+    if (port_event.type == XHCI_TRB_PORT_STATUS_EVENT &&
+        port_event.port_id == port) {
+      if (port_event.completion_code != XHCI_COMPLETION_SUCCESS)
+        return XHCI_PORT_EVENT_FAILED;
+      return XHCI_PORT_EVENT_OK;
+    }
+    // Preserve the original one-millisecond
+    // polling interval when no event is pending.
+    if (status == XHCI_DISPATCH_NONE)
+      timer_delay_ms(1U);
+  }
+
+  return XHCI_PORT_EVENT_TIMEOUT;
 }
 
 static void xhci_waiter_release(xhci_event_waiter_t *waiter) {
@@ -1404,7 +1463,7 @@ xhci_command_result_t xhci_command_submit(const xhci_trb_t *command,
   __asm__ volatile("dsb sy" ::: "memory");
 
   while (timer_now_us() - started < XHCI_COMMAND_TIMEOUT_US) {
-    xhci_dispatch_result_t status = xhci_dispatch_one();
+    xhci_dispatch_result_t status = xhci_dispatch_one(NULL);
 
     if (status == XHCI_DISPATCH_READ_ERROR) {
       xhci_waiter_release(waiter);
@@ -2154,7 +2213,7 @@ xhci_bulk_out_result_t xhci_downstream_bulk_out(
 
   uint64_t started = timer_now_us();
   while (timer_now_us() - started < XHCI_TRANSFER_TIMEOUT_US) {
-    xhci_dispatch_result_t status = xhci_dispatch_one();
+    xhci_dispatch_result_t status = xhci_dispatch_one(NULL);
 
     if (status == XHCI_DISPATCH_READ_ERROR ||
         status == XHCI_DISPATCH_UNHANDLED)
@@ -2865,7 +2924,7 @@ static xhci_control_result_t xhci_control_transfer(
 
   uint64_t started = timer_now_us();
   while (timer_now_us() - started < XHCI_TRANSFER_TIMEOUT_US) {
-    xhci_dispatch_result_t status = xhci_dispatch_one();
+    xhci_dispatch_result_t status = xhci_dispatch_one(NULL);
     if (status == XHCI_DISPATCH_READ_ERROR ||
         status == XHCI_DISPATCH_UNHANDLED)
       goto event_failed;

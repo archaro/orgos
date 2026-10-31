@@ -101,22 +101,6 @@ typedef struct {
   uint32_t reserved;
 } xhci_erst_entry_t;
 
-typedef enum {
-  XHCI_EVENT_NONE,
-  XHCI_EVENT_READY,
-  XHCI_EVENT_ERROR
-} xhci_event_result_t;
-
-typedef struct {
-  uint64_t parameter;
-  uint32_t status;
-  uint32_t control;
-  uint8_t type;
-  uint8_t completion_code;
-  uint8_t slot_id;
-  uint8_t port_id;
-} xhci_event_t;
-
 typedef struct {
   uint32_t port_changes;
   uint8_t last_port;
@@ -124,9 +108,17 @@ typedef struct {
   uint32_t last_control;
 } xhci_event_stats_t;
 
-xhci_event_result_t xhci_event_poll(xhci_event_t *event);
-bool xhci_event_record(const xhci_event_t *event);
 bool xhci_event_get_stats(xhci_event_stats_t *stats);
+
+typedef enum {
+  XHCI_PORT_EVENT_OK,
+  XHCI_PORT_EVENT_UNAVAILABLE,
+  XHCI_PORT_EVENT_FAILED,
+  XHCI_PORT_EVENT_TIMEOUT
+} xhci_port_event_result_t;
+
+xhci_port_event_result_t xhci_port_event_wait(
+    uint8_t port, uint32_t timeout_ms);
 
 // Current implementation supports the 31 scratchpad
 // buffers reported by the Raspberry Pi 4B's VL805.

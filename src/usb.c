@@ -1,14 +1,12 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "timer.h"
 #include "xhci.h"
 #include "usb.h"
 
 #define USB_ROOT_PORT 1U
 #define USB_HIGH_SPEED 3U
 #define USB_LINK_U0 0U
-#define USB_PORT_STATUS_EVENT 34U
 #define USB_ROOT_EVENT_WAIT_MS 100U
 
 static bool usb_initialised;
@@ -60,31 +58,19 @@ static usb_init_result_t usb_root_port_prepare(usb_init_info_t *info) {
     return USB_INIT_PORT_STATE_FAILED;
   }
 
-  // Consume the reset's Port Status Change Event.
-  // The event ring currently uses synchronous polling.
-  bool change_seen = false;
-  for (unsigned int ms = 0; ms < USB_ROOT_EVENT_WAIT_MS; ms++) {
-    xhci_event_t event;
-    xhci_event_result_t status = xhci_event_poll(&event);
-    if (status == XHCI_EVENT_ERROR)
-      return USB_INIT_EVENT_FAILED;
-    if (status == XHCI_EVENT_READY) {
-      if (!xhci_event_record(&event)) {
-        info->detail = event.type;
-        return USB_INIT_EVENT_FAILED;
-      }
-      if (event.type == USB_PORT_STATUS_EVENT &&
-          event.port_id == USB_ROOT_PORT) {
-        change_seen = true;
-        break;
-      }
-      continue;
-    }
-    timer_delay_ms(1);
-  }
+  // Wait for the root port's change notification.
+  // The xHCI dispatcher owns the hardware event ring.
+  xhci_port_event_result_t event_result =
+      xhci_port_event_wait(USB_ROOT_PORT, USB_ROOT_EVENT_WAIT_MS);
 
-  if (!change_seen)
-    return USB_INIT_EVENT_TIMEOUT;
+  if (event_result != XHCI_PORT_EVENT_OK) {
+    info->detail = (uint32_t)event_result;
+
+    if (event_result == XHCI_PORT_EVENT_TIMEOUT)
+      return USB_INIT_EVENT_TIMEOUT;
+
+    return USB_INIT_EVENT_FAILED;
+  }
 
   info->speed = port.speed;
   return USB_INIT_OK;
