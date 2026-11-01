@@ -21,6 +21,7 @@
 #include "usb_hub.h"
 #include "usb_midi.h"
 #include "usb_enumerate.h"
+#include "usb_midi_test.h"
 #include "midi.h"
 
 #define CONSOLE_LINE_SIZE 256
