@@ -34,6 +34,7 @@ typedef struct {
   uint64_t expected_trb;
   uint64_t actual_trb;
   uint64_t elapsed_us;
+  uint64_t discarded_transfers;
 } usb_midi_in_stress_info_t;
 
 bool usb_midi_in_stress_start(void);

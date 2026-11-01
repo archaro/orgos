@@ -1250,6 +1250,8 @@ static void cmd_usb_test_midiin_stress(const char *args) {
         (unsigned int)info.wraps);
     console_printf("  Elapsed   : %llu ms\n",
         (unsigned long long)(info.elapsed_us / 1000ULL));
+    console_printf("  Discarded : %llu transfers\n",
+        (unsigned long long)info.discarded_transfers);
     if (info.state == USB_MIDI_IN_STRESS_FAILED) {
       console_printf("  Error     : %u\n",
           (unsigned int)info.error);
@@ -1288,6 +1290,12 @@ static void cmd_usb_test_midiin(const char *args) {
     return;
   }
   if (next_word_is(&args, "read") && end_of_args(args)) {
+    usb_midi_in_stress_info_t stress = {0};
+    if (usb_midi_in_stress_get_info(&stress) &&
+        stress.state != USB_MIDI_IN_STRESS_IDLE) {
+      console_puts("USB-MIDI IN stream owned by stress test.\n");
+      return;
+    }
     xhci_bulk_in_info_t info = {0};
     if (!xhci_bulk_in_stream_read(&info)) {
       console_puts("USB-MIDI IN queue empty.\n");

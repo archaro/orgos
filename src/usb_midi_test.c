@@ -47,8 +47,18 @@ bool usb_midi_in_stress_start(void) {
 }
 
 void usb_midi_in_stress_service(void) {
-  if (in_stress.state != USB_MIDI_IN_STRESS_RUNNING)
+  if (in_stress.state == USB_MIDI_IN_STRESS_IDLE)
     return;
+
+  // Once the diagnostic has finished, retain its
+  // result but continue consuming queued transfers.
+  // The Bulk IN endpoint remains active.
+  if (in_stress.state != USB_MIDI_IN_STRESS_RUNNING) {
+    xhci_bulk_in_info_t discarded;
+    while (xhci_bulk_in_stream_read(&discarded))
+      in_stress.discarded_transfers++;
+    return;
+  }
 
   xhci_bulk_in_stream_stats_t stream = {0};
   if (!xhci_bulk_in_stream_get_stats(&stream) || stream.failed) {
