@@ -179,11 +179,16 @@ typedef struct {
 } xhci_event_waiter_t;
 static xhci_event_waiter_t event_waiters[XHCI_EVENT_WAITERS];
 
-// One-shot Bulk IN diagnostic state.
-// Generalise to multiple pending TDs later.
 static xhci_bulk_in_state_t bulk_in_state;
 static xhci_bulk_in_info_t bulk_in_info;
 static xhci_event_waiter_t *bulk_in_waiter;
+static xhci_bulk_in_info_t bulk_in_queue[XHCI_BULK_IN_QUEUE_CAPACITY];
+static unsigned int bulk_in_queue_head;
+static unsigned int bulk_in_queue_count;
+static bool bulk_in_stream_started;
+static bool bulk_in_stream_failed;
+static bool bulk_in_stream_queued;
+static xhci_bulk_in_stream_stats_t bulk_in_stream_stats;
 
 static bool slot_requested;
 static bool downstream_slot_requested;
@@ -2453,7 +2458,7 @@ static bool xhci_bulk_in_advance(xhci_device_t *device, size_t line) {
   return true;
 }
 
-xhci_bulk_in_arm_result_t xhci_downstream_bulk_in_arm(void) {
+static xhci_bulk_in_arm_result_t xhci_bulk_in_arm_one(void) {
   if (bulk_in_state != XHCI_BULK_IN_IDLE &&
       bulk_in_state != XHCI_BULK_IN_COMPLETE)
     return XHCI_BULK_IN_ARM_ALREADY_STARTED;
@@ -2531,6 +2536,12 @@ xhci_bulk_in_arm_result_t xhci_downstream_bulk_in_arm(void) {
   return XHCI_BULK_IN_ARM_OK;
 }
 
+xhci_bulk_in_arm_result_t xhci_downstream_bulk_in_arm(void) {
+  if (bulk_in_stream_started)
+    return XHCI_BULK_IN_ARM_ALREADY_STARTED;
+
+  return xhci_bulk_in_arm_one();
+}
 xhci_bulk_in_state_t xhci_downstream_bulk_in_status(
     xhci_bulk_in_info_t *result) {
 
@@ -2589,6 +2600,112 @@ xhci_bulk_in_state_t xhci_downstream_bulk_in_status(
 
   *result = bulk_in_info;
   return bulk_in_state;
+}
+
+xhci_bulk_in_arm_result_t xhci_bulk_in_stream_start(void) {
+  if (bulk_in_stream_started)
+    return XHCI_BULK_IN_ARM_ALREADY_STARTED;
+
+  xhci_bulk_in_arm_result_t result = xhci_bulk_in_arm_one();
+  bulk_in_stream_stats.last_arm_result = result;
+  if (result != XHCI_BULK_IN_ARM_OK)
+    return result;
+
+  bulk_in_stream_started = true;
+  bulk_in_stream_queued = false;
+
+  return XHCI_BULK_IN_ARM_OK;
+}
+
+void xhci_bulk_in_stream_service(void) {
+  if (!bulk_in_stream_started || bulk_in_stream_failed)
+    return;
+
+  xhci_bulk_in_info_t info;
+  xhci_bulk_in_state_t state = xhci_downstream_bulk_in_status(&info);
+  if (state == XHCI_BULK_IN_FAILED) {
+    bulk_in_stream_failed = true;
+    return;
+  }
+
+  // Nothing has completed yet.
+  if (state == XHCI_BULK_IN_PENDING)
+    return;
+
+  if (state != XHCI_BULK_IN_COMPLETE) {
+    bulk_in_stream_failed = true;
+    return;
+  }
+
+  if (!bulk_in_stream_queued) {
+    // With one outstanding TD and arming disabled
+    // at capacity, this must never be reached.
+    if (bulk_in_queue_count == XHCI_BULK_IN_QUEUE_CAPACITY) {
+      bulk_in_stream_failed = true;
+      return;
+    }
+
+    unsigned int tail = (bulk_in_queue_head +
+        bulk_in_queue_count) % XHCI_BULK_IN_QUEUE_CAPACITY;
+    bulk_in_queue[tail] = info;
+    bulk_in_queue_count++;
+    bulk_in_stream_queued = true;
+    bulk_in_stream_stats.transfers++;
+    bulk_in_stream_stats.bytes += info.received;
+    bulk_in_stream_stats.last_completion_code = info.completion_code;
+
+    if (bulk_in_queue_count > bulk_in_stream_stats.queue_peak)
+      bulk_in_stream_stats.queue_peak = bulk_in_queue_count;
+
+    // Count transitions past the final data TRB.
+    uint64_t last_trb = devices[1].bulk_in_ring.bus +
+        (uint64_t)(XHCI_RING_TRBS - 2U) * sizeof(xhci_trb_t);
+    if (info.transfer_trb == last_trb)
+      bulk_in_stream_stats.ring_wraps++;
+    if (bulk_in_queue_count == XHCI_BULK_IN_QUEUE_CAPACITY)
+      bulk_in_stream_stats.pauses++;
+  }
+
+  // Do not submit another transfer until there is
+  // space to retain its eventual completion.
+  if (bulk_in_queue_count == XHCI_BULK_IN_QUEUE_CAPACITY)
+    return;
+
+  xhci_bulk_in_arm_result_t result = xhci_bulk_in_arm_one();
+  bulk_in_stream_stats.last_arm_result = result;
+  if (result != XHCI_BULK_IN_ARM_OK) {
+    bulk_in_stream_failed = true;
+    return;
+  }
+
+  bulk_in_stream_queued = false;
+}
+
+bool xhci_bulk_in_stream_get_stats(xhci_bulk_in_stream_stats_t *result) {
+  if (!result)
+    return false;
+
+  *result = bulk_in_stream_stats;
+  result->started = bulk_in_stream_started;
+  result->failed = bulk_in_stream_failed;
+  result->queue_depth = bulk_in_queue_count;
+  result->paused = bulk_in_stream_started && !bulk_in_stream_failed &&
+      bulk_in_stream_queued &&
+      bulk_in_queue_count == XHCI_BULK_IN_QUEUE_CAPACITY;
+
+  return true;
+}
+
+bool xhci_bulk_in_stream_read(xhci_bulk_in_info_t *result) {
+  if (!result || bulk_in_queue_count == 0U)
+    return false;
+
+  *result = bulk_in_queue[bulk_in_queue_head];
+  bulk_in_queue_head = (bulk_in_queue_head + 1U) %
+      XHCI_BULK_IN_QUEUE_CAPACITY;
+
+  bulk_in_queue_count--;
+  return true;
 }
 
 xhci_hub_result_t xhci_hub_configure(

@@ -143,13 +143,16 @@ complete:
 }
 
 void usb_service(void) {
-  // An unsuccessful USB initialisation must not
-  // interfere with the diagnostic console.
   if (!usb_initialised || usb_service_failed)
     return;
 
+  // Deliver hardware events to registered waiters.
   xhci_service_result_t result = xhci_service(8U);
+
+  // Finalise completed Bulk IN transfers and rearm.
+  // This also observes a latched dispatcher failure.
+  xhci_bulk_in_stream_service();
+
   if (result == XHCI_SERVICE_FAILED || result == XHCI_SERVICE_NOT_READY)
     usb_service_failed = true;
 }
-

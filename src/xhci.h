@@ -5,6 +5,16 @@
 
 #include "dma.h"
 
+// Current implementation supports the 31 scratchpad
+// buffers reported by the Raspberry Pi 4B's VL805.
+// Larger requirements are rejected rather than
+// silently truncated.
+#define XHCI_MAX_SCRATCHPADS 31U
+
+#define XHCI_CONTROL_MAX_DATA 256U
+#define XHCI_BULK_IN_MAX_DATA 64U
+#define XHCI_BULK_IN_QUEUE_CAPACITY 16U
+
 typedef struct {
   uint8_t capability_length;
   uint16_t version;
@@ -143,12 +153,6 @@ typedef enum {
 
 xhci_port_event_result_t xhci_port_event_wait(
     uint8_t port, uint32_t timeout_ms);
-
-// Current implementation supports the 31 scratchpad
-// buffers reported by the Raspberry Pi 4B's VL805.
-// Larger requirements are rejected rather than
-// silently truncated.
-#define XHCI_MAX_SCRATCHPADS 31U
 
 typedef struct {
   dma_buffer_t command_ring;
@@ -379,8 +383,6 @@ typedef struct {
 xhci_hub_result_t xhci_hub_configure( uint8_t ports, uint8_t tt_think_time,
     xhci_hub_info_t *result);
 
-#define XHCI_CONTROL_MAX_DATA 256U
-
 typedef enum {
   XHCI_BULK_CONFIG_OK,
   XHCI_BULK_CONFIG_NOT_READY,
@@ -436,8 +438,6 @@ typedef struct {
 xhci_bulk_out_result_t xhci_downstream_bulk_out(
     const uint8_t *data, uint32_t length, xhci_bulk_out_info_t *result);
 
-#define XHCI_BULK_IN_MAX_DATA 64U
-
 typedef enum {
   XHCI_BULK_IN_IDLE,
   XHCI_BULK_IN_PENDING,
@@ -472,6 +472,25 @@ xhci_bulk_in_arm_result_t xhci_downstream_bulk_in_arm(void);
 
 xhci_bulk_in_state_t xhci_downstream_bulk_in_status(
     xhci_bulk_in_info_t *result);
+
+typedef struct {
+  bool started;
+  bool failed;
+  bool paused;
+  uint32_t queue_depth;
+  uint32_t queue_peak;
+  uint32_t pauses;
+  uint32_t ring_wraps;
+  uint64_t transfers;
+  uint64_t bytes;
+  uint8_t last_completion_code;
+  xhci_bulk_in_arm_result_t last_arm_result;
+} xhci_bulk_in_stream_stats_t;
+
+xhci_bulk_in_arm_result_t xhci_bulk_in_stream_start(void);
+void xhci_bulk_in_stream_service(void);
+bool xhci_bulk_in_stream_get_stats(xhci_bulk_in_stream_stats_t *result);
+bool xhci_bulk_in_stream_read(xhci_bulk_in_info_t *result);
 
 typedef enum {
   XHCI_CONTROL_OK,
