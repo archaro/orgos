@@ -29,3 +29,4 @@ typedef struct {
 
 usb_init_result_t usb_init(usb_init_info_t *info);
 bool usb_get_init_info(usb_init_info_t *info);
+void usb_service(void);

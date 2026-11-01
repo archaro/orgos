@@ -1,6 +1,5 @@
 
 #include <stddef.h>
-#include <stdbool.h>
 #include <stdarg.h>
 
 #include "format.h"
@@ -1029,6 +1028,12 @@ static void cmd_usb_events(void) {
       (unsigned int)stats.port_queue_peak);
   console_printf("  Port queue overflows: %u\n",
       (unsigned int)stats.port_queue_overflows);
+  console_printf("  Service calls   : %llu\n",
+      (unsigned long long)stats.service_calls);
+  console_printf("  Service events  : %llu\n",
+      (unsigned long long)stats.service_events);
+  console_printf("  Service failures: %u\n",
+      (unsigned int)stats.service_failures);
 }
 
 static void cmd_usb_descriptor(void) {
@@ -2865,72 +2870,60 @@ static void console_dispatch(char *line) {
   console_puts("No such command.\n");
 }
 
-void console_run(void) {
-  char line[CONSOLE_LINE_SIZE];
-  size_t length = 0;
-  bool last_was_cr = false;
+static char console_line[CONSOLE_LINE_SIZE];
+static size_t console_length;
+static bool console_last_was_cr;
 
+void console_start(void) {
   console_puts("Console ready.\n");
   console_prompt();
+}
 
-  for (;;) {
-    unsigned char c = (unsigned char)uart_getc();
+bool console_poll(void) {
+  // Do not wait for input.
+  if (!uart_has_data())
+    return false;
 
-    // Treat CRLF as one newline.
-    if (c == '\n' && last_was_cr) {
-      last_was_cr = false;
-      continue;
-    }
-
-    last_was_cr = (c == '\r');
-
-    // A completed input line.
-    if (c == '\r' || c == '\n') {
-      console_puts("\n");
-
-      line[length] = '\0';
-      console_dispatch(line);
-
-      length = 0;
-      console_prompt();
-      continue;
-    }
-
-    // Backspace (0x08) or DEL (0x7f).
-    // Remove one character from the buffer
-    // and erase it from the terminal.
-    if (c == '\b' || c == 0x7f) {
-      if (length > 0) {
-        length--;
-        console_puts("\b \b");
-      }
-
-      continue;
-    }
-
-    // Convert TAB to one ordinary space.
-    // The display and buffer must agree.
-    if (c == '\t')
-      c = ' ';
-
-    // Ignore unsupported control characters
-    // and non-ASCII input.
-    if (c < 0x20 || c > 0x7e)
-      continue;
-
-    // Reserve the final byte for '\0'.
-    // If the line is full, ring the terminal
-    // bell and refuse the additional character.
-    // The user can still use backspace.
-    if (length >= sizeof(line) - 1) {
-      console_putc('\a');
-      continue;
-    }
-
-    // Append and echo the character.
-    line[length++] = (char)c;
-    console_putc((char)c);
+  unsigned char c = (unsigned char)uart_getc();
+  // Treat CRLF as one newline.
+  if (c == '\n' && console_last_was_cr) {
+    console_last_was_cr = false;
+    return true;
   }
+
+  console_last_was_cr = (c == '\r');
+  if (c == '\r' || c == '\n') {
+    console_puts("\n");
+    console_line[console_length] = '\0';
+    console_dispatch(console_line);
+    console_length = 0U;
+    console_prompt();
+    return true;
+  }
+
+  if (c == '\b' || c == 0x7f) {
+    if (console_length > 0U) {
+      console_length--;
+      console_puts("\b \b");
+    }
+    return true;
+  }
+
+  if (c == '\t')
+    c = ' ';
+
+  if (c < 0x20 || c > 0x7e)
+    return true;
+
+  if (console_length >= sizeof(console_line) - 1U) {
+    console_putc('\a');
+    return true;
+  }
+
+  console_line[console_length++] = (char)c;
+  console_putc((char)c);
+
+  return true;
 }
 
 void console_putc(char c) {

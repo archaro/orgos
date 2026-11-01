@@ -12,6 +12,7 @@
 static bool usb_initialised;
 static usb_init_info_t usb_state;
 static bool usb_attempted;
+static bool usb_service_failed;
 
 static bool usb_port_valid(const xhci_port_t *port) {
   return port->connected && port->enabled && port->powered &&
@@ -140,3 +141,15 @@ complete:
   *info = state;
   return result;
 }
+
+void usb_service(void) {
+  // An unsuccessful USB initialisation must not
+  // interfere with the diagnostic console.
+  if (!usb_initialised || usb_service_failed)
+    return;
+
+  xhci_service_result_t result = xhci_service(8U);
+  if (result == XHCI_SERVICE_FAILED || result == XHCI_SERVICE_NOT_READY)
+    usb_service_failed = true;
+}
+

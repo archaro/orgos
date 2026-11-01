@@ -119,9 +119,20 @@ typedef struct {
   uint32_t port_queue_depth;
   uint32_t port_queue_peak;
   uint32_t port_queue_overflows;
+  uint64_t service_calls;
+  uint64_t service_events;
+  uint32_t service_failures;
 } xhci_event_stats_t;
 
 bool xhci_event_get_stats(xhci_event_stats_t *stats);
+
+typedef enum {
+  XHCI_SERVICE_IDLE,
+  XHCI_SERVICE_PROGRESS,
+  XHCI_SERVICE_NOT_READY,
+  XHCI_SERVICE_FAILED
+} xhci_service_result_t;
+xhci_service_result_t xhci_service(unsigned int budget);
 
 typedef enum {
   XHCI_PORT_EVENT_OK,

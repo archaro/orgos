@@ -405,8 +405,18 @@ void main(void) {
     }
   }
 
-  // USB failure is non-fatal. Retain the diagnostic
-  // console even if the controller cannot start.
-  console_run();
+  // USB failure is non-fatal. The diagnostic console
+  // remains available even if xHCI cannot start.
+  console_start();
+  for (;;) {
+    // Service pending USB events without blocking.
+    usb_service();
+    // Process at most one available console character.
+    bool console_work = console_poll();
+    // Avoid an unnecessarily tight busy loop when
+    // the console has no pending input.
+    if (!console_work)
+      timer_delay_ms(1U);
+  }
 }
 

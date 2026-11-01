@@ -1419,6 +1419,31 @@ static xhci_dispatch_result_t xhci_dispatch_one() {
   return xhci_dispatch_unhandled(&event);
 }
 
+xhci_service_result_t xhci_service(unsigned int budget) {
+  if (!controller_running || !controller_verified || budget == 0U)
+    return XHCI_SERVICE_NOT_READY;
+
+  event_stats.service_calls++;
+  bool progressed = false;
+  for (unsigned int i = 0U; i < budget; i++) {
+    xhci_dispatch_result_t status = xhci_dispatch_one();
+
+    if (status == XHCI_DISPATCH_READ_ERROR ||
+        status == XHCI_DISPATCH_UNHANDLED) {
+      event_stats.service_failures++;
+      return XHCI_SERVICE_FAILED;
+    }
+
+    if (status == XHCI_DISPATCH_NONE)
+      return progressed ?  XHCI_SERVICE_PROGRESS : XHCI_SERVICE_IDLE;
+
+    event_stats.service_events++;
+    progressed = true;
+  }
+
+  return XHCI_SERVICE_PROGRESS;
+}
+
 xhci_port_event_result_t xhci_port_event_wait(
     uint8_t port, uint32_t timeout_ms) {
 
