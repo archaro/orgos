@@ -1709,7 +1709,76 @@ static void cmd_usb_test_midiout(void) {
       info.completion_code == 1U ? "PASS" : "FAILED");
 }
 
+static void cmd_usb_test_midiin_stress(const char *args) {
+  if (next_word_is(&args, "start") && end_of_args(args)) {
+    bool started = usb_midi_in_stress_start();
+    console_printf("USB-MIDI IN stress: %s\n",
+        started ? "STARTED" : "NOT READY");
+    if (started)
+      console_puts("Send 600 test messages from Windows.\n");
+    return;
+  }
+  if (next_word_is(&args, "status") && end_of_args(args)) {
+    usb_midi_in_stress_info_t info = {0};
+    if (!usb_midi_in_stress_get_info(&info)) {
+      console_puts("USB-MIDI IN stress status unavailable.\n");
+      return;
+    }
+    const char *state = "IDLE";
+    switch (info.state) {
+      case USB_MIDI_IN_STRESS_RUNNING:
+        state = "RUNNING";
+        break;
+      case USB_MIDI_IN_STRESS_PASS:
+        state = "PASS";
+        break;
+      case USB_MIDI_IN_STRESS_INCONCLUSIVE:
+        state = "INCONCLUSIVE";
+        break;
+      case USB_MIDI_IN_STRESS_FAILED:
+        state = "FAILED";
+        break;
+      default:
+        break;
+    }
+    console_printf("USB-MIDI IN stress: %s\n", state);
+    console_printf("  Transfers : %u\n",
+        (unsigned int)info.transfers);
+    console_printf("  Packets   : %u / %u\n",
+        (unsigned int)info.packets,
+        USB_MIDI_IN_STRESS_PACKETS);
+    console_printf("  Bytes     : %u\n",
+        (unsigned int)info.bytes);
+    console_printf("  Wraps     : %u\n",
+        (unsigned int)info.wraps);
+    console_printf("  Elapsed   : %llu ms\n",
+        (unsigned long long)(info.elapsed_us / 1000ULL));
+    if (info.state == USB_MIDI_IN_STRESS_FAILED) {
+      console_printf("  Error     : %u\n",
+          (unsigned int)info.error);
+      console_printf("  Transfer  : %u\n",
+          (unsigned int)info.fault_transfer);
+      console_printf("  Packet    : %u\n",
+          (unsigned int)info.fault_packet);
+      console_printf("  Expected TRB: %016llx\n",
+          (unsigned long long)info.expected_trb);
+      console_printf("  Actual TRB  : %016llx\n",
+          (unsigned long long)info.actual_trb);
+    }
+    if (info.state == USB_MIDI_IN_STRESS_INCONCLUSIVE)
+      console_puts(
+          "Too few separate USB transfers; retry with slower MIDI.\n");
+    return;
+  }
+  console_puts("Usage: usb test midiin stress [start | status]\n");
+}
+
 static void cmd_usb_test_midiin(const char *args) {
+  const char *stress_args = args;
+  if (next_word_is(&stress_args, "stress")) {
+    cmd_usb_test_midiin_stress(stress_args);
+    return;
+  }
   if (next_word_is(&args, "stream") && end_of_args(args)) {
     usb_enum_info_t enumeration = {0};
     if (!usb_get_enumeration(&enumeration) ||
@@ -1810,7 +1879,7 @@ static void cmd_usb_test_midiin(const char *args) {
     }
     return;
   }
-  console_puts("Usage: usb test midiin [arm | status | stream | read]\n");
+  console_puts("Usage: usb test midiin [arm | status | stream | read | stress]\n");
 }
 
 static void cmd_usb_test_midiwrap(void) {
