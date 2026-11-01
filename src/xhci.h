@@ -116,6 +116,9 @@ typedef struct {
   uint64_t last_unhandled_parameter;
   uint32_t last_unhandled_status;
   uint32_t last_unhandled_control;
+  uint32_t port_queue_depth;
+  uint32_t port_queue_peak;
+  uint32_t port_queue_overflows;
 } xhci_event_stats_t;
 
 bool xhci_event_get_stats(xhci_event_stats_t *stats);

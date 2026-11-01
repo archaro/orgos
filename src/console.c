@@ -1023,6 +1023,12 @@ static void cmd_usb_events(void) {
     console_printf("    Control  : %08x\n",
         (unsigned int)stats.last_unhandled_control);
   }
+  console_printf("  Port queue depth: %u\n",
+      (unsigned int)stats.port_queue_depth);
+  console_printf("  Port queue peak : %u\n",
+      (unsigned int)stats.port_queue_peak);
+  console_printf("  Port queue overflows: %u\n",
+      (unsigned int)stats.port_queue_overflows);
 }
 
 static void cmd_usb_descriptor(void) {
