@@ -131,6 +131,7 @@ typedef struct {
   uint32_t port_queue_overflows;
   uint64_t service_calls;
   uint64_t service_events;
+  uint64_t sync_in_services;
   uint32_t service_failures;
 } xhci_event_stats_t;
 

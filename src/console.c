@@ -867,6 +867,15 @@ static void cmd_usb_state(void) {
   console_putc('\n');
 }
 
+static void usb_test_delay_ms(uint32_t milliseconds) {
+  uint64_t started = timer_now_us();
+  uint64_t duration = (uint64_t)milliseconds * 1000ULL;
+  while (timer_now_us() - started < duration) {
+    usb_service();
+    timer_delay_ms(1U);
+  }
+}
+
 static void cmd_usb_test_noops(void) {
   const unsigned int count = 600U;
   console_puts("Executing 600 sequential No Op commands...\n");
@@ -879,6 +888,7 @@ static void cmd_usb_test_noops(void) {
       console_puts(" (result ");
       console_putu32((uint32_t)status);
       console_puts(").\n");
+      usb_service();
       return;
     }
     if ((i + 1U) % 100U == 0) {
@@ -1033,6 +1043,8 @@ static void cmd_usb_events(void) {
       (unsigned long long)stats.service_calls);
   console_printf("  Service events  : %llu\n",
       (unsigned long long)stats.service_events);
+  console_printf("  Sync IN services: %llu\n",
+      (unsigned long long)stats.sync_in_services);
   console_printf("  Service failures: %u\n",
       (unsigned int)stats.service_failures);
   usb_port_monitor_info_t ports = {0};
@@ -1180,7 +1192,7 @@ static void cmd_usb_test_midiout(void) {
     console_puts("USB-MIDI Note On: FAILED\n");
     return;
   }
-  timer_delay_ms(250U);
+  usb_test_delay_ms(250U);
   console_puts("USB-MIDI Note Off...\n");
   info = (xhci_bulk_out_info_t){0};
   result = xhci_downstream_bulk_out( note_off, sizeof(note_off), &info);
@@ -1381,7 +1393,7 @@ static void cmd_usb_test_midiwrap(void) {
           (unsigned long long)info.transfer_trb);
     }
     // Allow the adapter's physical DIN output to keep up.
-    timer_delay_ms(4);
+    usb_test_delay_ms(4U);
   }
   uint64_t elapsed = timer_now_us() - started;
   console_printf("  Completed : %u / %u\n", completed, transfers);

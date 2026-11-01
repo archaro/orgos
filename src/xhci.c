@@ -1458,6 +1458,23 @@ static xhci_dispatch_result_t xhci_dispatch_one() {
   return xhci_dispatch_unhandled(&event);
 }
 
+static xhci_dispatch_result_t xhci_dispatch_wait_step(void) {
+  xhci_dispatch_result_t status = xhci_dispatch_one();
+
+  // A synchronous operation may dispatch a Bulk IN
+  // completion belonging to the continuous receiver.
+  // Finalise and rearm it without recursively
+  // entering the hardware event dispatcher.
+  if (status == XHCI_DISPATCH_OK &&
+      bulk_in_stream_started && !bulk_in_stream_failed &&
+      bulk_in_waiter && bulk_in_waiter->completed) {
+    xhci_bulk_in_stream_service();
+    event_stats.sync_in_services++;
+  }
+
+  return status;
+}
+
 xhci_service_result_t xhci_service(unsigned int budget) {
   if (!controller_running || !controller_verified || budget == 0U)
     return XHCI_SERVICE_NOT_READY;
@@ -1603,7 +1620,7 @@ xhci_command_result_t xhci_command_submit(const xhci_trb_t *command,
   __asm__ volatile("dsb sy" ::: "memory");
 
   while (timer_now_us() - started < XHCI_COMMAND_TIMEOUT_US) {
-    xhci_dispatch_result_t status = xhci_dispatch_one();
+    xhci_dispatch_result_t status = xhci_dispatch_wait_step();
 
     if (status == XHCI_DISPATCH_READ_ERROR) {
       xhci_waiter_release(waiter);
@@ -2358,7 +2375,7 @@ xhci_bulk_out_result_t xhci_downstream_bulk_out(
 
   uint64_t started = timer_now_us();
   while (timer_now_us() - started < XHCI_TRANSFER_TIMEOUT_US) {
-    xhci_dispatch_result_t status = xhci_dispatch_one();
+    xhci_dispatch_result_t status = xhci_dispatch_wait_step();
 
     if (status == XHCI_DISPATCH_READ_ERROR ||
         status == XHCI_DISPATCH_UNHANDLED)
@@ -3348,7 +3365,7 @@ static xhci_control_result_t xhci_control_transfer(
 
   uint64_t started = timer_now_us();
   while (timer_now_us() - started < XHCI_TRANSFER_TIMEOUT_US) {
-    xhci_dispatch_result_t status = xhci_dispatch_one();
+    xhci_dispatch_result_t status = xhci_dispatch_wait_step();
     if (status == XHCI_DISPATCH_READ_ERROR ||
         status == XHCI_DISPATCH_UNHANDLED)
       goto event_failed;
