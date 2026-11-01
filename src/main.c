@@ -137,12 +137,8 @@ bool pcie_subsystem_init(void) {
     return false;
   }
 
-  // Temporary diagnostic:
-  // Keep PCI bus mastering enabled while attempting
-  // HCRST, in case VL805 firmware requires DMA access.
-  //
-  // DO NOT proceed into normal USB configuration
-  // using this experimental arrangement.
+  // Allow the VL805 to settle following firmware
+  // initialisation before resetting the controller.
   timer_delay_ms(100);
 
   if (!pcie_xhci_enable_bus_master()) {
@@ -180,11 +176,9 @@ bool pcie_subsystem_init(void) {
     console_puts("VL805 firmware already initialised.\n");
   }
 
-  // Attempt a Host Controller Reset while PCI bus
-  // mastering remains enabled.
-  //
-  // The controller must be halted and must not
-  // have been configured with OrgOS DMA structures.
+  // Reset the halted xHCI controller with PCI bus
+  // mastering enabled, before installing OrgOS DMA
+  // structures.
   console_puts("Resetting xHCI controller... ");
   xhci_reset_info_t reset = {0};
   xhci_reset_result_t reset_result = xhci_reset(&reset);
@@ -197,9 +191,9 @@ bool pcie_subsystem_init(void) {
   }
   console_puts("OK.\n");
 
+  // Disable bus mastering before installing the
+  // persistent xHCI DMA structures.
   console_puts("Restoring PCI state: ");
-  // HCRST completed with bus mastering enabled.
-  // Disable it before installing OrgOS DMA structures.
   if (!pcie_xhci_disable_bus_master()) {
     console_puts("FAILED (bus mastering).\n");
     return false;
@@ -405,16 +399,16 @@ void main(void) {
     }
   }
 
-  // USB failure is non-fatal. The diagnostic console
-  // remains available even if xHCI cannot start.
+  // USB failure is non-fatal. The console remains
+  // available even if xHCI cannot start.
   console_start();
+  // Foreground event loop for USB and console input.
   for (;;) {
-    // Service pending USB events without blocking.
+    // Service USB events and active transfers.
     usb_service();
     // Process at most one available console character.
     bool console_work = console_poll();
-    // Avoid an unnecessarily tight busy loop when
-    // the console has no pending input.
+    // Limit idle polling when the console has no input.
     if (!console_work)
       timer_delay_ms(1U);
   }
