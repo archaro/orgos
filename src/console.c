@@ -1035,6 +1035,21 @@ static void cmd_usb_events(void) {
       (unsigned long long)stats.service_events);
   console_printf("  Service failures: %u\n",
       (unsigned int)stats.service_failures);
+  usb_port_monitor_info_t ports = {0};
+  if (usb_get_port_monitor_info(&ports)) {
+    console_printf("  Port events processed: %u\n",
+        (unsigned int)ports.processed);
+    console_printf("  Port service failures: %u\n",
+        (unsigned int)ports.failures);
+    console_printf("  Last serviced port   : %u\n",
+        (unsigned int)ports.last_port);
+    console_printf("  Last completion code : %u\n",
+        (unsigned int)ports.last_completion_code);
+    console_printf("  Last PORTSC          : %08x\n",
+        (unsigned int)ports.last_portsc);
+    console_printf("  Internal hub fault   : %s\n",
+        ports.root_fault ? "Yes" : "No");
+  }
 }
 
 static void cmd_usb_hubports(void) {

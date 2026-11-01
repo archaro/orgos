@@ -358,7 +358,7 @@ xhci_port_clear_result_t xhci_port_clear(
     return XHCI_PORT_CLEAR_UNAVAILABLE;
 
   xhci_info_t info;
-  if (!xhci_probe(&info) || number != 1U || number > info.max_ports)
+  if (!xhci_probe(&info) || number == 0U || number > info.max_ports)
     return XHCI_PORT_CLEAR_UNAVAILABLE;
 
   uint32_t op = info.capability_length;
@@ -1299,6 +1299,28 @@ static bool xhci_port_event_take(uint8_t port, xhci_event_t *result) {
 
   return false;
 }
+
+bool xhci_port_event_read(xhci_port_change_t *result) {
+  if (!result || port_event_count == 0U)
+    return false;
+
+  xhci_event_t event = port_event_queue[0];
+
+  for (unsigned int i = 1U; i < port_event_count; i++)
+    port_event_queue[i - 1U] = port_event_queue[i];
+
+  port_event_count--;
+
+  *result = (xhci_port_change_t){
+    .port = event.port_id,
+    .completion_code = event.completion_code,
+    .status = event.status,
+    .control = event.control
+  };
+
+  return true;
+}
+
 static xhci_event_waiter_t *xhci_waiter_register(
     uint8_t type, uint8_t slot_id, uint8_t endpoint_id,
     uint64_t trb_address) {

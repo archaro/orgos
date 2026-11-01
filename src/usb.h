@@ -31,3 +31,15 @@ usb_init_result_t usb_init(usb_init_info_t *info);
 bool usb_get_init_info(usb_init_info_t *info);
 void usb_service(void);
 bool usb_service_available(void);
+
+typedef struct {
+  uint32_t processed;
+  uint32_t failures;
+  uint32_t last_portsc;
+  uint8_t last_port;
+  uint8_t last_completion_code;
+  bool root_fault;
+} usb_port_monitor_info_t;
+
+bool usb_get_port_monitor_info(usb_port_monitor_info_t *result);
+

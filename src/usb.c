@@ -14,6 +14,7 @@ static bool usb_initialised;
 static usb_init_info_t usb_state;
 static bool usb_attempted;
 static bool usb_service_failed;
+static usb_port_monitor_info_t port_monitor;
 
 static bool usb_port_valid(const xhci_port_t *port) {
   return port->connected && port->enabled && port->powered &&
@@ -147,19 +148,108 @@ complete:
   return result;
 }
 
+bool usb_get_port_monitor_info(usb_port_monitor_info_t *result) {
+  if (!result)
+    return false;
+
+  *result = port_monitor;
+  return true;
+}
+
+static void usb_port_monitor_fault(uint8_t port) {
+  port_monitor.failures++;
+
+  // The internal USB 2.0 hub is on root port 1.
+  // Losing it invalidates our current USB topology.
+  if (port == USB_ROOT_PORT) {
+    port_monitor.root_fault = true;
+    usb_service_failed = true;
+  }
+}
+
+static void usb_service_port_events(void) {
+  xhci_port_change_t event;
+
+  // Bound the work performed by each foreground pass.
+  for (unsigned int i = 0U; i < 8U; i++) {
+    if (!xhci_port_event_read(&event))
+      return;
+
+    port_monitor.processed++;
+    port_monitor.last_port = event.port;
+    port_monitor.last_completion_code = event.completion_code;
+    port_monitor.last_portsc = 0U;
+
+    if (event.completion_code != 1U) {
+      usb_port_monitor_fault(event.port);
+      if (usb_service_failed)
+        return;
+      continue;
+    }
+
+    // An event is a notification, not a snapshot.
+    // Read the current state of the affected port.
+    xhci_port_t port;
+    if (!xhci_port_read(event.port, &port)) {
+      usb_port_monitor_fault(event.port);
+      if (usb_service_failed)
+        return;
+      continue;
+    }
+
+    port_monitor.last_portsc = port.portsc;
+
+    // A connection change on the internal hub means
+    // that our existing device contexts may be stale,
+    // even if the port has already reconnected.
+    if (event.port == USB_ROOT_PORT &&
+        (!usb_port_valid(&port) || port.connect_change)) {
+      usb_port_monitor_fault(event.port);
+      return;
+    }
+
+    xhci_port_clear_info_t clear;
+    if (xhci_port_clear(event.port, &clear) != XHCI_PORT_CLEAR_OK) {
+      usb_port_monitor_fault(event.port);
+      if (usb_service_failed)
+        return;
+      continue;
+    }
+
+    // Check again after acknowledging the change.
+    // We must not continue using a lost root hub.
+    if (event.port == USB_ROOT_PORT) {
+      if (!xhci_port_read(event.port, &port) ||
+          !usb_port_valid(&port) || port.connect_change) {
+        usb_port_monitor_fault(event.port);
+        return;
+      }
+    }
+  }
+}
+
 void usb_service(void) {
   if (!usb_initialised || usb_service_failed)
     return;
 
   // Dispatch hardware events to their owners.
   xhci_service_result_t result = xhci_service(8U);
+  if (result == XHCI_SERVICE_FAILED || result == XHCI_SERVICE_NOT_READY) {
+    usb_service_failed = true;
+    return;
+  }
+
+  // Consume root-port notifications and acknowledge
+  // their change flags before servicing endpoints.
+  usb_service_port_events();
+
+  if (usb_service_failed)
+    return;
 
   // Finalise and rearm completed Bulk IN transfers.
   xhci_bulk_in_stream_service();
 
-  // Drain the test receiver without blocking USB.
+  // Service the diagnostic MIDI receiver, if active.
   usb_midi_in_stress_service();
-
-  if (result == XHCI_SERVICE_FAILED || result == XHCI_SERVICE_NOT_READY)
-    usb_service_failed = true;
 }
+

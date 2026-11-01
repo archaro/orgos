@@ -155,6 +155,15 @@ xhci_port_event_result_t xhci_port_event_wait(
     uint8_t port, uint32_t timeout_ms);
 
 typedef struct {
+  uint8_t port;
+  uint8_t completion_code;
+  uint32_t status;
+  uint32_t control;
+} xhci_port_change_t;
+
+bool xhci_port_event_read(xhci_port_change_t *result);
+
+typedef struct {
   dma_buffer_t command_ring;
   dma_buffer_t event_ring;
   dma_buffer_t erst;
