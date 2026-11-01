@@ -82,6 +82,7 @@
 #define XHCI_BULK_OUT_DCI  4U
 #define XHCI_EP_TYPE_OUT   2U
 #define XHCI_EP_TYPE_IN    6U
+#define XHCI_COMPLETION_SHORT_PACKET 13U
 
 typedef struct {
   dma_buffer_t input;
@@ -89,6 +90,7 @@ typedef struct {
   dma_buffer_t ep0_ring;
   dma_buffer_t bulk_in_ring;
   dma_buffer_t bulk_out_ring;
+  dma_buffer_t bulk_in_buffer;
   dma_buffer_t control_buffer;
   uint8_t slot_id;
   uint8_t root_port;
@@ -113,6 +115,7 @@ typedef struct {
   bool bulk_out_active;
   bool bulk_out_failed;
   bool bulk_out_wrap_pending;
+  bool bulk_in_ready;
 } xhci_device_t;
 
 typedef enum {
@@ -172,6 +175,12 @@ typedef struct {
   xhci_event_t event;
 } xhci_event_waiter_t;
 static xhci_event_waiter_t event_waiters[XHCI_EVENT_WAITERS];
+
+// One-shot Bulk IN diagnostic state.
+// Generalise to multiple pending TDs later.
+static xhci_bulk_in_state_t bulk_in_state;
+static xhci_bulk_in_info_t bulk_in_info;
+static xhci_event_waiter_t *bulk_in_waiter;
 
 static bool slot_requested;
 static bool downstream_slot_requested;
@@ -2209,6 +2218,7 @@ xhci_bulk_config_result_t xhci_downstream_bulk_configure(
   device->bulk_out_active = false;
   device->bulk_out_failed = false;
   device->bulk_out_ready = true;
+  device->bulk_in_ready = true;
   return XHCI_BULK_CONFIG_OK;
 }
 
@@ -2399,6 +2409,133 @@ ring_failed:
   device->bulk_out_failed = true;
   device->bulk_out_active = false;
   return XHCI_BULK_OUT_RING_FAILED;
+}
+
+xhci_bulk_in_arm_result_t xhci_downstream_bulk_in_arm(void) {
+  if (bulk_in_state != XHCI_BULK_IN_IDLE)
+    return XHCI_BULK_IN_ARM_ALREADY_STARTED;
+
+  xhci_device_t *device = &devices[1];
+  if (!device->bulk_in_ready || !device->addressed ||
+      !controller_running || !controller_verified ||
+      command_ring_failed || dispatch_fault != XHCI_DISPATCH_NONE ||
+      device->bulk_in_ring.owner != DMA_OWNER_DEVICE)
+    return XHCI_BULK_IN_ARM_NOT_READY;
+
+  xhci_info_t controller;
+  xhci_port_t port;
+  if (!xhci_probe(&controller) || !xhci_port_read(device->root_port, &port) ||
+      !port.connected || !port.enabled || !port.powered ||
+      port.overcurrent || port.resetting || port.speed != 3U)
+    return XHCI_BULK_IN_ARM_NOT_READY;
+
+  cache_info_t cache;
+  if (!cache_get_info(&cache) || cache.data_line_size == 0U ||
+      cache.data_line_size > PAGE_SIZE ||
+      (cache.data_line_size & (cache.data_line_size - 1U)))
+    return XHCI_BULK_IN_ARM_NOT_READY;
+
+  dma_buffer_t *buffer = &device->bulk_in_buffer;
+  if (!buffer->pages && !dma_alloc(XHCI_BULK_IN_MAX_DATA, 64U, buffer))
+    return XHCI_BULK_IN_ARM_ALLOCATION_FAILED;
+
+  // The device will write into this buffer.
+  if (!dma_begin_device(buffer, DMA_FROM_DEVICE))
+    return XHCI_BULK_IN_ARM_DMA_FAILED;
+
+  // First and only receive TD for this diagnostic.
+  // Ring index 0, initial producer cycle state 1.
+  xhci_trb_t *ring = device->bulk_in_ring.virtual;
+  xhci_trb_t *trb = &ring[0];
+
+  trb->parameter = buffer->bus;
+  trb->status = XHCI_BULK_IN_MAX_DATA;
+  trb->control = (1U << XHCI_TRB_TYPE_SHIFT) | XHCI_TRB_IOC | XHCI_TRB_CYCLE;
+
+  uint64_t trb_address = device->bulk_in_ring.bus;
+  uintptr_t line_address = (uintptr_t)trb &
+      ~(uintptr_t)(cache.data_line_size - 1U);
+  if (!cache_clean( (const void *)line_address, cache.data_line_size)) {
+    bulk_in_state = XHCI_BULK_IN_FAILED;
+    return XHCI_BULK_IN_ARM_RING_FAILED;
+  }
+
+  // A completion may arrive immediately after
+  // the doorbell, so register its owner first.
+  bulk_in_waiter = xhci_waiter_register(
+      XHCI_TRB_TRANSFER_EVENT, device->slot_id,
+      XHCI_BULK_IN_DCI, trb_address);
+
+  if (!bulk_in_waiter) {
+    bulk_in_state = XHCI_BULK_IN_FAILED;
+    return XHCI_BULK_IN_ARM_WAITER_FAILED;
+  }
+
+  bulk_in_info = (xhci_bulk_in_info_t){
+    .transfer_trb = trb_address,
+    .requested = XHCI_BULK_IN_MAX_DATA,
+    .slot_id = device->slot_id,
+    .endpoint_id = XHCI_BULK_IN_DCI
+  };
+  bulk_in_state = XHCI_BULK_IN_PENDING;
+
+  __asm__ volatile("dsb sy" ::: "memory");
+
+  // Device doorbell, target 3: EP1 IN.
+  xhci_write(controller.doorbell_offset +
+      4U * device->slot_id, XHCI_BULK_IN_DCI);
+
+  return XHCI_BULK_IN_ARM_OK;
+}
+
+xhci_bulk_in_state_t xhci_downstream_bulk_in_status(
+    xhci_bulk_in_info_t *result) {
+
+  if (!result)
+    return XHCI_BULK_IN_FAILED;
+
+  if (bulk_in_state == XHCI_BULK_IN_PENDING) {
+    // An event-stream failure makes completion
+    // uncertain. Do not inspect device-owned DMA.
+    if (dispatch_fault != XHCI_DISPATCH_NONE) {
+      bulk_in_state = XHCI_BULK_IN_FAILED;
+    } else if (bulk_in_waiter && bulk_in_waiter->completed) {
+      xhci_event_t event = bulk_in_waiter->event;
+      xhci_waiter_release(bulk_in_waiter);
+      bulk_in_waiter = NULL;
+      bulk_in_info.completion_code = event.completion_code;
+      bulk_in_info.event_parameter = event.parameter;
+      bulk_in_info.event_status = event.status;
+
+      // For this single-TRB TD, the low 24 bits
+      // represent the number of bytes not received.
+      uint32_t residual = event.status & 0x00ffffffU;
+      bulk_in_info.residual = residual;
+      bool successful = event.completion_code == XHCI_COMPLETION_SUCCESS ||
+          event.completion_code == XHCI_COMPLETION_SHORT_PACKET;
+      if (!successful || residual > XHCI_BULK_IN_MAX_DATA ||
+          (event.completion_code == XHCI_COMPLETION_SUCCESS &&
+           residual != 0U)) {
+        bulk_in_state = XHCI_BULK_IN_FAILED;
+      } else {
+        dma_buffer_t *buffer = &devices[1].bulk_in_buffer;
+        if (!dma_end_device(buffer)) {
+          bulk_in_state = XHCI_BULK_IN_FAILED;
+        } else {
+          uint32_t received = XHCI_BULK_IN_MAX_DATA - residual;
+          const uint8_t *bytes = buffer->virtual;
+          for (uint32_t i = 0U; i < received; i++)
+            bulk_in_info.data[i] = bytes[i];
+
+          bulk_in_info.received = received;
+          bulk_in_state = XHCI_BULK_IN_COMPLETE;
+        }
+      }
+    }
+  }
+
+  *result = bulk_in_info;
+  return bulk_in_state;
 }
 
 xhci_hub_result_t xhci_hub_configure(

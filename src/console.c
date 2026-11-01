@@ -1709,6 +1709,58 @@ static void cmd_usb_test_midiout(void) {
       info.completion_code == 1U ? "PASS" : "FAILED");
 }
 
+static void cmd_usb_test_midiin(const char *args) {
+  if (next_word_is(&args, "arm") && end_of_args(args)) {
+    usb_enum_info_t enumeration = {0};
+    if (!usb_get_enumeration(&enumeration) ||
+        enumeration.result != USB_ENUM_OK) {
+      console_puts("USB-MIDI device not enumerated.\n");
+      return;
+    }
+    xhci_bulk_in_arm_result_t result = xhci_downstream_bulk_in_arm();
+    console_printf("USB-MIDI IN arm: %u\n", (unsigned int)result);
+    if (result == XHCI_BULK_IN_ARM_OK)
+      console_puts("Receive pending; send MIDI from the host PC.\n");
+    return;
+  }
+  if (next_word_is(&args, "status") && end_of_args(args)) {
+    xhci_bulk_in_info_t info = {0};
+    xhci_bulk_in_state_t state = xhci_downstream_bulk_in_status(&info);
+    if (state == XHCI_BULK_IN_IDLE) {
+      console_puts("USB-MIDI IN: not armed.\n");
+      return;
+    }
+    if (state == XHCI_BULK_IN_PENDING) {
+      console_puts("USB-MIDI IN: pending.\n");
+      return;
+    }
+    console_printf("USB-MIDI IN: %s\n",
+        state == XHCI_BULK_IN_COMPLETE ? "COMPLETE" : "FAILED");
+    console_printf("  Completion code: %u\n",
+        (unsigned int)info.completion_code);
+    console_printf("  TRB            : %016llx\n",
+        (unsigned long long)info.transfer_trb);
+    console_printf("  Event TRB      : %016llx\n",
+        (unsigned long long)info.event_parameter);
+    console_printf("  Residual bytes : %u\n", (unsigned int)info.residual);
+    console_printf("  Received bytes : %u\n", (unsigned int)info.received);
+    if (state != XHCI_BULK_IN_COMPLETE)
+      return;
+    if (info.received % 4U != 0U)
+      console_puts("  Warning: incomplete USB-MIDI packet.\n");
+    for (uint32_t i = 0U; i + 3U < info.received; i += 4U) {
+      console_printf("  Packet %u: %02x %02x %02x %02x\n",
+          (unsigned int)(i / 4U),
+          (unsigned int)info.data[i],
+          (unsigned int)info.data[i + 1U],
+          (unsigned int)info.data[i + 2U],
+          (unsigned int)info.data[i + 3U]);
+    }
+    return;
+  }
+  console_puts("Usage: usb test midiin [arm | status]\n");
+}
+
 static void cmd_usb_test_midiwrap(void) {
   usb_enum_info_t enumeration = {0};
   if (!usb_get_enumeration(&enumeration) ||
@@ -1836,7 +1888,11 @@ static void cmd_usb(const char *args) {
       cmd_usb_test_midiwrap();
       return;
     }
-    console_puts("Usage: usb test [noops | midiout | midiwrap]\n");
+    if (next_word_is(&other_args, "midiin")) {
+      cmd_usb_test_midiin(other_args);
+      return;
+    }
+    console_puts("Usage: usb test [noops | midiout | midiwrap | midiin]\n");
     return;
   }
   if (next_word_is(&args, "state") && end_of_args(args)) {

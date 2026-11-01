@@ -436,6 +436,43 @@ typedef struct {
 xhci_bulk_out_result_t xhci_downstream_bulk_out(
     const uint8_t *data, uint32_t length, xhci_bulk_out_info_t *result);
 
+#define XHCI_BULK_IN_MAX_DATA 64U
+
+typedef enum {
+  XHCI_BULK_IN_IDLE,
+  XHCI_BULK_IN_PENDING,
+  XHCI_BULK_IN_COMPLETE,
+  XHCI_BULK_IN_FAILED
+} xhci_bulk_in_state_t;
+
+typedef enum {
+  XHCI_BULK_IN_ARM_OK,
+  XHCI_BULK_IN_ARM_NOT_READY,
+  XHCI_BULK_IN_ARM_ALREADY_STARTED,
+  XHCI_BULK_IN_ARM_ALLOCATION_FAILED,
+  XHCI_BULK_IN_ARM_DMA_FAILED,
+  XHCI_BULK_IN_ARM_RING_FAILED,
+  XHCI_BULK_IN_ARM_WAITER_FAILED
+} xhci_bulk_in_arm_result_t;
+
+typedef struct {
+  uint64_t transfer_trb;
+  uint64_t event_parameter;
+  uint32_t event_status;
+  uint32_t requested;
+  uint32_t received;
+  uint32_t residual;
+  uint8_t slot_id;
+  uint8_t endpoint_id;
+  uint8_t completion_code;
+  uint8_t data[XHCI_BULK_IN_MAX_DATA];
+} xhci_bulk_in_info_t;
+
+xhci_bulk_in_arm_result_t xhci_downstream_bulk_in_arm(void);
+
+xhci_bulk_in_state_t xhci_downstream_bulk_in_status(
+    xhci_bulk_in_info_t *result);
+
 typedef enum {
   XHCI_CONTROL_OK,
   XHCI_CONTROL_NOT_READY,
