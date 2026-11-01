@@ -115,7 +115,10 @@ typedef struct {
   bool bulk_out_active;
   bool bulk_out_failed;
   bool bulk_out_wrap_pending;
+  unsigned int bulk_in_index;
+  unsigned int bulk_in_cycle;
   bool bulk_in_ready;
+  bool bulk_in_wrap_pending;
 } xhci_device_t;
 
 typedef enum {
@@ -2218,7 +2221,11 @@ xhci_bulk_config_result_t xhci_downstream_bulk_configure(
   device->bulk_out_active = false;
   device->bulk_out_failed = false;
   device->bulk_out_ready = true;
+  device->bulk_in_index = 0U;
+  device->bulk_in_cycle = 1U;
+  device->bulk_in_wrap_pending = false;
   device->bulk_in_ready = true;
+  return XHCI_BULK_CONFIG_OK;
   return XHCI_BULK_CONFIG_OK;
 }
 
@@ -2411,8 +2418,44 @@ ring_failed:
   return XHCI_BULK_OUT_RING_FAILED;
 }
 
+static bool xhci_bulk_in_publish(xhci_device_t *device,
+    unsigned int index, size_t line) {
+
+  xhci_trb_t *ring = device->bulk_in_ring.virtual;
+  uintptr_t address = (uintptr_t)&ring[index];
+  address &= ~(uintptr_t)(line - 1U);
+
+  return cache_clean((const void *)address, line);
+}
+
+static bool xhci_bulk_in_advance(xhci_device_t *device, size_t line) {
+  xhci_trb_t *ring = device->bulk_in_ring.virtual;
+
+  // Once the first transfer in a new cycle completes,
+  // the controller has traversed the old Link TRB.
+  if (device->bulk_in_wrap_pending) {
+    xhci_trb_t *link = &ring[XHCI_RING_TRBS - 1U];
+    link->control = (link->control & ~XHCI_TRB_CYCLE) |
+        (device->bulk_in_cycle ? XHCI_TRB_CYCLE : 0U);
+    if (!xhci_bulk_in_publish(device, XHCI_RING_TRBS - 1U, line))
+      return false;
+    device->bulk_in_wrap_pending = false;
+  }
+
+  device->bulk_in_index++;
+  // Entry 255 is the Link TRB, not a data TRB.
+  if (device->bulk_in_index == XHCI_RING_TRBS - 1U) {
+    device->bulk_in_index = 0U;
+    device->bulk_in_cycle ^= 1U;
+    device->bulk_in_wrap_pending = true;
+  }
+
+  return true;
+}
+
 xhci_bulk_in_arm_result_t xhci_downstream_bulk_in_arm(void) {
-  if (bulk_in_state != XHCI_BULK_IN_IDLE)
+  if (bulk_in_state != XHCI_BULK_IN_IDLE &&
+      bulk_in_state != XHCI_BULK_IN_COMPLETE)
     return XHCI_BULK_IN_ARM_ALREADY_STARTED;
 
   xhci_device_t *device = &devices[1];
@@ -2443,19 +2486,19 @@ xhci_bulk_in_arm_result_t xhci_downstream_bulk_in_arm(void) {
   if (!dma_begin_device(buffer, DMA_FROM_DEVICE))
     return XHCI_BULK_IN_ARM_DMA_FAILED;
 
-  // First and only receive TD for this diagnostic.
-  // Ring index 0, initial producer cycle state 1.
+  // One outstanding receive TD, submitted at
+  // the current Bulk IN producer position.
+  unsigned int index = device->bulk_in_index;
+  uint32_t cycle = device->bulk_in_cycle ? XHCI_TRB_CYCLE : 0U;
   xhci_trb_t *ring = device->bulk_in_ring.virtual;
-  xhci_trb_t *trb = &ring[0];
-
+  xhci_trb_t *trb = &ring[index];
   trb->parameter = buffer->bus;
   trb->status = XHCI_BULK_IN_MAX_DATA;
-  trb->control = (1U << XHCI_TRB_TYPE_SHIFT) | XHCI_TRB_IOC | XHCI_TRB_CYCLE;
+  trb->control = (1U << XHCI_TRB_TYPE_SHIFT) | XHCI_TRB_IOC | cycle;
 
-  uint64_t trb_address = device->bulk_in_ring.bus;
-  uintptr_t line_address = (uintptr_t)trb &
-      ~(uintptr_t)(cache.data_line_size - 1U);
-  if (!cache_clean( (const void *)line_address, cache.data_line_size)) {
+  uint64_t trb_address = device->bulk_in_ring.bus +
+      (uint64_t)index * sizeof(xhci_trb_t);
+  if (!xhci_bulk_in_publish(device, index, cache.data_line_size)) {
     bulk_in_state = XHCI_BULK_IN_FAILED;
     return XHCI_BULK_IN_ARM_RING_FAILED;
   }
@@ -2528,7 +2571,17 @@ xhci_bulk_in_state_t xhci_downstream_bulk_in_status(
             bulk_in_info.data[i] = bytes[i];
 
           bulk_in_info.received = received;
-          bulk_in_state = XHCI_BULK_IN_COMPLETE;
+          // The completed TD has been consumed.
+          // Advance the producer before another arm.
+          cache_info_t cache;
+          if (!cache_get_info(&cache) || cache.data_line_size == 0U ||
+              cache.data_line_size > PAGE_SIZE ||
+              (cache.data_line_size & (cache.data_line_size - 1U)) ||
+              !xhci_bulk_in_advance(&devices[1], cache.data_line_size)) {
+            bulk_in_state = XHCI_BULK_IN_FAILED;
+          } else {
+            bulk_in_state = XHCI_BULK_IN_COMPLETE;
+          }
         }
       }
     }
