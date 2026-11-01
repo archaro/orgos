@@ -468,11 +468,6 @@ typedef struct {
   uint8_t data[XHCI_BULK_IN_MAX_DATA];
 } xhci_bulk_in_info_t;
 
-xhci_bulk_in_arm_result_t xhci_downstream_bulk_in_arm(void);
-
-xhci_bulk_in_state_t xhci_downstream_bulk_in_status(
-    xhci_bulk_in_info_t *result);
-
 typedef struct {
   bool started;
   bool failed;

@@ -2536,13 +2536,7 @@ static xhci_bulk_in_arm_result_t xhci_bulk_in_arm_one(void) {
   return XHCI_BULK_IN_ARM_OK;
 }
 
-xhci_bulk_in_arm_result_t xhci_downstream_bulk_in_arm(void) {
-  if (bulk_in_stream_started)
-    return XHCI_BULK_IN_ARM_ALREADY_STARTED;
-
-  return xhci_bulk_in_arm_one();
-}
-xhci_bulk_in_state_t xhci_downstream_bulk_in_status(
+static xhci_bulk_in_state_t xhci_downstream_bulk_in_status(
     xhci_bulk_in_info_t *result) {
 
   if (!result)

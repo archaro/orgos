@@ -1282,57 +1282,24 @@ static void cmd_usb_test_midiin(const char *args) {
   }
   if (next_word_is(&args, "status") && end_of_args(args)) {
     xhci_bulk_in_stream_stats_t stats = {0};
-    if (xhci_bulk_in_stream_get_stats(&stats) && stats.started) {
-      console_printf("USB-MIDI IN stream: %s\n",
-          stats.failed ? "FAILED" :
-          stats.paused ? "PAUSED" : "RUNNING");
-      console_printf("  Queue depth : %u / %u\n",
-          (unsigned int)stats.queue_depth, XHCI_BULK_IN_QUEUE_CAPACITY);
-      console_printf("  Queue peak  : %u\n", (unsigned int)stats.queue_peak);
-      console_printf("  Transfers   : %llu\n",
-          (unsigned long long)stats.transfers);
-      console_printf("  Bytes       : %llu\n",
-          (unsigned long long)stats.bytes);
-      console_printf("  Ring wraps  : %u\n", (unsigned int)stats.ring_wraps);
-      console_printf("  Full pauses : %u\n", (unsigned int)stats.pauses);
-      console_printf("  Last code   : %u\n",
-          (unsigned int)stats.last_completion_code);
-      console_printf("  Last arm    : %u\n",
-          (unsigned int)stats.last_arm_result);
+    if (!xhci_bulk_in_stream_get_stats(&stats) || !stats.started) {
+      console_puts("USB-MIDI IN stream: NOT STARTED\n");
       return;
     }
-    xhci_bulk_in_info_t info = {0};
-    xhci_bulk_in_state_t state = xhci_downstream_bulk_in_status(&info);
-    if (state == XHCI_BULK_IN_IDLE) {
-      console_puts("USB-MIDI IN: not armed.\n");
-      return;
-    }
-    if (state == XHCI_BULK_IN_PENDING) {
-      console_puts("USB-MIDI IN: pending.\n");
-      return;
-    }
-    console_printf("USB-MIDI IN: %s\n",
-        state == XHCI_BULK_IN_COMPLETE ? "COMPLETE" : "FAILED");
-    console_printf("  Completion code: %u\n",
-        (unsigned int)info.completion_code);
-    console_printf("  TRB            : %016llx\n",
-        (unsigned long long)info.transfer_trb);
-    console_printf("  Event TRB      : %016llx\n",
-        (unsigned long long)info.event_parameter);
-    console_printf("  Residual bytes : %u\n", (unsigned int)info.residual);
-    console_printf("  Received bytes : %u\n", (unsigned int)info.received);
-    if (state != XHCI_BULK_IN_COMPLETE)
-      return;
-    if (info.received % 4U != 0U)
-      console_puts("  Warning: incomplete USB-MIDI packet.\n");
-    for (uint32_t i = 0U; i + 3U < info.received; i += 4U) {
-      console_printf("  Packet %u: %02x %02x %02x %02x\n",
-          (unsigned int)(i / 4U),
-          (unsigned int)info.data[i],
-          (unsigned int)info.data[i + 1U],
-          (unsigned int)info.data[i + 2U],
-          (unsigned int)info.data[i + 3U]);
-    }
+    console_printf("USB-MIDI IN stream: %s\n",
+        stats.failed ? "FAILED" : stats.paused ? "PAUSED" : "RUNNING");
+    console_printf("  Queue depth : %u / %u\n",
+        (unsigned int)stats.queue_depth, XHCI_BULK_IN_QUEUE_CAPACITY);
+    console_printf("  Queue peak  : %u\n", (unsigned int)stats.queue_peak);
+    console_printf("  Transfers   : %llu\n",
+        (unsigned long long)stats.transfers);
+    console_printf("  Bytes       : %llu\n", (unsigned long long)stats.bytes);
+    console_printf("  Ring wraps  : %u\n", (unsigned int)stats.ring_wraps);
+    console_printf("  Full pauses : %u\n", (unsigned int)stats.pauses);
+    console_printf("  Last code   : %u\n",
+        (unsigned int)stats.last_completion_code);
+    console_printf("  Last arm    : %u\n",
+        (unsigned int)stats.last_arm_result);
     return;
   }
   console_puts("Usage: usb test midiin [status | stream | read | stress]\n");
