@@ -246,6 +246,9 @@ void usb_service(void) {
   if (usb_service_failed)
     return;
 
+  // Finalise any internal hub interrupt notification.
+  xhci_hub_notify_service();
+
   // Finalise and rearm completed Bulk IN transfers.
   xhci_bulk_in_stream_service();
 

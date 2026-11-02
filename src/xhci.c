@@ -198,6 +198,10 @@ static bool bulk_in_stream_failed;
 static bool bulk_in_stream_queued;
 static xhci_bulk_in_stream_stats_t bulk_in_stream_stats;
 
+static xhci_hub_notify_info_t hub_notify_info;
+static xhci_event_waiter_t *hub_notify_waiter;
+static bool hub_notify_started;
+
 static bool slot_requested;
 static bool downstream_slot_requested;
 static uint8_t internal_hub_slot;
@@ -3666,5 +3670,131 @@ xhci_interrupt_config_result_t xhci_hub_interrupt_configure(
   device->interrupt_ready = true;
 
   return XHCI_INTERRUPT_CONFIG_OK;
+}
+
+bool xhci_hub_notify_get_info(xhci_hub_notify_info_t *info) {
+  if (!info)
+    return false;
+
+  *info = hub_notify_info;
+  return hub_notify_started;
+}
+
+xhci_hub_notify_result_t xhci_hub_notify_start(void) {
+  if (hub_notify_started)
+    return XHCI_HUB_NOTIFY_ALREADY_STARTED;
+
+  xhci_device_t *device = &internal_hub;
+  if (!device->interrupt_ready ||
+      !controller_running || !controller_verified ||
+      dispatch_fault != XHCI_DISPATCH_NONE ||
+      device->interrupt_ring.owner != DMA_OWNER_DEVICE)
+    return XHCI_HUB_NOTIFY_NOT_READY;
+
+  cache_info_t cache;
+  if (!cache_get_info(&cache) ||
+      cache.data_line_size == 0U ||
+      cache.data_line_size > PAGE_SIZE ||
+      (cache.data_line_size & (cache.data_line_size - 1U)))
+    return XHCI_HUB_NOTIFY_NOT_READY;
+
+  // Verify controller access before submitting a transfer.
+  xhci_info_t controller;
+  if (!xhci_probe(&controller))
+    return XHCI_HUB_NOTIFY_NOT_READY;
+
+  dma_buffer_t *buffer = &device->interrupt_buffer;
+  if (!dma_begin_device(buffer, DMA_FROM_DEVICE))
+    return XHCI_HUB_NOTIFY_DMA_FAILED;
+
+  // One Normal TRB, at the start of the dedicated ring.
+  xhci_trb_t *ring = device->interrupt_ring.virtual;
+  ring[0].parameter = buffer->bus;
+  ring[0].status = device->interrupt_mps;
+  ring[0].control = (1U << XHCI_TRB_TYPE_SHIFT) |
+      XHCI_TRB_IOC | XHCI_TRB_CYCLE;
+
+  uintptr_t line = (uintptr_t)&ring[0] &
+      ~(uintptr_t)(cache.data_line_size - 1U);
+
+  if (!cache_clean((const void *)line, cache.data_line_size)) {
+    dma_end_device(buffer);
+    return XHCI_HUB_NOTIFY_RING_FAILED;
+  }
+
+  uint64_t trb_address = device->interrupt_ring.bus;
+  hub_notify_waiter = xhci_waiter_register(XHCI_TRB_TRANSFER_EVENT,
+      device->slot_id, device->interrupt_dci, trb_address);
+  if (!hub_notify_waiter) {
+    dma_end_device(buffer);
+    return XHCI_HUB_NOTIFY_WAITER_FAILED;
+  }
+
+  hub_notify_info = (xhci_hub_notify_info_t){
+    .state = XHCI_HUB_NOTIFY_PENDING,
+    .slot_id = device->slot_id,
+    .endpoint_id = device->interrupt_dci,
+    .transfer_trb = trb_address
+  };
+  hub_notify_started = true;
+
+  __asm__ volatile("dsb sy" ::: "memory");
+
+  xhci_write(controller.doorbell_offset +
+      4U * device->slot_id, device->interrupt_dci);
+
+  return XHCI_HUB_NOTIFY_OK;
+}
+
+void xhci_hub_notify_service(void) {
+  if (!hub_notify_started || hub_notify_info.state != XHCI_HUB_NOTIFY_PENDING)
+    return;
+
+  if (dispatch_fault != XHCI_DISPATCH_NONE) {
+    hub_notify_info.state = XHCI_HUB_NOTIFY_FAILED;
+    return;
+  }
+
+  if (!hub_notify_waiter || !hub_notify_waiter->completed)
+    return;
+
+  xhci_event_t event = hub_notify_waiter->event;
+  xhci_waiter_release(hub_notify_waiter);
+  hub_notify_waiter = NULL;
+  hub_notify_info.completion_code = event.completion_code;
+  uint32_t residual = event.status & 0x00ffffffU;
+  uint32_t requested = internal_hub.interrupt_mps;
+  if (event.completion_code != XHCI_COMPLETION_SUCCESS &&
+      event.completion_code != XHCI_COMPLETION_SHORT_PACKET) {
+    hub_notify_info.state = XHCI_HUB_NOTIFY_FAILED;
+    return;
+  }
+
+  if (residual > requested ||
+      (event.completion_code == XHCI_COMPLETION_SUCCESS && residual != 0U)) {
+    hub_notify_info.state = XHCI_HUB_NOTIFY_FAILED;
+    return;
+  }
+
+  dma_buffer_t *buffer = &internal_hub.interrupt_buffer;
+  if (!dma_end_device(buffer)) {
+    hub_notify_info.state = XHCI_HUB_NOTIFY_FAILED;
+    return;
+  }
+
+  uint32_t received = requested - residual;
+  if (received == 0U || received > 2U) {
+    hub_notify_info.state = XHCI_HUB_NOTIFY_FAILED;
+    return;
+  }
+
+  const uint8_t *data = buffer->virtual;
+  uint16_t changes = data[0];
+  if (received == 2U)
+    changes |= (uint16_t)data[1] << 8;
+
+  hub_notify_info.changes = changes;
+  hub_notify_info.length = (uint8_t)received;
+  hub_notify_info.state = XHCI_HUB_NOTIFY_COMPLETE;
 }
 

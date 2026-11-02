@@ -1522,6 +1522,30 @@ static void cmd_usb_test_midiwrap(void) {
       completed == transfers && wraps >= 2U ? "PASS" : "FAILED");
 }
 
+static void cmd_usb_hubirq_start(void) {
+  xhci_hub_notify_result_t result = xhci_hub_notify_start();
+  if (result == XHCI_HUB_NOTIFY_OK)
+    console_puts("Hub notification receiver armed.\n");
+  else
+    console_printf("Hub notification start failed (%u).\n",
+        (unsigned int)result);
+}
+
+static void cmd_usb_hubirq(void) {
+  xhci_hub_notify_info_t info = {0};
+  if (!xhci_hub_notify_get_info(&info)) {
+    console_puts("Hub notification receiver not started.\n");
+    return;
+  }
+  console_printf("Hub interrupt receiver:\n");
+  console_printf("  State       : %u\n", (unsigned int)info.state);
+  console_printf("  Slot        : %u\n", (unsigned int)info.slot_id);
+  console_printf("  Endpoint DCI: %u\n", (unsigned int)info.endpoint_id);
+  console_printf("  Completion  : %u\n", (unsigned int)info.completion_code);
+  console_printf("  Length      : %u\n", (unsigned int)info.length);
+  console_printf("  Changes     : 0x%04x\n", (unsigned int)info.changes);
+}
+
 static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
@@ -1531,6 +1555,16 @@ static void cmd_usb(const char *args) {
       end_of_args(other_args)) {
     cmd_usb_device_check();
     return;
+  }
+  if (next_word_is(&args, "hubirq")) {
+    if (end_of_args(args)) {
+      cmd_usb_hubirq();
+      return;
+    }
+    if (next_word_is(&args, "start") && end_of_args(args)) {
+      cmd_usb_hubirq_start();
+      return;
+    }
   }
   if (next_word_is(&args, "devices") && end_of_args(args)) {
     cmd_usb_devices();
@@ -1587,7 +1621,7 @@ static void cmd_usb(const char *args) {
   if (!end_of_args(args)) {
     console_puts(
         "Usage: usb [scan | state | ports | events | device | devices | "
-        "hubports | enumerate | test]\n");
+        "hubports | hubirq | enumerate | test]\n");
     return;
   }
 

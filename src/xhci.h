@@ -640,3 +640,33 @@ xhci_interrupt_config_result_t xhci_hub_interrupt_configure(
     uint8_t address, uint16_t mps, uint8_t interval,
     xhci_interrupt_config_info_t *info);
 
+typedef enum {
+  XHCI_HUB_NOTIFY_IDLE,
+  XHCI_HUB_NOTIFY_PENDING,
+  XHCI_HUB_NOTIFY_COMPLETE,
+  XHCI_HUB_NOTIFY_FAILED
+} xhci_hub_notify_state_t;
+
+typedef enum {
+  XHCI_HUB_NOTIFY_OK,
+  XHCI_HUB_NOTIFY_NOT_READY,
+  XHCI_HUB_NOTIFY_ALREADY_STARTED,
+  XHCI_HUB_NOTIFY_DMA_FAILED,
+  XHCI_HUB_NOTIFY_RING_FAILED,
+  XHCI_HUB_NOTIFY_WAITER_FAILED
+} xhci_hub_notify_result_t;
+
+typedef struct {
+  xhci_hub_notify_state_t state;
+  uint8_t slot_id;
+  uint8_t endpoint_id;
+  uint8_t completion_code;
+  uint8_t length;
+  uint16_t changes;
+  uint64_t transfer_trb;
+} xhci_hub_notify_info_t;
+
+xhci_hub_notify_result_t xhci_hub_notify_start(void);
+void xhci_hub_notify_service(void);
+bool xhci_hub_notify_get_info(xhci_hub_notify_info_t *info);
+
