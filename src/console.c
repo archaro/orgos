@@ -1540,6 +1540,27 @@ static void cmd_usb_hubirq_resume(void) {
         (unsigned int)result);
 }
 
+static void cmd_usb_changes(void) {
+  usb_change_stats_t stats = {0};
+  usb_change_get_stats(&stats);
+  console_puts("USB downstream change events:\n");
+  console_printf("  Recorded : %u\n", stats.recorded);
+  console_printf("  Consumed : %u\n", stats.consumed);
+  console_printf("  Queued   : %u\n", (unsigned int)stats.queued);
+  console_printf("  Acked    : %u\n", stats.acknowledgements);
+  console_printf("  Errors   : %u\n", stats.errors);
+  console_printf("  Failed   : %s\n", stats.failed ? "Yes" : "No");
+  if (stats.failed)
+    console_printf("  Error port: %u\n", (unsigned int)stats.last_error_port);
+  usb_change_event_t event = {0};
+  while (usb_change_read(&event)) {
+    console_printf( "  #%u port %u: status 0x%04x, change 0x%04x\n",
+        event.sequence, (unsigned int)event.port,
+        (unsigned int)event.status,
+        (unsigned int)event.change);
+  }
+}
+
 static void cmd_usb_hubirq(void) {
   xhci_hub_notify_info_t info = {0};
   if (!xhci_hub_notify_get_info(&info)) {
@@ -1561,6 +1582,10 @@ static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
   const char *other_args = args;
+  if (next_word_is(&args, "changes") && end_of_args(args)) {
+    cmd_usb_changes();
+    return;
+  }
   if (next_word_is(&other_args, "device") &&
       next_word_is(&other_args, "check") &&
       end_of_args(other_args)) {

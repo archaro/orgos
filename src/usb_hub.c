@@ -497,6 +497,43 @@ static usb_hub_result_t usb_hub_port_feature(
   return USB_HUB_OK;
 }
 
+usb_hub_result_t usb_hub_port_acknowledge(
+    uint8_t port, uint16_t changes) {
+
+  if (port == 0U || port > USB_HUB_PORTS)
+    return USB_HUB_INVALID_PORT;
+
+  // These are the port change bits currently
+  // supported by our USB 2.0 hub driver.
+  static const struct {
+    uint16_t bit;
+    uint16_t feature;
+  } features[] = {
+    { USB_HUB_C_CONNECTION, USB_HUB_CHANGE_CONNECTION },
+    { USB_HUB_C_ENABLE, USB_HUB_CHANGE_ENABLE },
+    { USB_HUB_C_RESET, USB_HUB_CHANGE_RESET }
+  };
+
+  // Do not silently discard unknown change flags.
+  if (changes & ~(USB_HUB_C_CONNECTION | USB_HUB_C_ENABLE | USB_HUB_C_RESET))
+    return USB_HUB_INVALID_RESPONSE;
+
+  for (unsigned int i = 0U;
+      i < sizeof(features) / sizeof(features[0]); i++) {
+    if (!(changes & features[i].bit))
+      continue;
+
+    xhci_control_info_t transfer = {0};
+    usb_hub_result_t result = usb_hub_port_feature(
+        port, USB_HUB_REQ_CLEAR_FEATURE, features[i].feature, &transfer);
+
+    if (result != USB_HUB_OK)
+      return result;
+  }
+
+  return USB_HUB_OK;
+}
+
 usb_hub_result_t usb_hub_port_debounce(uint8_t port, usb_hub_port_t *result) {
   if (!result)
     return USB_HUB_NOT_READY;

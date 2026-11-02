@@ -3,18 +3,29 @@
 
 #include "xhci.h"
 #include "usb.h"
+#include "usb_hub.h"
 #include "usb_midi_test.h"
 
 #define USB_ROOT_PORT 1U
 #define USB_HIGH_SPEED 3U
 #define USB_LINK_U0 0U
 #define USB_ROOT_EVENT_WAIT_MS 100U
+#define USB_CHANGE_QUEUE_CAPACITY 16U
 
 static bool usb_initialised;
 static usb_init_info_t usb_state;
 static bool usb_attempted;
 static bool usb_service_failed;
 static usb_port_monitor_info_t port_monitor;
+static usb_change_event_t change_queue[USB_CHANGE_QUEUE_CAPACITY];
+static unsigned int change_head;
+static unsigned int change_count;
+static usb_change_stats_t change_stats;
+
+// A completed notification may identify several ports.
+// Retain progress until all have been processed.
+static uint16_t change_pending_mask;
+static uint8_t change_next_port = 1U;
 
 static bool usb_port_valid(const xhci_port_t *port) {
   return port->connected && port->enabled && port->powered &&
@@ -228,6 +239,141 @@ static void usb_service_port_events(void) {
   }
 }
 
+bool usb_change_get_stats(usb_change_stats_t *stats) {
+  if (!stats)
+    return false;
+
+  *stats = change_stats;
+  stats->queued = (uint8_t)change_count;
+  return true;
+}
+
+bool usb_change_read(usb_change_event_t *event) {
+  if (!event || change_count == 0U)
+    return false;
+
+  *event = change_queue[change_head];
+  change_head = (change_head + 1U) % USB_CHANGE_QUEUE_CAPACITY;
+  change_count--;
+  change_stats.consumed++;
+
+  return true;
+}
+
+static void usb_change_enqueue( uint8_t port, const usb_hub_port_t *status) {
+  unsigned int tail = (change_head + change_count) %
+      USB_CHANGE_QUEUE_CAPACITY;
+
+  change_stats.recorded++;
+  change_queue[tail] = (usb_change_event_t){
+    .sequence = change_stats.recorded,
+    .port = port,
+    .status = status->status,
+    .change = status->change
+  };
+
+  change_count++;
+}
+
+static void usb_change_fail(uint8_t port) {
+  change_stats.failed = true;
+  change_stats.errors++;
+  change_stats.last_error_port = port;
+}
+
+static void usb_service_hub_changes(void) {
+  if (change_stats.failed)
+    return;
+
+  xhci_hub_notify_info_t notify = {0};
+  if (!xhci_hub_notify_get_info(&notify))
+    return;
+
+  if (notify.state == XHCI_HUB_NOTIFY_FAILED) {
+    usb_change_fail(0U);
+    return;
+  }
+
+  if (notify.state != XHCI_HUB_NOTIFY_COMPLETE)
+    return;
+
+  // Acquire the notification bitmap once.
+  if (change_pending_mask == 0U) {
+    change_pending_mask = notify.changes;
+    change_next_port = 1U;
+  }
+
+  // Bit zero reports hub-level changes, which
+  // require separate hub-status handling.
+  if (change_pending_mask & 1U) {
+    usb_change_fail(0U);
+    return;
+  }
+
+  usb_hub_init_info_t hub = {0};
+  if (!usb_hub_get_init_info(&hub) || hub.result != USB_HUB_INIT_OK) {
+    usb_change_fail(0U);
+    return;
+  }
+
+  uint16_t supported = (uint16_t)((1U << (hub.ports + 1U)) - 1U);
+  if (change_pending_mask & ~supported) {
+    usb_change_fail(0U);
+    return;
+  }
+
+  for (uint8_t port = change_next_port; port <= hub.ports; port++) {
+    uint16_t bit = (uint16_t)(1U << port);
+    if (!(change_pending_mask & bit))
+      continue;
+
+    // Pause without acknowledging anything if
+    // there is no room to preserve another event.
+    if (change_count == USB_CHANGE_QUEUE_CAPACITY) {
+      change_next_port = port;
+      return;
+    }
+
+    usb_hub_port_t status = {0};
+    usb_hub_result_t result = usb_hub_port_status(port, &status);
+
+    if (result != USB_HUB_OK) {
+      usb_change_fail(port);
+      return;
+    }
+
+    // Preserve the full snapshot before clearing
+    // any of its hardware change flags.
+    if (status.change != 0U) {
+      // Overcurrent and other unsupported changes
+      // require an explicit recovery policy.
+      if (status.change & ~((1U << 0) | (1U << 1) | (1U << 4))) {
+        usb_change_fail(port);
+        return;
+      }
+
+      usb_change_enqueue(port, &status);
+      result = usb_hub_port_acknowledge(port, status.change);
+      if (result != USB_HUB_OK) {
+        usb_change_fail(port);
+        return;
+      }
+
+      change_stats.acknowledgements++;
+    }
+    change_pending_mask &= (uint16_t)~bit;
+    change_next_port = port + 1U;
+  }
+
+  // All ports described by this notification
+  // have been recorded and acknowledged.
+  change_pending_mask = 0U;
+  change_next_port = 1U;
+
+  if (xhci_hub_notify_resume() != XHCI_HUB_NOTIFY_OK)
+    usb_change_fail(0U);
+}
+
 void usb_service(void) {
   if (!usb_initialised || usb_service_failed)
     return;
@@ -248,6 +394,10 @@ void usb_service(void) {
 
   // Finalise any internal hub interrupt notification.
   xhci_hub_notify_service();
+
+  // Record and acknowledge hub changes, then
+  // automatically rearm the notification endpoint.
+  usb_service_hub_changes();
 
   // Finalise and rearm completed Bulk IN transfers.
   xhci_bulk_in_stream_service();

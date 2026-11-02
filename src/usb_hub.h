@@ -28,6 +28,7 @@ typedef struct {
 } usb_hub_port_t;
 
 usb_hub_result_t usb_hub_port_status(uint8_t port, usb_hub_port_t *result);
+usb_hub_result_t usb_hub_port_acknowledge(uint8_t port, uint16_t changes);
 usb_hub_result_t usb_hub_port_debounce(uint8_t port, usb_hub_port_t *result);
 
 typedef enum {

@@ -43,3 +43,23 @@ typedef struct {
 
 bool usb_get_port_monitor_info(usb_port_monitor_info_t *result);
 
+typedef struct {
+  uint32_t sequence;
+  uint8_t port;
+  uint16_t status;
+  uint16_t change;
+} usb_change_event_t;
+
+typedef struct {
+  uint32_t recorded;
+  uint32_t consumed;
+  uint32_t acknowledgements;
+  uint32_t errors;
+  uint8_t queued;
+  uint8_t last_error_port;
+  bool failed;
+} usb_change_stats_t;
+
+bool usb_change_read(usb_change_event_t *event);
+bool usb_change_get_stats(usb_change_stats_t *stats);
+
