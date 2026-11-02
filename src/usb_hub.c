@@ -259,6 +259,19 @@ usb_hub_init_result_t usb_hub_init(usb_hub_init_info_t *info) {
     goto complete;
   }
 
+  // Configure the hub's interrupt-IN endpoint.
+  // Transfers are not yet armed.
+  xhci_interrupt_config_info_t interrupt = {0};
+  xhci_interrupt_config_result_t interrupt_result =
+      xhci_hub_interrupt_configure(state.interrupt_endpoint,
+          state.interrupt_mps, state.interrupt_interval, &interrupt);
+  if (interrupt_result != XHCI_INTERRUPT_CONFIG_OK) {
+    state.detail = (uint32_t)interrupt_result |
+        ((uint32_t)interrupt.completion_code << 8);
+    result = USB_HUB_INIT_INTERRUPT_FAILED;
+    goto complete;
+  }
+
   // Power the downstream ports and verify them.
   usb_hub_port_t power = {0};
   usb_hub_result_t power_result = usb_hub_power_on(power_good_ms, &power);

@@ -616,3 +616,27 @@ typedef struct {
 
 xhci_reset_result_t xhci_reset(xhci_reset_info_t *result);
 
+typedef enum {
+  XHCI_INTERRUPT_CONFIG_OK,
+  XHCI_INTERRUPT_CONFIG_NOT_READY,
+  XHCI_INTERRUPT_CONFIG_INVALID_ENDPOINT,
+  XHCI_INTERRUPT_CONFIG_ALLOCATION_FAILED,
+  XHCI_INTERRUPT_CONFIG_DMA_FAILED,
+  XHCI_INTERRUPT_CONFIG_COMMAND_FAILED,
+  XHCI_INTERRUPT_CONFIG_VERIFY_FAILED,
+  XHCI_INTERRUPT_CONFIG_ALREADY_ATTEMPTED
+} xhci_interrupt_config_result_t;
+
+typedef struct {
+  uint64_t ring;
+  uint8_t slot_id;
+  uint8_t endpoint_id;
+  uint8_t completion_code;
+  uint8_t interval;
+  xhci_command_result_t command_result;
+} xhci_interrupt_config_info_t;
+
+xhci_interrupt_config_result_t xhci_hub_interrupt_configure(
+    uint8_t address, uint16_t mps, uint8_t interval,
+    xhci_interrupt_config_info_t *info);
+

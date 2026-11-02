@@ -82,6 +82,7 @@
 #define XHCI_BULK_OUT_DCI  4U
 #define XHCI_EP_TYPE_OUT   2U
 #define XHCI_EP_TYPE_IN    6U
+#define XHCI_EP_TYPE_INTERRUPT_IN 7U
 #define XHCI_COMPLETION_SHORT_PACKET 13U
 
 typedef struct {
@@ -119,6 +120,12 @@ typedef struct {
   unsigned int bulk_in_cycle;
   bool bulk_in_ready;
   bool bulk_in_wrap_pending;
+  dma_buffer_t interrupt_ring;
+  dma_buffer_t interrupt_buffer;
+  uint8_t interrupt_dci;
+  uint8_t interrupt_interval;
+  uint16_t interrupt_mps;
+  bool interrupt_ready;
 } xhci_device_t;
 
 typedef enum {
@@ -139,6 +146,7 @@ typedef struct {
 
 static bool hub_configuration_attempted;
 static bool hub_configured;
+static bool hub_interrupt_attempted;
 #define XHCI_MAX_DEVICES 2U
 static xhci_device_t devices[XHCI_MAX_DEVICES];
 #define internal_hub devices[0]
@@ -3521,4 +3529,142 @@ xhci_noop_result_t xhci_noop(xhci_noop_info_t *result) {
   return XHCI_NOOP_UNAVAILABLE;
 }
 
+xhci_interrupt_config_result_t xhci_hub_interrupt_configure(
+    uint8_t address, uint16_t mps, uint8_t interval,
+    xhci_interrupt_config_info_t *info) {
+
+  if (!info)
+    return XHCI_INTERRUPT_CONFIG_NOT_READY;
+
+  *info = (xhci_interrupt_config_info_t){0};
+  info->command_result = XHCI_COMMAND_UNAVAILABLE;
+  if (hub_interrupt_attempted)
+    return XHCI_INTERRUPT_CONFIG_ALREADY_ATTEMPTED;
+
+  xhci_device_t *device = &internal_hub;
+  if (!hub_configured || !device->prepared ||
+      !device->addressed || device->slot_id == 0U ||
+      !controller_running || !controller_verified ||
+      command_outstanding || command_ring_failed ||
+      device->ep0_active || device->ep0_failed)
+    return XHCI_INTERRUPT_CONFIG_NOT_READY;
+
+  // This implementation supports a High-Speed hub.
+  // Interrupt-IN endpoint addresses are 0x81..0x8f.
+  if (device->speed != 3U || (address & 0xf0U) != 0x80U ||
+      (address & 0x0fU) == 0U || mps == 0U || mps > 64U ||
+      interval == 0U || interval > 16U)
+    return XHCI_INTERRUPT_CONFIG_INVALID_ENDPOINT;
+
+  uint8_t dci = (uint8_t)(2U * (address & 0x0fU) + 1U);
+  if (device->context_size != 32U && device->context_size != 64U)
+    return XHCI_INTERRUPT_CONFIG_NOT_READY;
+
+  if (device->input.owner != DMA_OWNER_DEVICE ||
+      device->output.owner != DMA_OWNER_DEVICE)
+    return XHCI_INTERRUPT_CONFIG_NOT_READY;
+
+  cache_info_t cache;
+  if (!cache_get_info(&cache) ||
+      cache.data_line_size == 0U ||
+      cache.data_line_size > PAGE_SIZE ||
+      (cache.data_line_size & (cache.data_line_size - 1U)))
+    return XHCI_INTERRUPT_CONFIG_DMA_FAILED;
+
+  // Do not retry after a partially completed operation.
+  hub_interrupt_attempted = true;
+
+  if (!xhci_bulk_ring_init(&device->interrupt_ring))
+    return XHCI_INTERRUPT_CONFIG_ALLOCATION_FAILED;
+
+  if (!dma_alloc(mps, 64U, &device->interrupt_buffer))
+    return XHCI_INTERRUPT_CONFIG_ALLOCATION_FAILED;
+
+  uint32_t size = device->context_size;
+  uint8_t *input = device->input.virtual;
+  uint8_t *output = device->output.virtual;
+  uint32_t *control = (uint32_t *)input;
+  uint32_t *slot = (uint32_t *)(input + size);
+  uint32_t *endpoint = (uint32_t *)(input + (dci + 1U) * size);
+
+  // Include the Slot Context and the new endpoint.
+  control[0] = 0U;
+  control[1] = 1U | (1U << dci);
+  // Context Entries identifies the highest valid DCI.
+  slot[0] = (slot[0] & ~(0x1fU << 27)) | ((uint32_t)dci << 27);
+
+  // High-Speed bInterval is an exponent.
+  // xHCI stores the exponent minus one.
+  uint8_t xhci_interval = interval - 1U;
+  uint64_t dequeue = device->interrupt_ring.bus | 1ULL;
+
+  // Endpoint Context DW0: polling interval.
+  endpoint[0] = (uint32_t)xhci_interval << 16;
+
+  // Endpoint Context DW1: interrupt-IN, CErr 3,
+  // no bursting, maximum packet size from descriptor.
+  endpoint[1] = ((uint32_t)mps << 16) |
+      (XHCI_EP_TYPE_INTERRUPT_IN << 3) | (3U << 1);
+
+  // Endpoint Context DW2/DW3: transfer ring and DCS.
+  endpoint[2] = (uint32_t)dequeue;
+  endpoint[3] = (uint32_t)(dequeue >> 32);
+
+  // Max ESIT Payload = one maximum-sized packet.
+  // Average TRB Length = one maximum-sized packet.
+  endpoint[4] = ((uint32_t)mps << 16) | mps;
+
+  info->slot_id = device->slot_id;
+  info->endpoint_id = dci;
+  info->interval = xhci_interval;
+  info->ring = device->interrupt_ring.bus;
+
+  // Publish the transfer ring before configuring
+  // the endpoint that will reference it.
+  if (!dma_begin_device( &device->interrupt_ring, DMA_BIDIRECTIONAL))
+    return XHCI_INTERRUPT_CONFIG_DMA_FAILED;
+
+  // Publish the Input Context, including the new
+  // endpoint entry and updated Slot Context.
+  if (!cache_clean(input, (dci + 2U) * size))
+    return XHCI_INTERRUPT_CONFIG_DMA_FAILED;
+
+  __asm__ volatile("dsb sy" ::: "memory");
+
+  xhci_trb_t command = {
+    .parameter = device->input.bus,
+    .status = 0U,
+    .control = (XHCI_TRB_CONFIGURE_ENDPOINT << XHCI_TRB_TYPE_SHIFT) |
+        ((uint32_t)device->slot_id << 24)
+  };
+
+  xhci_command_completion_t completion = {0};
+  xhci_command_result_t result = xhci_command_submit(&command, &completion);
+
+  info->command_result = result;
+  info->completion_code = completion.completion_code;
+
+  if (result != XHCI_COMMAND_OK || completion.slot_id != device->slot_id)
+    return XHCI_INTERRUPT_CONFIG_COMMAND_FAILED;
+
+  // Inspect the controller-owned Output Context.
+  if (!cache_invalidate(output, (dci + 1U) * size))
+    return XHCI_INTERRUPT_CONFIG_DMA_FAILED;
+
+  uint32_t *output_slot = (uint32_t *)output;
+  uint32_t *output_endpoint = (uint32_t *)(output + dci * size);
+  if (((output_slot[0] >> 27) & 0x1fU) != dci ||
+      (output_endpoint[0] & 0x07U) != 1U ||
+      ((output_endpoint[0] >> 16) & 0xffU) != xhci_interval ||
+      ((output_endpoint[1] >> 16) & 0xffffU) != mps ||
+      ((output_endpoint[1] >> 3) & 0x07U) != XHCI_EP_TYPE_INTERRUPT_IN)
+    return XHCI_INTERRUPT_CONFIG_VERIFY_FAILED;
+
+  device->interrupt_dci = dci;
+  device->interrupt_interval = xhci_interval;
+  device->interrupt_mps = mps;
+  device->interrupt_ready = true;
+
+  return XHCI_INTERRUPT_CONFIG_OK;
+}
 
