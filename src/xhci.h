@@ -728,6 +728,9 @@ typedef struct {
   bool bulk_in_completed;
   bool bulk_in_failed;
   uint8_t bulk_in_completion_code;
+  bool endpoint_states_valid;
+  uint8_t bulk_in_ep_state;
+  uint8_t bulk_out_ep_state;
 } xhci_downstream_transfer_state_t;
 
 bool xhci_downstream_transfer_state(xhci_downstream_transfer_state_t *state);

@@ -3879,6 +3879,37 @@ bool xhci_downstream_is_quiesced(void) {
   return downstream_quiesced;
 }
 
+static bool xhci_downstream_endpoint_states(
+    uint8_t *in_state, uint8_t *out_state) {
+
+  if (!in_state || !out_state)
+    return false;
+
+  xhci_device_t *device = &devices[1];
+  if (!device->addressed || device->slot_id == 0U ||
+      downstream_slot_disabled || device->output.owner != DMA_OWNER_DEVICE ||
+      (device->context_size != 32U && device->context_size != 64U))
+    return false;
+
+  // The Output Device Context belongs to the controller.
+  // Invalidate its cache lines before inspecting it.
+  uint32_t size = device->context_size;
+  uint8_t *output = device->output.virtual;
+
+  if (!output)
+    return false;
+
+  if (!cache_invalidate(output, (XHCI_BULK_OUT_DCI + 1U) * size))
+    return false;
+
+  uint32_t *in = (uint32_t *)(output + XHCI_BULK_IN_DCI * size);
+  uint32_t *out = (uint32_t *)(output + XHCI_BULK_OUT_DCI * size);
+  *in_state = (uint8_t)(in[0] & 0x07U);
+  *out_state = (uint8_t)(out[0] & 0x07U);
+
+  return true;
+}
+
 bool xhci_downstream_transfer_state(xhci_downstream_transfer_state_t *state) {
   if (!state)
     return false;
@@ -3894,6 +3925,8 @@ bool xhci_downstream_transfer_state(xhci_downstream_transfer_state_t *state) {
   state->bulk_in_completed = bulk_in_waiter && bulk_in_waiter->completed;
   state->bulk_in_failed = bulk_in_state == XHCI_BULK_IN_FAILED;
   state->bulk_in_completion_code = bulk_in_info.completion_code;
+  state->endpoint_states_valid = xhci_downstream_endpoint_states(
+          &state->bulk_in_ep_state, &state->bulk_out_ep_state);
 
   for (unsigned int i = 0U; i < XHCI_EVENT_WAITERS; i++) {
     const xhci_event_waiter_t *waiter = &event_waiters[i];

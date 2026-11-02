@@ -1327,6 +1327,17 @@ static void cmd_usb_rearm(void) {
     console_puts("USB enumeration rearm not ready.\n");
 }
 
+static const char *xhci_ep_state_name(uint8_t state) {
+  switch (state) {
+    case 0U: return "Disabled";
+    case 1U: return "Running";
+    case 2U: return "Halted";
+    case 3U: return "Stopped";
+    case 4U: return "Error";
+    default: return "Unknown";
+  }
+}
+
 static void cmd_usb_transfers(void) {
   xhci_downstream_transfer_state_t state = {0};
   if (!xhci_downstream_transfer_state(&state)) {
@@ -1350,7 +1361,17 @@ static void cmd_usb_transfers(void) {
   console_printf("  Bulk IN failed: %s\n",
       state.bulk_in_failed ? "Yes" : "No");
   console_printf("  IN completion : %u\n",
-      (unsigned int)state.bulk_in_completion_code);
+	  (unsigned int)state.bulk_in_completion_code);
+  if (state.endpoint_states_valid) {
+    console_printf("  IN endpoint   : %s (%u)\n",
+        xhci_ep_state_name(state.bulk_in_ep_state),
+        (unsigned int)state.bulk_in_ep_state);
+    console_printf("  OUT endpoint  : %s (%u)\n",
+        xhci_ep_state_name(state.bulk_out_ep_state),
+        (unsigned int)state.bulk_out_ep_state);
+  } else {
+    console_puts("  Endpoint state: Unavailable\n");
+  }
 }
 
 static void cmd_usb_test_midiout(void) {
