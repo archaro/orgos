@@ -1291,6 +1291,14 @@ static void cmd_usb_disable(void) {
   console_printf("  Completion : %u\n", (unsigned int)info.completion_code);
 }
 
+static void cmd_usb_detach(void) {
+  if (usb_device_finalize_disconnect()) {
+    console_puts("USB device detached.\n");
+  } else {
+    console_puts("USB detach not ready.\n");
+  }
+}
+
 static void cmd_usb_cleanup(void) {
   xhci_cleanup_info_t info = {0};
   xhci_cleanup_result_t result = xhci_downstream_cleanup(&info);
@@ -1604,6 +1612,10 @@ static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
   const char *other_args = args;
+  if (next_word_is(&args, "detach") && end_of_args(args)) {
+    cmd_usb_detach();
+    return;
+  }
   if (next_word_is(&args, "cleanup") && end_of_args(args)) {
     cmd_usb_cleanup();
     return;
@@ -1691,7 +1703,7 @@ static void cmd_usb(const char *args) {
   if (!end_of_args(args)) {
     console_puts(
         "Usage: usb [scan | state | ports | events | device | devices | "
-        "disable | cleanup | hubports | hubirq | enumerate | test]\n");
+        "disable | cleanup | detach | hubports | hubirq | enumerate | test]\n");
     return;
   }
 

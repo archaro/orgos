@@ -411,3 +411,25 @@ void usb_device_port_changed(uint8_t port, uint16_t status, uint16_t change) {
   // They are not yet safe to reuse.
   current_device.state = USB_DEVICE_DISCONNECTING;
 }
+
+bool usb_device_finalize_disconnect(void) {
+  if (!device_record_valid ||
+      current_device.state != USB_DEVICE_DISCONNECTING ||
+      !xhci_downstream_is_quiesced() || !xhci_downstream_is_cleaned())
+    return false;
+
+  // Controller teardown is complete.
+  // Invalidate the old device identity.
+  current_device.slot_id = 0U;
+  current_device.address = 0U;
+  current_device.vendor_id = 0U;
+  current_device.product_id = 0U;
+  current_device.speed = USB_SPEED_UNKNOWN;
+
+  // Preserve topology and generation
+  // for subsequent diagnostics.
+  current_device.state = USB_DEVICE_DETACHED;
+
+  return true;
+}
+
