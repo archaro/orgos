@@ -210,6 +210,7 @@ static bool slot_requested;
 static bool downstream_slot_requested;
 static bool downstream_disable_attempted;
 static bool downstream_slot_disabled;
+static bool downstream_cleaned;
 static uint8_t internal_hub_slot;
 
 static uint32_t xhci_read(uint32_t offset) {
@@ -3878,8 +3879,97 @@ bool xhci_downstream_is_quiesced(void) {
   return downstream_quiesced;
 }
 
-xhci_disable_result_t xhci_downstream_disable(xhci_disable_info_t *info) {
+static bool xhci_release_buffer(
+    dma_buffer_t *buffer, xhci_cleanup_info_t *info) {
 
+  if (!buffer->pages)
+    return true;
+
+  // Disable Slot has completed.
+  // The controller no longer uses
+  // this device's allocations.
+  if (buffer->owner == DMA_OWNER_DEVICE && !dma_end_device(buffer))
+    return false;
+
+  unsigned int pages = buffer->pages;
+
+  if (!dma_free(buffer))
+    return false;
+
+  info->buffers_released++;
+  info->pages_released += pages;
+
+  return true;
+}
+
+bool xhci_downstream_is_cleaned(void) {
+  return downstream_cleaned;
+}
+
+xhci_cleanup_result_t xhci_downstream_cleanup(xhci_cleanup_info_t *info) {
+  if (!info)
+    return XHCI_CLEANUP_NOT_READY;
+
+  *info = (xhci_cleanup_info_t){0};
+
+  if (downstream_cleaned)
+    return XHCI_CLEANUP_ALREADY_DONE;
+
+  xhci_device_t *device = &devices[1];
+  if (!downstream_slot_disabled || !downstream_quiesced ||
+      device->slot_id == 0U || !controller_running ||
+      !controller_verified || command_outstanding ||
+      command_ring_failed || device->ep0_active || device->bulk_out_active)
+    return XHCI_CLEANUP_NOT_READY;
+
+  info->slot_id = device->slot_id;
+
+  // Never destroy the state belonging
+  // to an unresolved transfer.
+  for (unsigned int i = 0U; i < XHCI_EVENT_WAITERS; i++) {
+    xhci_event_waiter_t *waiter = &event_waiters[i];
+    if (waiter->active && waiter->slot_id == device->slot_id)
+      return XHCI_CLEANUP_BUSY;
+  }
+
+  // Keep the DMA descriptors intact
+  // until each allocation is released.
+  if (!xhci_release_buffer(&device->bulk_in_buffer, info))
+    return XHCI_CLEANUP_DMA_FAILED;
+
+  if (!xhci_release_buffer(&device->bulk_out_buffer, info))
+    return XHCI_CLEANUP_DMA_FAILED;
+
+  if (!xhci_release_buffer(&device->control_buffer, info))
+    return XHCI_CLEANUP_DMA_FAILED;
+
+  if (!xhci_release_buffer(&device->bulk_in_ring, info))
+    return XHCI_CLEANUP_DMA_FAILED;
+
+  if (!xhci_release_buffer(&device->bulk_out_ring, info))
+    return XHCI_CLEANUP_DMA_FAILED;
+
+  if (!xhci_release_buffer(&device->ep0_ring, info))
+    return XHCI_CLEANUP_DMA_FAILED;
+
+  if (!xhci_release_buffer(&device->input, info))
+    return XHCI_CLEANUP_DMA_FAILED;
+
+  if (!xhci_release_buffer(&device->output, info))
+    return XHCI_CLEANUP_DMA_FAILED;
+
+  // Leave the old slot identity intact
+  // until software teardown completes.
+  device->bulk_in_ready = false;
+  device->bulk_out_ready = false;
+  device->prepared = false;
+  device->addressed = false;
+
+  downstream_cleaned = true;
+  return XHCI_CLEANUP_OK;
+}
+
+xhci_disable_result_t xhci_downstream_disable(xhci_disable_info_t *info) {
   if (!info)
     return XHCI_DISABLE_NOT_READY;
 

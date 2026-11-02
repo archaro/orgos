@@ -302,6 +302,23 @@ typedef struct {
 xhci_disable_result_t xhci_downstream_disable(xhci_disable_info_t *info);
 
 typedef enum {
+  XHCI_CLEANUP_OK,
+  XHCI_CLEANUP_NOT_READY,
+  XHCI_CLEANUP_BUSY,
+  XHCI_CLEANUP_DMA_FAILED,
+  XHCI_CLEANUP_ALREADY_DONE
+} xhci_cleanup_result_t;
+
+typedef struct {
+  uint8_t slot_id;
+  uint8_t buffers_released;
+  uint32_t pages_released;
+} xhci_cleanup_info_t;
+
+xhci_cleanup_result_t xhci_downstream_cleanup(xhci_cleanup_info_t *info);
+bool xhci_downstream_is_cleaned(void);
+
+typedef enum {
   XHCI_DEVICE_OK,
   XHCI_DEVICE_NOT_READY,
   XHCI_DEVICE_ALREADY_PREPARED,
