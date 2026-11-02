@@ -1152,6 +1152,39 @@ static void cmd_usb_hubports(void) {
   }
 }
 
+static void cmd_usb_device_check(void) {
+  usb_device_t device = {0};
+  if (!usb_get_device(&device) || device.state == USB_DEVICE_DETACHED) {
+    console_puts("No tracked downstream device.\n");
+    return;
+  }
+  usb_hub_port_t port = {0};
+  usb_hub_result_t result = usb_hub_port_status(device.parent_port, &port);
+  if (result != USB_HUB_OK) {
+    console_printf("Hub port %u: status read failed (%u).\n",
+        (unsigned int)device.parent_port, (unsigned int)result);
+    return;
+  }
+  bool connected = (port.status & (1U << 0)) != 0U;
+  bool enabled = (port.status & (1U << 1)) != 0U;
+  bool powered = (port.status & (1U << 8)) != 0U;
+  bool changed = (port.change & (1U << 0)) != 0U;
+  console_printf("USB device connection check:\n");
+  console_printf("  Hub port       : %u\n", (unsigned int)device.parent_port);
+  console_printf("  Recorded state : %s\n",
+      usb_device_state_name(device.state));
+  console_printf("  Port status    : 0x%04x\n", (unsigned int)port.status);
+  console_printf("  Port change    : 0x%04x\n", (unsigned int)port.change);
+  console_printf("  Connected      : %s\n", connected ? "Yes" : "No");
+  console_printf("  Enabled        : %s\n", enabled ? "Yes" : "No");
+  console_printf("  Powered        : %s\n", powered ? "Yes" : "No");
+  console_printf("  Conn. changed  : %s\n", changed ? "Yes" : "No");
+  if (!connected || !enabled || !powered || changed)
+    console_puts("  Result         : Device requires attention\n");
+  else
+    console_puts("  Result         : Port appears operational\n");
+}
+
 static void cmd_usb_devices(void) {
   usb_device_t device = {0};
   console_puts("USB device inventory:\n");
@@ -1465,6 +1498,12 @@ static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
   const char *other_args = args;
+  if (next_word_is(&other_args, "device") &&
+      next_word_is(&other_args, "check") &&
+      end_of_args(other_args)) {
+    cmd_usb_device_check();
+    return;
+  }
   if (next_word_is(&args, "devices") && end_of_args(args)) {
     cmd_usb_devices();
     return;
@@ -1515,7 +1554,7 @@ static void cmd_usb(const char *args) {
 
   if (!end_of_args(args)) {
     console_puts(
-        "Usage: usb [state | ports | events | devices | "
+        "Usage: usb [state | ports | events | device | devices | "
         "hubports | enumerate | test]\n");
     return;
   }
