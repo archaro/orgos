@@ -319,6 +319,15 @@ xhci_cleanup_result_t xhci_downstream_cleanup(xhci_cleanup_info_t *info);
 bool xhci_downstream_is_cleaned(void);
 
 typedef enum {
+  XHCI_RECYCLE_OK,
+  XHCI_RECYCLE_NOT_READY,
+  XHCI_RECYCLE_BUSY,
+  XHCI_RECYCLE_DMA_FAILED
+} xhci_recycle_result_t;
+
+xhci_recycle_result_t xhci_downstream_recycle(void);
+
+typedef enum {
   XHCI_DEVICE_OK,
   XHCI_DEVICE_NOT_READY,
   XHCI_DEVICE_ALREADY_PREPARED,

@@ -1310,6 +1310,16 @@ static void cmd_usb_cleanup(void) {
       xhci_downstream_is_cleaned() ? "Yes" : "No");
 }
 
+static void cmd_usb_recycle(void) {
+  usb_device_t device = {0};
+  if (!usb_get_device(&device) || device.state != USB_DEVICE_DETACHED) {
+    console_puts("USB device is not detached.\n");
+    return;
+  }
+  xhci_recycle_result_t result = xhci_downstream_recycle();
+  console_printf("USB recycle: %u\n", (unsigned int)result);
+}
+
 static void cmd_usb_test_midiout(void) {
   usb_enum_info_t enumeration = {0};
   if (!usb_get_enumeration(&enumeration) ||
@@ -1612,6 +1622,10 @@ static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
   const char *other_args = args;
+  if (next_word_is(&args, "recycle") && end_of_args(args)) {
+    cmd_usb_recycle();
+    return;
+  }
   if (next_word_is(&args, "detach") && end_of_args(args)) {
     cmd_usb_detach();
     return;
@@ -1703,7 +1717,7 @@ static void cmd_usb(const char *args) {
   if (!end_of_args(args)) {
     console_puts(
         "Usage: usb [scan | state | ports | events | device | devices | "
-        "disable | cleanup | detach | hubports | hubirq | enumerate | test]\n");
+        "disable | cleanup | detach | recycle | hubports | hubirq | enumerate | test]\n");
     return;
   }
 

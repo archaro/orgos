@@ -4021,3 +4021,79 @@ xhci_disable_result_t xhci_downstream_disable(xhci_disable_info_t *info) {
   return XHCI_DISABLE_OK;
 }
 
+xhci_recycle_result_t xhci_downstream_recycle(void) {
+  xhci_device_t *device = &devices[1];
+
+  if (!downstream_slot_disabled || !downstream_cleaned ||
+      !downstream_quiesced || !controller_running || !controller_verified ||
+      command_outstanding || command_ring_failed || device->slot_id == 0U)
+    return XHCI_RECYCLE_NOT_READY;
+
+  // The continuous receiver is not yet equipped
+  // with a cancellation and teardown path.
+  if (bulk_in_stream_started || bulk_in_waiter || device->ep0_active ||
+      device->bulk_out_active)
+    return XHCI_RECYCLE_BUSY;
+
+  // No completion owner may remain for this slot.
+  for (unsigned int i = 0U; i < XHCI_EVENT_WAITERS; i++) {
+    xhci_event_waiter_t *waiter = &event_waiters[i];
+    if (waiter->active && waiter->slot_id == device->slot_id)
+      return XHCI_RECYCLE_BUSY;
+  }
+
+  // Cleanup must have released every allocation.
+  if (device->input.pages || device->output.pages ||
+      device->ep0_ring.pages || device->control_buffer.pages ||
+      device->bulk_in_ring.pages || device->bulk_out_ring.pages ||
+      device->bulk_in_buffer.pages || device->bulk_out_buffer.pages)
+    return XHCI_RECYCLE_BUSY;
+
+  dma_buffer_t *dcbaa_buffer = &controller_dma.dcbaa;
+  if (dcbaa_buffer->owner != DMA_OWNER_DEVICE)
+    return XHCI_RECYCLE_DMA_FAILED;
+
+  cache_info_t cache;
+  if (!cache_get_info(&cache) || cache.data_line_size == 0U ||
+      cache.data_line_size > PAGE_SIZE ||
+      (cache.data_line_size & (cache.data_line_size - 1U)))
+    return XHCI_RECYCLE_DMA_FAILED;
+
+  // Disable Slot has succeeded. Remove the
+  // obsolete Output Device Context pointer.
+  uint64_t *dcbaa = dcbaa_buffer->virtual;
+  uint8_t slot = device->slot_id;
+  dcbaa[slot] = 0ULL;
+  uintptr_t address = (uintptr_t)&dcbaa[slot];
+  address &= ~(uintptr_t)(cache.data_line_size - 1U);
+  if (!cache_clean((const void *)address, cache.data_line_size))
+    return XHCI_RECYCLE_DMA_FAILED;
+
+  __asm__ volatile("dsb sy" ::: "memory");
+
+  // All downstream allocations have been freed.
+  // Discard the old software device context.
+  *device = (xhci_device_t){0};
+
+  // These guards belong to the old device
+  // generation, not to the controller lifetime.
+  downstream_slot_requested = false;
+  downstream_address_attempted = false;
+  downstream_ep0_update_attempted = false;
+  downstream_bulk_attempted = false;
+  downstream_quiesced = false;
+  downstream_disable_attempted = false;
+  downstream_slot_disabled = false;
+  downstream_cleaned = false;
+
+  bulk_in_state = XHCI_BULK_IN_IDLE;
+  bulk_in_info = (xhci_bulk_in_info_t){0};
+  bulk_in_queue_head = 0U;
+  bulk_in_queue_count = 0U;
+  bulk_in_stream_queued = false;
+  bulk_in_stream_failed = false;
+  bulk_in_stream_stats = (xhci_bulk_in_stream_stats_t){0};
+
+  return XHCI_RECYCLE_OK;
+}
+
