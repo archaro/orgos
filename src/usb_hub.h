@@ -27,6 +27,24 @@ typedef struct {
   xhci_control_result_t transfer_result;
 } usb_hub_port_t;
 
+typedef enum {
+  USB_HUB_INIT_OK,
+  USB_HUB_INIT_NOT_READY,
+  USB_HUB_INIT_CONFIG_FAILED,
+  USB_HUB_INIT_DESCRIPTOR_FAILED,
+  USB_HUB_INIT_CONTEXT_FAILED,
+  USB_HUB_INIT_POWER_FAILED
+} usb_hub_init_result_t;
+
+typedef struct {
+  usb_hub_init_result_t result;
+  uint32_t detail;
+  uint8_t ports;
+} usb_hub_init_info_t;
+
+usb_hub_init_result_t usb_hub_init(usb_hub_init_info_t *info);
+bool usb_hub_get_init_info(usb_hub_init_info_t *info);
+
 usb_hub_result_t usb_hub_port_status(uint8_t port, usb_hub_port_t *result);
 usb_hub_result_t usb_hub_port_debounce(uint8_t port, usb_hub_port_t *result);
 

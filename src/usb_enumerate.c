@@ -9,9 +9,8 @@
 
 #define USB_DESC_DEVICE 0x01U
 #define USB_DESC_CONFIGURATION 0x02U
-#define USB_DESC_HUB 0x29U
 
-#define USB_REQ_GET_DESCRIPTOR 0x06U
+#define USB_REQ_GET_DESCRIPTOR    0x06U
 #define USB_REQ_GET_CONFIGURATION 0x08U
 #define USB_REQ_SET_CONFIGURATION 0x09U
 
@@ -45,76 +44,6 @@ static bool control_in(bool downstream, uint8_t request_type,
 
   return result == XHCI_CONTROL_OK &&
       info->length == length;
-}
-
-static usb_enum_result_t configure_hub(usb_enum_info_t *state) {
-  xhci_control_info_t info;
-
-  if (!control_in(false, 0x80U, USB_REQ_GET_CONFIGURATION,
-      0U, 1U, &info)) {
-    state->detail = info.completion_code;
-    return USB_ENUM_HUB_CONFIG_FAILED;
-  }
-
-  if (info.data[0] == 0U) {
-    xhci_setup_packet_t setup = {
-      .request_type = 0x00U,
-      .request = USB_REQ_SET_CONFIGURATION,
-      .value = 1U,
-      .index = 0U,
-      .length = 0U
-    };
-
-    if (xhci_control_no_data(&setup, &info) != XHCI_CONTROL_OK) {
-      state->detail = info.completion_code;
-      return USB_ENUM_HUB_CONFIG_FAILED;
-    }
-  } else if (info.data[0] != 1U) {
-    state->detail = info.data[0];
-    return USB_ENUM_HUB_CONFIG_FAILED;
-  }
-
-  if (!control_in(false, 0x80U, USB_REQ_GET_CONFIGURATION,
-      0U, 1U, &info) || info.data[0] != 1U) {
-    state->detail = info.completion_code;
-    return USB_ENUM_HUB_CONFIG_FAILED;
-  }
-
-  if (!control_in(false, 0xa0U, USB_REQ_GET_DESCRIPTOR,
-      (uint16_t)(USB_DESC_HUB << 8), 9U, &info) ||
-      info.data[0] != 9U || info.data[1] != USB_DESC_HUB) {
-    state->detail = info.completion_code;
-    return USB_ENUM_HUB_CONTEXT_FAILED;
-  }
-
-  uint8_t ports = info.data[2];
-  uint16_t characteristics = read_u16(&info.data[3]);
-  uint8_t ttt = (uint8_t)((characteristics >> 5) & 3U);
-  // bPwrOn2PwrGood is expressed in units of 2 ms.
-  uint32_t power_good_ms = (uint32_t)info.data[5] * 2U;
-
-  // Current USB hub driver supports precisely four ports.
-  if (ports != 4U) {
-    state->detail = ports;
-    return USB_ENUM_HUB_CONTEXT_FAILED;
-  }
-
-  state->hub_ports = ports;
-  xhci_hub_info_t hub;
-  xhci_hub_result_t result = xhci_hub_configure(ports, ttt, &hub);
-  if (result != XHCI_HUB_OK) {
-    state->detail = (uint32_t)result;
-    return USB_ENUM_HUB_CONTEXT_FAILED;
-  }
-
-  usb_hub_port_t power;
-  usb_hub_result_t power_result = usb_hub_power_on(power_good_ms, &power);
-  if (power_result != USB_HUB_OK) {
-    state->detail = (uint32_t)power_result;
-    return USB_ENUM_HUB_POWER_FAILED;
-  }
-
-  return USB_ENUM_OK;
 }
 
 static usb_enum_result_t discover_port(usb_enum_info_t *state) {
@@ -370,18 +299,23 @@ usb_enum_result_t usb_enumerate(usb_enum_info_t *info) {
       root.result != USB_INIT_OK || root.address == 0U)
     return USB_ENUM_NOT_READY;
 
+  // The internal hub must be configured and powered
+  // before downstream devices can be enumerated.
+  usb_hub_init_info_t hub = {0};
+  if (!usb_hub_get_init_info(&hub) || hub.result != USB_HUB_INIT_OK)
+    return USB_ENUM_NOT_READY;
+
   // Some enumeration operations are not safe to retry
   // following an uncertain command completion.
   enumeration_attempted = true;
   usb_enum_info_t state = {0};
+
   // Start with no downstream device identified.
   current_device = (usb_device_t){0};
   current_device.state = USB_DEVICE_DETACHED;
   device_record_valid = true;
-  usb_enum_result_t result = configure_hub(&state);
-
-  if (result != USB_ENUM_OK)
-    goto complete;
+  state.hub_ports = hub.ports;
+  usb_enum_result_t result = USB_ENUM_OK;
 
   result = discover_port(&state);
   if (result != USB_ENUM_OK)

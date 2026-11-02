@@ -11,12 +11,15 @@
 #define USB_RT_HUB_PORT_IN 0xA3U
 #define USB_RT_HUB_PORT_OUT 0x23U
 
-#define USB_REQ_GET_STATUS 0x00U
-#define USB_REQ_SET_FEATURE 0x03U
-#define USB_REQ_GET_CONFIGURATION 0x08U
-#define USB_HUB_REQ_CLEAR_FEATURE 0x01U
-#define USB_HUB_REQ_SET_FEATURE   0x03U
-#define USB_HUB_PORT_REQUEST_OUT  0x23U
+#define USB_REQ_GET_STATUS         0x00U
+#define USB_REQ_SET_FEATURE        0x03U
+#define USB_REQ_GET_CONFIGURATION  0x08U
+#define USB_REQ_SET_CONFIGURATION  0x09U
+#define USB_REQ_GET_DESCRIPTOR     0x06U
+#define USB_DESC_HUB               0x29U
+#define USB_HUB_REQ_CLEAR_FEATURE  0x01U
+#define USB_HUB_REQ_SET_FEATURE    0x03U
+#define USB_HUB_PORT_REQUEST_OUT   0x23U
 
 #define USB_HUB_C_CONNECTION       (1U << 0)
 #define USB_HUB_C_ENABLE           (1U << 1)
@@ -43,6 +46,147 @@
 
 #define USB_HUB_PORT_POWER 8U
 #define USB_HUB_POWER_MIN_DELAY_MS 120U
+
+static bool hub_init_attempted;
+static usb_hub_init_info_t hub_init_state;
+
+static uint16_t usb_hub_read_u16(const uint8_t *p) {
+  return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+}
+
+bool usb_hub_get_init_info(usb_hub_init_info_t *info) {
+  if (!info || !hub_init_attempted)
+    return false;
+
+  *info = hub_init_state;
+  return true;
+}
+
+usb_hub_init_result_t usb_hub_init(usb_hub_init_info_t *info) {
+  if (!info)
+    return USB_HUB_INIT_NOT_READY;
+
+  if (hub_init_attempted) {
+    *info = hub_init_state;
+    return hub_init_state.result;
+  }
+
+  usb_init_info_t root;
+  if (!usb_get_init_info(&root) ||
+      root.result != USB_INIT_OK || root.address == 0U)
+    return USB_HUB_INIT_NOT_READY;
+
+  hub_init_attempted = true;
+  usb_hub_init_info_t state = {0};
+  usb_hub_init_result_t result = USB_HUB_INIT_OK;
+  xhci_control_info_t transfer = {0};
+
+  // Inspect the existing hub configuration.
+  xhci_setup_packet_t setup = {
+    .request_type = 0x80U,
+    .request = USB_REQ_GET_CONFIGURATION,
+    .value = 0U,
+    .index = 0U,
+    .length = 1U
+  };
+
+  xhci_control_result_t status = xhci_control_in(&setup, &transfer);
+
+  if (status != XHCI_CONTROL_OK || transfer.length != 1U) {
+    state.detail = (uint32_t)status;
+    result = USB_HUB_INIT_CONFIG_FAILED;
+    goto complete;
+  }
+
+  if (transfer.data[0] == 0U) {
+    setup.request_type = 0x00U;
+    setup.request = USB_REQ_SET_CONFIGURATION;
+    setup.value = 1U;
+    setup.length = 0U;
+
+    status = xhci_control_no_data(&setup, &transfer);
+    if (status != XHCI_CONTROL_OK) {
+      state.detail = (uint32_t)status;
+      result = USB_HUB_INIT_CONFIG_FAILED;
+      goto complete;
+    }
+  } else if (transfer.data[0] != 1U) {
+    state.detail = transfer.data[0];
+    result = USB_HUB_INIT_CONFIG_FAILED;
+    goto complete;
+  }
+
+  // Verify that configuration 1 is active.
+  setup.request_type = 0x80U;
+  setup.request = USB_REQ_GET_CONFIGURATION;
+  setup.value = 0U;
+  setup.length = 1U;
+
+  status = xhci_control_in(&setup, &transfer);
+  if (status != XHCI_CONTROL_OK ||
+      transfer.length != 1U ||
+      transfer.data[0] != 1U) {
+    state.detail = (uint32_t)status;
+    result = USB_HUB_INIT_CONFIG_FAILED;
+    goto complete;
+  }
+
+  // Read the USB 2.0 hub descriptor.
+  setup.request_type = 0xa0U;
+  setup.request = USB_REQ_GET_DESCRIPTOR;
+  setup.value = (uint16_t)(USB_DESC_HUB << 8);
+  setup.length = 9U;
+
+  status = xhci_control_in(&setup, &transfer);
+  if (status != XHCI_CONTROL_OK ||
+      transfer.length != 9U ||
+      transfer.data[0] != 9U ||
+      transfer.data[1] != USB_DESC_HUB) {
+    state.detail = (uint32_t)status;
+    result = USB_HUB_INIT_DESCRIPTOR_FAILED;
+    goto complete;
+  }
+
+  uint8_t ports = transfer.data[2];
+  uint16_t characteristics = usb_hub_read_u16(&transfer.data[3]);
+  uint8_t ttt = (uint8_t)((characteristics >> 5) & 3U);
+  uint32_t power_good_ms = (uint32_t)transfer.data[5] * 2U;
+
+  // The present driver supports the Pi 4B's
+  // four-port internal USB 2.0 hub.
+  if (ports != USB_HUB_PORTS) {
+    state.detail = ports;
+    result = USB_HUB_INIT_DESCRIPTOR_FAILED;
+    goto complete;
+  }
+
+  state.ports = ports;
+
+  // Inform xHCI that this device is a hub.
+  xhci_hub_info_t hub = {0};
+  xhci_hub_result_t hub_result = xhci_hub_configure(ports, ttt, &hub);
+  if (hub_result != XHCI_HUB_OK) {
+    state.detail = (uint32_t)hub_result;
+    result = USB_HUB_INIT_CONTEXT_FAILED;
+    goto complete;
+  }
+
+  // Power the downstream ports and verify them.
+  usb_hub_port_t power = {0};
+  usb_hub_result_t power_result = usb_hub_power_on(power_good_ms, &power);
+  if (power_result != USB_HUB_OK) {
+    state.detail = (uint32_t)power_result;
+    result = USB_HUB_INIT_POWER_FAILED;
+    goto complete;
+  }
+
+complete:
+  state.result = result;
+  hub_init_state = state;
+  *info = state;
+
+  return result;
+}
 
 usb_hub_result_t usb_hub_port_status(uint8_t port, usb_hub_port_t *result) {
 

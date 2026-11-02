@@ -1125,14 +1125,16 @@ static void cmd_usb_hubports(void) {
     console_puts("    Powered    : ");
     console_puts((status & (1U << 8)) ? "Yes\n" : "No\n");
     console_puts("    Speed      : ");
-    if (status & (1U << 10))
-      console_puts("High Speed\n");
-    else if (status & (1U << 9))
-      console_puts("Low Speed\n");
-    else if (status & (1U << 0))
-      console_puts("Full Speed or not yet established\n");
-    else
+    if (!(status & (1U << 0)))
       console_puts("No device\n");
+    else if (!(status & (1U << 1)))
+      console_puts("Not yet established\n");
+    else if (status & (1U << 10))
+      console_puts("High Speed (480 Mb/s)\n");
+    else if (status & (1U << 9))
+      console_puts("Low Speed (1.5 Mb/s)\n");
+    else
+      console_puts("Full Speed (12 Mb/s)\n");
     console_puts("    Changes    :");
     if (change == 0U) {
       console_puts(" None");

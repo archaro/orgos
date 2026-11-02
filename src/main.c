@@ -13,6 +13,7 @@
 #include "pcie.h"
 #include "xhci.h"
 #include "usb.h"
+#include "usb_hub.h"
 #include "uart.h"
 #include "console.h"
 
@@ -378,11 +379,8 @@ void main(void) {
 
       xhci_start_info_t start_info;
       xhci_start_result_t start_result = xhci_start(&start_info);
-
       if (start_result != XHCI_START_OK) {
-        console_puts("FAILED (start result ");
-        console_putu32((uint32_t)start_result);
-        console_puts(").\n");
+        console_printf("FAILED (start result %u).\n", (uint32_t)start_result);
       } else {
         console_puts("OK.\n");
         console_puts("Enumerating internal USB hub... ");
@@ -391,10 +389,19 @@ void main(void) {
         if (usb_result == USB_INIT_OK) {
           console_printf("OK (address %u).\n",
               (unsigned int)usb_info.address);
+          console_puts("Configuring internal USB hub... ");
+          usb_hub_init_info_t hub_info = {0};
+          usb_hub_init_result_t hub_result = usb_hub_init(&hub_info);
+          if (hub_result == USB_HUB_INIT_OK) {
+            console_printf("OK (%u ports).\n", (unsigned int)hub_info.ports);
+          } else {
+            console_printf("FAILED (result %u, detail %u).\n",
+                (unsigned int)hub_result, (unsigned int)hub_info.detail);
+          }
         } else {
           console_printf("FAILED (stage %d, detail 0x%u).\n",
               (uint32_t)usb_result, usb_info.detail);
-	}
+        }
       }
     }
   }
