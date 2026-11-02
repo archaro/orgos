@@ -286,6 +286,22 @@ xhci_slot_result_t xhci_enable_slot(xhci_slot_info_t *result);
 xhci_slot_result_t xhci_enable_downstream_slot(xhci_slot_info_t *result);
 
 typedef enum {
+  XHCI_DISABLE_OK,
+  XHCI_DISABLE_NOT_READY,
+  XHCI_DISABLE_BUSY,
+  XHCI_DISABLE_ALREADY_ATTEMPTED,
+  XHCI_DISABLE_COMMAND_FAILED
+} xhci_disable_result_t;
+
+typedef struct {
+  uint8_t slot_id;
+  uint8_t completion_code;
+  xhci_command_result_t command_result;
+} xhci_disable_info_t;
+
+xhci_disable_result_t xhci_downstream_disable(xhci_disable_info_t *info);
+
+typedef enum {
   XHCI_DEVICE_OK,
   XHCI_DEVICE_NOT_READY,
   XHCI_DEVICE_ALREADY_PREPARED,

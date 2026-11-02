@@ -1282,6 +1282,15 @@ static void cmd_usb_enumerate(void) {
   console_printf("USB enumeration: PASS\n");
 }
 
+static void cmd_usb_disable(void) {
+  xhci_disable_info_t info = {0};
+  xhci_disable_result_t result = xhci_downstream_disable(&info);
+  console_printf("Disable Slot: %u\n", (unsigned int)result);
+  console_printf("  Slot       : %u\n", (unsigned int)info.slot_id);
+  console_printf("  Command    : %u\n", (unsigned int)info.command_result);
+  console_printf("  Completion : %u\n", (unsigned int)info.completion_code);
+}
+
 static void cmd_usb_test_midiout(void) {
   usb_enum_info_t enumeration = {0};
   if (!usb_get_enumeration(&enumeration) ||
@@ -1584,6 +1593,10 @@ static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
   const char *other_args = args;
+  if (next_word_is(&args, "disable") && end_of_args(args)) {
+    cmd_usb_disable();
+    return;
+  }
   if (next_word_is(&args, "changes") && end_of_args(args)) {
     cmd_usb_changes();
     return;
@@ -1663,7 +1676,7 @@ static void cmd_usb(const char *args) {
   if (!end_of_args(args)) {
     console_puts(
         "Usage: usb [scan | state | ports | events | device | devices | "
-        "hubports | hubirq | enumerate | test]\n");
+        "disable | hubports | hubirq | enumerate | test]\n");
     return;
   }
 

@@ -208,6 +208,8 @@ static bool hub_notify_started;
 
 static bool slot_requested;
 static bool downstream_slot_requested;
+static bool downstream_disable_attempted;
+static bool downstream_slot_disabled;
 static uint8_t internal_hub_slot;
 
 static uint32_t xhci_read(uint32_t offset) {
@@ -514,10 +516,11 @@ xhci_port_reset_result_t xhci_port_reset(
 #define XHCI_TRB_DATA_STAGE    3U
 #define XHCI_TRB_TRT_IN       (3U << 16)
 #define XHCI_TRB_STATUS_STAGE  4U
-#define XHCI_TRB_LINK  6U
+#define XHCI_TRB_LINK          6U
 #define XHCI_TRB_NOOP_TRANSFER 8U
-#define XHCI_TRB_ENABLE_SLOT 9U
-#define XHCI_TRB_TYPE_SHIFT 10U
+#define XHCI_TRB_ENABLE_SLOT   9U
+#define XHCI_TRB_DISABLE_SLOT  10U
+#define XHCI_TRB_TYPE_SHIFT    10U
 #define XHCI_TRB_ADDRESS_DEVICE 11U
 #define XHCI_TRB_CONFIGURE_ENDPOINT 12U
 #define XHCI_TRB_EVALUATE_CONTEXT 13U
@@ -3873,5 +3876,58 @@ void xhci_downstream_quiesce(void) {
 
 bool xhci_downstream_is_quiesced(void) {
   return downstream_quiesced;
+}
+
+xhci_disable_result_t xhci_downstream_disable(xhci_disable_info_t *info) {
+
+  if (!info)
+    return XHCI_DISABLE_NOT_READY;
+
+  *info = (xhci_disable_info_t){
+    .command_result = XHCI_COMMAND_UNAVAILABLE
+  };
+
+  if (downstream_disable_attempted)
+    return XHCI_DISABLE_ALREADY_ATTEMPTED;
+
+  xhci_device_t *device = &devices[1];
+  if (!downstream_quiesced || downstream_slot_disabled ||
+      device->slot_id == 0U || !controller_running ||
+      !controller_verified || command_outstanding ||
+      command_ring_failed || device->ep0_active ||
+      device->bulk_out_active)
+    return XHCI_DISABLE_NOT_READY;
+
+  // Outstanding completions must retain their owners.
+  // Do not disable the slot while a waiter is active.
+  for (unsigned int i = 0U; i < XHCI_EVENT_WAITERS; i++) {
+    xhci_event_waiter_t *waiter = &event_waiters[i];
+
+    if (waiter->active && waiter->slot_id == device->slot_id)
+      return XHCI_DISABLE_BUSY;
+  }
+
+  xhci_trb_t command = {
+    .parameter = 0U,
+    .status = 0U,
+    .control = (XHCI_TRB_DISABLE_SLOT << XHCI_TRB_TYPE_SHIFT) |
+        ((uint32_t)device->slot_id << 24)
+  };
+
+  info->slot_id = device->slot_id;
+
+  // Set before submission. A timeout leaves the controller's
+  // state uncertain, so we must not blindly retry.
+  downstream_disable_attempted = true;
+  xhci_command_completion_t completion = {0};
+  xhci_command_result_t status = xhci_command_submit(&command, &completion);
+  info->command_result = status;
+  info->completion_code = completion.completion_code;
+
+  if (status != XHCI_COMMAND_OK || completion.slot_id != device->slot_id)
+    return XHCI_DISABLE_COMMAND_FAILED;
+
+  downstream_slot_disabled = true;
+  return XHCI_DISABLE_OK;
 }
 
