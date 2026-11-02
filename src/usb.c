@@ -4,6 +4,7 @@
 #include "xhci.h"
 #include "usb.h"
 #include "usb_hub.h"
+#include "usb_enumerate.h"
 #include "usb_midi_test.h"
 
 #define USB_ROOT_PORT 1U
@@ -273,6 +274,9 @@ static void usb_change_enqueue( uint8_t port, const usb_hub_port_t *status) {
   };
 
   change_count++;
+  // Notify the lifecycle manager independently
+  // of diagnostic queue consumption.
+  usb_device_port_changed(port, status->status, status->change);
 }
 
 static void usb_change_fail(uint8_t port) {

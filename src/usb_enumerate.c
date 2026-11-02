@@ -381,3 +381,30 @@ bool usb_get_device(usb_device_t *device) {
   *device = current_device;
   return true;
 }
+
+void usb_device_port_changed(uint8_t port, uint16_t status, uint16_t change) {
+
+  if (!device_record_valid)
+    return;
+
+  if (current_device.state == USB_DEVICE_DETACHED ||
+      current_device.state == USB_DEVICE_DISCONNECTING)
+    return;
+
+  // Ignore changes affecting other downstream ports.
+  if (port != current_device.parent_port)
+    return;
+
+  // A connection-change flag invalidates the
+  // existing device identity even if the port
+  // currently reports a connected device.
+  bool connection_changed = (change & 0x0001U) != 0U;
+  bool connected = (status & 0x0001U) != 0U;
+  if (!connection_changed && connected)
+    return;
+
+  // The slot and address are retained for teardown.
+  // Do not declare the device detached until its
+  // controller resources have been released.
+  current_device.state = USB_DEVICE_DISCONNECTING;
+}
