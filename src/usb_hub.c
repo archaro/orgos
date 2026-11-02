@@ -16,6 +16,9 @@
 #define USB_REQ_GET_CONFIGURATION  0x08U
 #define USB_REQ_SET_CONFIGURATION  0x09U
 #define USB_REQ_GET_DESCRIPTOR     0x06U
+#define USB_DESC_CONFIGURATION     0x02U
+#define USB_DESC_INTERFACE         0x04U
+#define USB_DESC_ENDPOINT          0x05U
 #define USB_DESC_HUB               0x29U
 #define USB_HUB_REQ_CLEAR_FEATURE  0x01U
 #define USB_HUB_REQ_SET_FEATURE    0x03U
@@ -62,6 +65,57 @@ bool usb_hub_get_init_info(usb_hub_init_info_t *info) {
 
   *info = hub_init_state;
   return true;
+}
+
+static bool usb_hub_find_interrupt( const uint8_t *data, uint16_t length,
+    usb_hub_init_info_t *state) {
+
+  if (!data || !state || length < 9U ||
+      data[0] != 9U || data[1] != USB_DESC_CONFIGURATION)
+    return false;
+
+  bool hub_interface = false;
+  bool found = false;
+
+  for (uint32_t offset = 0U; offset < length;) {
+    if (length - offset < 2U)
+      return false;
+
+    uint8_t size = data[offset];
+    uint8_t type = data[offset + 1U];
+    if (size < 2U || size > length - offset)
+      return false;
+
+    if (type == USB_DESC_INTERFACE) {
+      if (size < 9U)
+        return false;
+      // USB hub class is 0x09.
+      hub_interface = data[offset + 5U] == 0x09U;
+    } else if (type == USB_DESC_ENDPOINT && hub_interface) {
+      if (size < 7U)
+        return false;
+
+      uint8_t address = data[offset + 2U];
+      uint8_t attributes = data[offset + 3U];
+      uint16_t mps = usb_hub_read_u16(&data[offset + 4U]);
+      uint8_t interval = data[offset + 6U];
+
+      // Require an interrupt-IN endpoint.
+      if ((address & 0x80U) && (attributes & 0x03U) == 0x03U &&
+          (address & 0x0fU) != 0U && mps != 0U && mps <= 64U && interval != 0U) {
+        if (found)
+          return false;
+
+        state->interrupt_endpoint = address;
+        state->interrupt_mps = mps;
+        state->interrupt_interval = interval;
+        found = true;
+      }
+    }
+    offset += size;
+  }
+
+  return found;
 }
 
 usb_hub_init_result_t usb_hub_init(usb_hub_init_info_t *info) {
@@ -163,6 +217,38 @@ usb_hub_init_result_t usb_hub_init(usb_hub_init_info_t *info) {
   }
 
   state.ports = ports;
+
+  // Read the configuration descriptor header.
+  setup.request_type = 0x80U;
+  setup.request = USB_REQ_GET_DESCRIPTOR;
+  setup.value = (uint16_t)(USB_DESC_CONFIGURATION << 8);
+  setup.length = 9U;
+
+  status = xhci_control_in(&setup, &transfer);
+  if (status != XHCI_CONTROL_OK || transfer.length != 9U ||
+      transfer.data[0] != 9U || transfer.data[1] != USB_DESC_CONFIGURATION) {
+    state.detail = (uint32_t)status;
+    result = USB_HUB_INIT_DESCRIPTOR_FAILED;
+    goto complete;
+  }
+
+  uint16_t config_length = usb_hub_read_u16(&transfer.data[2]);
+  if (config_length < 9U || config_length > XHCI_CONTROL_MAX_DATA) {
+    state.detail = config_length;
+    result = USB_HUB_INIT_DESCRIPTOR_FAILED;
+    goto complete;
+  }
+
+  // Retrieve and inspect the complete descriptor set.
+  setup.length = config_length;
+
+  status = xhci_control_in(&setup, &transfer);
+  if (status != XHCI_CONTROL_OK || transfer.length != config_length ||
+      !usb_hub_find_interrupt( transfer.data, config_length, &state)) {
+    state.detail = (uint32_t)status;
+    result = USB_HUB_INIT_DESCRIPTOR_FAILED;
+    goto complete;
+  }
 
   // Inform xHCI that this device is a hub.
   xhci_hub_info_t hub = {0};

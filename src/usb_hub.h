@@ -43,6 +43,9 @@ typedef struct {
   usb_hub_init_result_t result;
   uint32_t detail;
   uint8_t ports;
+  uint8_t interrupt_endpoint;
+  uint8_t interrupt_interval;
+  uint16_t interrupt_mps;
 } usb_hub_init_info_t;
 
 usb_hub_init_result_t usb_hub_init(usb_hub_init_info_t *info);

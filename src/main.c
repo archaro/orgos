@@ -394,6 +394,10 @@ void main(void) {
           usb_hub_init_result_t hub_result = usb_hub_init(&hub_info);
           if (hub_result == USB_HUB_INIT_OK) {
             console_printf("OK (%u ports).\n", (unsigned int)hub_info.ports);
+            console_printf( "Hub interrupt endpoint: 0x%02x, MPS %u, interval %u.\n",
+                (unsigned int)hub_info.interrupt_endpoint,
+                (unsigned int)hub_info.interrupt_mps,
+                (unsigned int)hub_info.interrupt_interval);
             console_puts("Scanning downstream USB ports... ");
             usb_hub_scan_info_t scan = {0};
             usb_hub_result_t scan_result = usb_hub_scan(&scan);
