@@ -27,6 +27,9 @@ typedef struct {
   xhci_control_result_t transfer_result;
 } usb_hub_port_t;
 
+usb_hub_result_t usb_hub_port_status(uint8_t port, usb_hub_port_t *result);
+usb_hub_result_t usb_hub_port_debounce(uint8_t port, usb_hub_port_t *result);
+
 typedef enum {
   USB_HUB_INIT_OK,
   USB_HUB_INIT_NOT_READY,
@@ -45,8 +48,18 @@ typedef struct {
 usb_hub_init_result_t usb_hub_init(usb_hub_init_info_t *info);
 bool usb_hub_get_init_info(usb_hub_init_info_t *info);
 
-usb_hub_result_t usb_hub_port_status(uint8_t port, usb_hub_port_t *result);
-usb_hub_result_t usb_hub_port_debounce(uint8_t port, usb_hub_port_t *result);
+typedef struct {
+  uint8_t ports;
+  uint16_t connected;
+  uint16_t enabled;
+  uint16_t changed;
+  uint16_t overcurrent;
+  uint8_t failed_port;
+  usb_hub_result_t error;
+} usb_hub_scan_info_t;
+
+usb_hub_result_t usb_hub_scan(usb_hub_scan_info_t *info);
+bool usb_hub_get_scan(usb_hub_scan_info_t *info);
 
 typedef struct {
   uint8_t port;

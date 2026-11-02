@@ -394,6 +394,16 @@ void main(void) {
           usb_hub_init_result_t hub_result = usb_hub_init(&hub_info);
           if (hub_result == USB_HUB_INIT_OK) {
             console_printf("OK (%u ports).\n", (unsigned int)hub_info.ports);
+            console_puts("Scanning downstream USB ports... ");
+            usb_hub_scan_info_t scan = {0};
+            usb_hub_result_t scan_result = usb_hub_scan(&scan);
+            if (scan_result == USB_HUB_OK) {
+              console_printf("OK (connected mask 0x%04x).\n",
+                  (unsigned int)scan.connected);
+            } else {
+              console_printf("FAILED (port %u, result %u).\n",
+                  (unsigned int)scan.failed_port, (unsigned int)scan_result);
+            }
           } else {
             console_printf("FAILED (result %u, detail %u).\n",
                 (unsigned int)hub_result, (unsigned int)hub_info.detail);

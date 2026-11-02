@@ -49,6 +49,8 @@
 
 static bool hub_init_attempted;
 static usb_hub_init_info_t hub_init_state;
+static usb_hub_scan_info_t hub_scan_state;
+static bool hub_scan_valid;
 
 static uint16_t usb_hub_read_u16(const uint8_t *p) {
   return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
@@ -189,7 +191,6 @@ complete:
 }
 
 usb_hub_result_t usb_hub_port_status(uint8_t port, usb_hub_port_t *result) {
-
   if (!result)
     return USB_HUB_NOT_READY;
 
@@ -230,6 +231,54 @@ usb_hub_result_t usb_hub_port_status(uint8_t port, usb_hub_port_t *result) {
   const uint8_t *d = transfer.data;
   result->status = (uint16_t)d[0] | ((uint16_t)d[1] << 8);
   result->change = (uint16_t)d[2] | ((uint16_t)d[3] << 8);
+
+  return USB_HUB_OK;
+}
+
+bool usb_hub_get_scan(usb_hub_scan_info_t *info) {
+  if (!info || !hub_scan_valid)
+    return false;
+
+  *info = hub_scan_state;
+  return true;
+}
+
+usb_hub_result_t usb_hub_scan(usb_hub_scan_info_t *info) {
+  if (!info)
+    return USB_HUB_NOT_READY;
+
+  *info = (usb_hub_scan_info_t){0};
+  usb_hub_init_info_t hub = {0};
+  if (!usb_hub_get_init_info(&hub) || hub.result != USB_HUB_INIT_OK)
+    return USB_HUB_NOT_READY;
+
+  usb_hub_scan_info_t scan = {0};
+  scan.ports = hub.ports;
+  for (uint8_t port = 1U; port <= scan.ports; port++) {
+    usb_hub_port_t status = {0};
+    usb_hub_result_t result =usb_hub_port_status(port, &status);
+    if (result != USB_HUB_OK) {
+      scan.failed_port = port;
+      scan.error = result;
+      *info = scan;
+      return result;
+    }
+
+    uint16_t bit = (uint16_t)(1U << (port - 1U));
+    if (status.status & (1U << 0))
+      scan.connected |= bit;
+    if (status.status & (1U << 1))
+      scan.enabled |= bit;
+    if (status.change != 0U)
+      scan.changed |= bit;
+    if ((status.status | status.change) & (1U << 3))
+      scan.overcurrent |= bit;
+  }
+
+  // Publish only a complete snapshot.
+  hub_scan_state = scan;
+  hub_scan_valid = true;
+  *info = scan;
 
   return USB_HUB_OK;
 }

@@ -1085,6 +1085,32 @@ static void cmd_usb_events(void) {
   }
 }
 
+static void cmd_usb_scan(void) {
+  usb_hub_scan_info_t scan = {0};
+  usb_hub_result_t result = usb_hub_scan(&scan);
+  if (result != USB_HUB_OK) {
+    console_printf("USB scan failed: port %u, result %u\n",
+        (unsigned int)scan.failed_port, (unsigned int)result);
+    return;
+  }
+  console_puts("USB downstream discovery:\n");
+  for (uint8_t port = 1U; port <= scan.ports; port++) {
+    uint16_t bit = (uint16_t)(1U << (port - 1U));
+    console_printf("  Port %u: ", (unsigned int)port);
+    if (scan.overcurrent & bit)
+      console_puts("Overcurrent");
+    else if (scan.connected & bit)
+      console_puts("Connected");
+    else
+      console_puts("Empty");
+    if (scan.enabled & bit)
+      console_puts(", enabled");
+    if (scan.changed & bit)
+      console_puts(", change pending");
+    console_putc('\n');
+  }
+}
+
 static void cmd_usb_hubports(void) {
   console_puts("Internal USB hub downstream ports:\n");
 
@@ -1510,6 +1536,10 @@ static void cmd_usb(const char *args) {
     cmd_usb_devices();
     return;
   }
+  if (next_word_is(&args, "scan") && end_of_args(args)) {
+    cmd_usb_scan();
+    return;
+  }
   if (next_word_is(&args, "enumerate") && end_of_args(args)) {
     cmd_usb_enumerate();
     return;
@@ -1556,7 +1586,7 @@ static void cmd_usb(const char *args) {
 
   if (!end_of_args(args)) {
     console_puts(
-        "Usage: usb [state | ports | events | device | devices | "
+        "Usage: usb [scan | state | ports | events | device | devices | "
         "hubports | enumerate | test]\n");
     return;
   }
