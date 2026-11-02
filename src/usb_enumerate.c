@@ -21,6 +21,7 @@ static bool enumeration_attempted;
 static usb_enum_info_t enumeration_state;
 static usb_device_t current_device;
 static bool device_record_valid;
+static uint32_t device_generation;
 
 static uint16_t read_u16(const uint8_t *p) {
   return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
@@ -326,7 +327,14 @@ usb_enum_result_t usb_enumerate(usb_enum_info_t *info) {
   current_device.parent_port = state.hub_port;
   current_device.speed = (usb_speed_t)state.speed;
   current_device.state = USB_DEVICE_DETECTED;
-  current_device.generation = 1U;
+  // Each new device incarnation receives
+  // a distinct generation identifier.
+  if (device_generation == UINT32_MAX) {
+    result = USB_ENUM_NOT_READY;
+    goto complete;
+  }
+  device_generation++;
+  current_device.generation = device_generation;
   // Enumeration will now assign a controller slot
   // and USB address to the detected device.
   current_device.state = USB_DEVICE_ENUMERATING;
@@ -429,6 +437,20 @@ bool usb_device_finalize_disconnect(void) {
   // Preserve topology and generation
   // for subsequent diagnostics.
   current_device.state = USB_DEVICE_DETACHED;
+
+  return true;
+}
+
+bool usb_enumeration_rearm(void) {
+  if (!device_record_valid || !enumeration_attempted ||
+      current_device.state != USB_DEVICE_DETACHED ||
+      xhci_downstream_is_quiesced() || xhci_downstream_is_cleaned())
+    return false;
+
+  // The old device has been detached and
+  // its xHCI state has been recycled.
+  enumeration_attempted = false;
+  enumeration_state = (usb_enum_info_t){0};
 
   return true;
 }

@@ -1320,11 +1320,22 @@ static void cmd_usb_recycle(void) {
   console_printf("USB recycle: %u\n", (unsigned int)result);
 }
 
+static void cmd_usb_rearm(void) {
+  if (usb_enumeration_rearm())
+    console_puts("USB enumeration rearmed.\n");
+  else
+    console_puts("USB enumeration rearm not ready.\n");
+}
+
 static void cmd_usb_test_midiout(void) {
   usb_enum_info_t enumeration = {0};
+  usb_device_t device = {0};
+
   if (!usb_get_enumeration(&enumeration) ||
-      enumeration.result != USB_ENUM_OK) {
-    console_puts("USB-MIDI device not enumerated.\n");
+      enumeration.result != USB_ENUM_OK ||
+      !usb_get_device(&device) ||
+      device.state != USB_DEVICE_ACTIVE) {
+    console_puts("No active USB-MIDI device.\n");
     return;
   }
   const uint8_t note_on[4] = {0x09U, 0x90U, 0x3cU, 0x64U};
@@ -1622,6 +1633,10 @@ static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
   const char *other_args = args;
+  if (next_word_is(&args, "rearm") && end_of_args(args)) {
+    cmd_usb_rearm();
+    return;
+  }
   if (next_word_is(&args, "recycle") && end_of_args(args)) {
     cmd_usb_recycle();
     return;
@@ -1717,7 +1732,8 @@ static void cmd_usb(const char *args) {
   if (!end_of_args(args)) {
     console_puts(
         "Usage: usb [scan | state | ports | events | device | devices | "
-        "disable | cleanup | detach | recycle | hubports | hubirq | enumerate | test]\n");
+        "disable | cleanup | detach | recycle | reasm | "
+	"hubports | hubirq | enumerate | test]\n");
     return;
   }
 
