@@ -20,6 +20,8 @@
 
 static bool enumeration_attempted;
 static usb_enum_info_t enumeration_state;
+static usb_device_t current_device;
+static bool device_record_valid;
 
 static uint16_t read_u16(const uint8_t *p) {
   return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
@@ -372,6 +374,10 @@ usb_enum_result_t usb_enumerate(usb_enum_info_t *info) {
   // following an uncertain command completion.
   enumeration_attempted = true;
   usb_enum_info_t state = {0};
+  // Start with no downstream device identified.
+  current_device = (usb_device_t){0};
+  current_device.state = USB_DEVICE_DETACHED;
+  device_record_valid = true;
   usb_enum_result_t result = configure_hub(&state);
 
   if (result != USB_ENUM_OK)
@@ -380,15 +386,30 @@ usb_enum_result_t usb_enumerate(usb_enum_info_t *info) {
   result = discover_port(&state);
   if (result != USB_ENUM_OK)
     goto complete;
+  // A device has been detected and its port reset.
+  current_device.root_port = root.root_port;
+  current_device.parent_slot = root.slot_id;
+  current_device.parent_port = state.hub_port;
+  current_device.speed = (usb_speed_t)state.speed;
+  current_device.state = USB_DEVICE_DETECTED;
+  current_device.generation = 1U;
+  // Enumeration will now assign a controller slot
+  // and USB address to the detected device.
+  current_device.state = USB_DEVICE_ENUMERATING;
 
   result = address_device(&state);
   if (result != USB_ENUM_OK)
     goto complete;
 
+  current_device.slot_id = state.slot_id;
+  current_device.address = state.address;
+
   result = read_device(&state);
   if (result != USB_ENUM_OK)
     goto complete;
 
+  current_device.vendor_id = state.vendor_id;
+  current_device.product_id = state.product_id;
   state.quirks = usb_midi_quirks_lookup(state.vendor_id, state.product_id);
   result = read_configuration(&state);
   if (result != USB_ENUM_OK)
@@ -401,11 +422,17 @@ usb_enum_result_t usb_enumerate(usb_enum_info_t *info) {
   result = configure_bulk(&state);
   if (result != USB_ENUM_OK)
     goto complete;
+  current_device.state = USB_DEVICE_CONFIGURED;
 
   if (!usb_midi_quirks_apply(state.quirks, &state.detail))
     result = USB_ENUM_MIDI_QUIRK_FAILED;
 
+  if (result == USB_ENUM_OK)
+    current_device.state = USB_DEVICE_ACTIVE;
+
 complete:
+  if (result != USB_ENUM_OK && current_device.state != USB_DEVICE_DETACHED)
+    current_device.state = USB_DEVICE_FAILED;
   state.result = result;
   enumeration_state = state;
   *info = state;
@@ -413,3 +440,10 @@ complete:
   return result;
 }
 
+bool usb_get_device(usb_device_t *device) {
+  if (!device || !device_record_valid)
+    return false;
+
+  *device = current_device;
+  return true;
+}

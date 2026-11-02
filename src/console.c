@@ -911,6 +911,27 @@ static const char *usb_speed_name(uint8_t speed) {
   }
 }
 
+static const char *usb_device_state_name(usb_device_state_t state) {
+  switch (state) {
+    case USB_DEVICE_DETACHED:
+      return "Detached";
+    case USB_DEVICE_DETECTED:
+      return "Detected";
+    case USB_DEVICE_ENUMERATING:
+      return "Enumerating";
+    case USB_DEVICE_CONFIGURED:
+      return "Configured";
+    case USB_DEVICE_ACTIVE:
+      return "Active";
+    case USB_DEVICE_DISCONNECTING:
+      return "Disconnecting";
+    case USB_DEVICE_FAILED:
+      return "Failed";
+    default:
+      return "Unknown";
+  }
+}
+
 static const char *usb_link_name(uint8_t state) {
   switch (state) {
     case 0: return "U0";
@@ -1129,6 +1150,34 @@ static void cmd_usb_hubports(void) {
     }
     console_putc('\n');
   }
+}
+
+static void cmd_usb_devices(void) {
+  usb_device_t device = {0};
+  console_puts("USB device inventory:\n");
+  if (!usb_get_device(&device)) {
+    console_puts("  No device record available.\n");
+    return;
+  }
+  console_printf("  State          : %s\n",
+      usb_device_state_name(device.state));
+  if (device.state == USB_DEVICE_DETACHED) {
+    console_puts("  No enumerated downstream device.\n");
+    return;
+  }
+  console_printf("  Root port      : %u\n", (unsigned int)device.root_port);
+  console_printf("  Parent slot    : %u\n", (unsigned int)device.parent_slot);
+  console_printf("  Parent port    : %u\n", (unsigned int)device.parent_port);
+  console_printf("  Speed          : %s\n",
+      usb_speed_name((uint8_t)device.speed));
+  console_printf("  Slot ID        : %u\n", (unsigned int)device.slot_id);
+  console_printf("  USB address    : %u\n", (unsigned int)device.address);
+  console_printf("  Vendor ID      : 0x%04x\n",
+      (unsigned int)device.vendor_id);
+  console_printf("  Product ID     : 0x%04x\n",
+      (unsigned int)device.product_id);
+  console_printf("  Generation     : %u\n",
+      (unsigned int)device.generation);
 }
 
 static void cmd_usb_enumerate(void) {
@@ -1416,6 +1465,10 @@ static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
   const char *other_args = args;
+  if (next_word_is(&args, "devices") && end_of_args(args)) {
+    cmd_usb_devices();
+    return;
+  }
   if (next_word_is(&args, "enumerate") && end_of_args(args)) {
     cmd_usb_enumerate();
     return;
@@ -1462,7 +1515,7 @@ static void cmd_usb(const char *args) {
 
   if (!end_of_args(args)) {
     console_puts(
-        "Usage: usb [state | ports | events | "
+        "Usage: usb [state | ports | events | devices | "
         "hubports | enumerate | test]\n");
     return;
   }
