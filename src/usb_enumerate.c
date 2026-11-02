@@ -403,8 +403,11 @@ void usb_device_port_changed(uint8_t port, uint16_t status, uint16_t change) {
   if (!connection_changed && connected)
     return;
 
-  // The slot and address are retained for teardown.
-  // Do not declare the device detached until its
-  // controller resources have been released.
+  // Prevent new transfers through this device's
+  // existing xHCI slot before declaring it stale.
+  xhci_downstream_quiesce();
+
+  // Retain the slot and address for teardown.
+  // They are not yet safe to reuse.
   current_device.state = USB_DEVICE_DISCONNECTING;
 }

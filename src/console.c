@@ -1222,6 +1222,8 @@ static void cmd_usb_devices(void) {
   }
   console_printf("  State          : %s\n",
       usb_device_state_name(device.state));
+  console_printf("  xHCI quiesced  : %s\n",
+      xhci_downstream_is_quiesced() ? "Yes" : "No");
   if (device.state == USB_DEVICE_DETACHED) {
     console_puts("  No enumerated downstream device.\n");
     return;

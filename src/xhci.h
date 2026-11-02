@@ -672,3 +672,5 @@ xhci_hub_notify_result_t xhci_hub_notify_start(void);
 void xhci_hub_notify_service(void);
 bool xhci_hub_notify_get_info(xhci_hub_notify_info_t *info);
 xhci_hub_notify_result_t xhci_hub_notify_resume(void);
+void xhci_downstream_quiesce(void);
+bool xhci_downstream_is_quiesced(void);

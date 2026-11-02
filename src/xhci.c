@@ -157,6 +157,7 @@ static bool address_attempted;
 static bool downstream_address_attempted;
 static bool downstream_ep0_update_attempted;
 static bool downstream_bulk_attempted;
+static bool downstream_quiesced;
 static bool device_addressed;
 static xhci_address_info_t address_info;
 static xhci_dma_t controller_dma;
@@ -2307,7 +2308,7 @@ xhci_bulk_out_result_t xhci_downstream_bulk_out(
 
   *result = (xhci_bulk_out_info_t){0};
   xhci_device_t *device = &devices[1];
-  if (!data || !device->bulk_out_ready ||
+  if (!data || downstream_quiesced || !device->bulk_out_ready ||
       device->bulk_out_active || device->bulk_out_failed ||
       !controller_running || !controller_verified ||
       command_outstanding || command_ring_failed ||
@@ -2518,7 +2519,7 @@ static xhci_bulk_in_arm_result_t xhci_bulk_in_arm_one(void) {
     return XHCI_BULK_IN_ARM_ALREADY_STARTED;
 
   xhci_device_t *device = &devices[1];
-  if (!device->bulk_in_ready || !device->addressed ||
+  if (downstream_quiesced || !device->bulk_in_ready || !device->addressed ||
       !controller_running || !controller_verified ||
       command_ring_failed || dispatch_fault != XHCI_DISPATCH_NONE ||
       device->bulk_in_ring.owner != DMA_OWNER_DEVICE)
@@ -2666,7 +2667,7 @@ xhci_bulk_in_arm_result_t xhci_bulk_in_stream_start(void) {
 }
 
 void xhci_bulk_in_stream_service(void) {
-  if (!bulk_in_stream_started || bulk_in_stream_failed)
+  if (!bulk_in_stream_started || bulk_in_stream_failed || downstream_quiesced)
     return;
 
   xhci_bulk_in_info_t info;
@@ -3474,7 +3475,8 @@ xhci_control_result_t xhci_control_no_data(
 xhci_control_result_t xhci_downstream_control_in(
     const xhci_setup_packet_t *setup, xhci_control_info_t *result) {
 
-  if (!setup || !(setup->request_type & 0x80U) || setup->length == 0U)
+  if (downstream_quiesced || !setup ||
+      !(setup->request_type & 0x80U) || setup->length == 0U)
     return XHCI_CONTROL_NOT_READY;
 
   return xhci_control_transfer(&devices[1], setup, result);
@@ -3483,7 +3485,7 @@ xhci_control_result_t xhci_downstream_control_in(
 xhci_control_result_t xhci_downstream_control_no_data(
     const xhci_setup_packet_t *setup, xhci_control_info_t *result) {
 
-  if (!setup || setup->length != 0U)
+  if (downstream_quiesced || !setup || setup->length != 0U)
     return XHCI_CONTROL_NOT_READY;
 
   return xhci_control_transfer(&devices[1], setup, result);
@@ -3864,3 +3866,12 @@ xhci_hub_notify_result_t xhci_hub_notify_resume(void) {
 
   return xhci_hub_notify_arm();
 }
+
+void xhci_downstream_quiesce(void) {
+  downstream_quiesced = true;
+}
+
+bool xhci_downstream_is_quiesced(void) {
+  return downstream_quiesced;
+}
+
