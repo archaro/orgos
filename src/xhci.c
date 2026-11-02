@@ -3879,6 +3879,31 @@ bool xhci_downstream_is_quiesced(void) {
   return downstream_quiesced;
 }
 
+bool xhci_downstream_transfer_state(xhci_downstream_transfer_state_t *state) {
+  if (!state)
+    return false;
+
+  *state = (xhci_downstream_transfer_state_t){0};
+  xhci_device_t *device = &devices[1];
+  state->slot_id = device->slot_id;
+  state->quiesced = downstream_quiesced;
+  state->ep0_active = device->ep0_active;
+  state->bulk_out_active = device->bulk_out_active;
+  state->bulk_in_started = bulk_in_stream_started;
+  state->bulk_in_pending = bulk_in_state == XHCI_BULK_IN_PENDING;
+  state->bulk_in_completed = bulk_in_waiter && bulk_in_waiter->completed;
+  state->bulk_in_failed = bulk_in_state == XHCI_BULK_IN_FAILED;
+  state->bulk_in_completion_code = bulk_in_info.completion_code;
+
+  for (unsigned int i = 0U; i < XHCI_EVENT_WAITERS; i++) {
+    const xhci_event_waiter_t *waiter = &event_waiters[i];
+    if (waiter->active && waiter->slot_id == device->slot_id)
+      state->active_waiters++;
+  }
+
+  return true;
+}
+
 static bool xhci_release_buffer(
     dma_buffer_t *buffer, xhci_cleanup_info_t *info) {
 

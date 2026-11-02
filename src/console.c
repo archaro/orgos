@@ -1327,6 +1327,32 @@ static void cmd_usb_rearm(void) {
     console_puts("USB enumeration rearm not ready.\n");
 }
 
+static void cmd_usb_transfers(void) {
+  xhci_downstream_transfer_state_t state = {0};
+  if (!xhci_downstream_transfer_state(&state)) {
+    console_puts("Transfer state unavailable.\n");
+    return;
+  }
+  console_puts("Downstream xHCI transfers:\n");
+  console_printf("  Slot          : %u\n", (unsigned int)state.slot_id);
+  console_printf("  Quiesced      : %s\n", state.quiesced ? "Yes" : "No");
+  console_printf("  Active waiters: %u\n",
+      (unsigned int)state.active_waiters);
+  console_printf("  EP0 active    : %s\n", state.ep0_active ? "Yes" : "No");
+  console_printf("  Bulk OUT      : %s\n",
+      state.bulk_out_active ? "Active" : "Idle");
+  console_printf("  Bulk IN stream: %s\n",
+      state.bulk_in_started ? "Started" : "Not started");
+  console_printf("  Bulk IN TD    : %s\n",
+      state.bulk_in_pending ? "Pending" : "Not pending");
+  console_printf("  IN completed  : %s\n",
+      state.bulk_in_completed ? "Yes" : "No");
+  console_printf("  Bulk IN failed: %s\n",
+      state.bulk_in_failed ? "Yes" : "No");
+  console_printf("  IN completion : %u\n",
+      (unsigned int)state.bulk_in_completion_code);
+}
+
 static void cmd_usb_test_midiout(void) {
   usb_enum_info_t enumeration = {0};
   usb_device_t device = {0};
@@ -1633,6 +1659,10 @@ static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
   const char *other_args = args;
+  if (next_word_is(&args, "transfers") && end_of_args(args)) {
+    cmd_usb_transfers();
+    return;
+  }
   if (next_word_is(&args, "rearm") && end_of_args(args)) {
     cmd_usb_rearm();
     return;
@@ -1732,7 +1762,7 @@ static void cmd_usb(const char *args) {
   if (!end_of_args(args)) {
     console_puts(
         "Usage: usb [scan | state | ports | events | device | devices | "
-        "disable | cleanup | detach | recycle | reasm | "
+        "disable | cleanup | detach | recycle | ream | transfers | "
 	"hubports | hubirq | enumerate | test]\n");
     return;
   }

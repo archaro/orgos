@@ -47,6 +47,14 @@ bool usb_midi_in_stress_start(void) {
 }
 
 void usb_midi_in_stress_service(void) {
+  usb_device_t device = {0};
+
+  if (in_stress.state == USB_MIDI_IN_STRESS_RUNNING &&
+      (!usb_get_device(&device) || device.state != USB_DEVICE_ACTIVE)) {
+    usb_midi_in_stress_fail(USB_MIDI_IN_STRESS_DISCONNECTED);
+    return;
+  }
+
   if (in_stress.state == USB_MIDI_IN_STRESS_IDLE)
     return;
 

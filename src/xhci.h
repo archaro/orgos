@@ -716,3 +716,18 @@ bool xhci_hub_notify_get_info(xhci_hub_notify_info_t *info);
 xhci_hub_notify_result_t xhci_hub_notify_resume(void);
 void xhci_downstream_quiesce(void);
 bool xhci_downstream_is_quiesced(void);
+
+typedef struct {
+  uint8_t slot_id;
+  uint8_t active_waiters;
+  bool quiesced;
+  bool ep0_active;
+  bool bulk_out_active;
+  bool bulk_in_started;
+  bool bulk_in_pending;
+  bool bulk_in_completed;
+  bool bulk_in_failed;
+  uint8_t bulk_in_completion_code;
+} xhci_downstream_transfer_state_t;
+
+bool xhci_downstream_transfer_state(xhci_downstream_transfer_state_t *state);
