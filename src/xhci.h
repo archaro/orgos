@@ -664,9 +664,11 @@ typedef struct {
   uint8_t length;
   uint16_t changes;
   uint64_t transfer_trb;
+  uint32_t notifications;
+  uint32_t ring_wraps;
 } xhci_hub_notify_info_t;
 
 xhci_hub_notify_result_t xhci_hub_notify_start(void);
 void xhci_hub_notify_service(void);
 bool xhci_hub_notify_get_info(xhci_hub_notify_info_t *info);
-
+xhci_hub_notify_result_t xhci_hub_notify_resume(void);

@@ -1531,6 +1531,15 @@ static void cmd_usb_hubirq_start(void) {
         (unsigned int)result);
 }
 
+static void cmd_usb_hubirq_resume(void) {
+  xhci_hub_notify_result_t result = xhci_hub_notify_resume();
+  if (result == XHCI_HUB_NOTIFY_OK)
+    console_puts("Hub notification receiver rearmed.\n");
+  else
+    console_printf("Hub notification resume failed (%u).\n",
+        (unsigned int)result);
+}
+
 static void cmd_usb_hubirq(void) {
   xhci_hub_notify_info_t info = {0};
   if (!xhci_hub_notify_get_info(&info)) {
@@ -1544,6 +1553,8 @@ static void cmd_usb_hubirq(void) {
   console_printf("  Completion  : %u\n", (unsigned int)info.completion_code);
   console_printf("  Length      : %u\n", (unsigned int)info.length);
   console_printf("  Changes     : 0x%04x\n", (unsigned int)info.changes);
+  console_printf("  Notifications: %u\n", (unsigned int)info.notifications);
+  console_printf("  Ring wraps   : %u\n", (unsigned int)info.ring_wraps);
 }
 
 static void cmd_usb(const char *args) {
@@ -1563,6 +1574,10 @@ static void cmd_usb(const char *args) {
     }
     if (next_word_is(&args, "start") && end_of_args(args)) {
       cmd_usb_hubirq_start();
+      return;
+    }
+    if (next_word_is(&args, "resume") && end_of_args(args)) {
+      cmd_usb_hubirq_resume();
       return;
     }
   }

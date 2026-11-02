@@ -126,6 +126,9 @@ typedef struct {
   uint8_t interrupt_interval;
   uint16_t interrupt_mps;
   bool interrupt_ready;
+  unsigned int interrupt_index;
+  unsigned int interrupt_cycle;
+  bool interrupt_wrap_pending;
 } xhci_device_t;
 
 typedef enum {
@@ -3668,7 +3671,9 @@ xhci_interrupt_config_result_t xhci_hub_interrupt_configure(
   device->interrupt_interval = xhci_interval;
   device->interrupt_mps = mps;
   device->interrupt_ready = true;
-
+  device->interrupt_index = 0U;
+  device->interrupt_cycle = 1U;
+  device->interrupt_wrap_pending = false;
   return XHCI_INTERRUPT_CONFIG_OK;
 }
 
@@ -3680,10 +3685,46 @@ bool xhci_hub_notify_get_info(xhci_hub_notify_info_t *info) {
   return hub_notify_started;
 }
 
-xhci_hub_notify_result_t xhci_hub_notify_start(void) {
-  if (hub_notify_started)
-    return XHCI_HUB_NOTIFY_ALREADY_STARTED;
+static bool xhci_hub_notify_publish(
+    unsigned int index, size_t line) {
 
+  xhci_trb_t *ring = internal_hub.interrupt_ring.virtual;
+  uintptr_t address = (uintptr_t)&ring[index];
+  address &= ~(uintptr_t)(line - 1U);
+
+  return cache_clean((const void *)address, line);
+}
+
+static bool xhci_hub_notify_advance(size_t line) {
+  xhci_device_t *device = &internal_hub;
+  xhci_trb_t *ring = device->interrupt_ring.virtual;
+
+  // The first completed TRB in a new cycle proves
+  // that the controller traversed the old Link TRB.
+  if (device->interrupt_wrap_pending) {
+    xhci_trb_t *link = &ring[XHCI_RING_TRBS - 1U];
+    link->control = (link->control & ~XHCI_TRB_CYCLE) |
+        (device->interrupt_cycle ? XHCI_TRB_CYCLE : 0U);
+
+    if (!xhci_hub_notify_publish(
+        XHCI_RING_TRBS - 1U, line))
+      return false;
+
+    device->interrupt_wrap_pending = false;
+  }
+
+  device->interrupt_index++;
+  if (device->interrupt_index == XHCI_RING_TRBS - 1U) {
+    device->interrupt_index = 0U;
+    device->interrupt_cycle ^= 1U;
+    device->interrupt_wrap_pending = true;
+    hub_notify_info.ring_wraps++;
+  }
+
+  return true;
+}
+
+static xhci_hub_notify_result_t xhci_hub_notify_arm(void) {
   xhci_device_t *device = &internal_hub;
   if (!device->interrupt_ready ||
       !controller_running || !controller_verified ||
@@ -3707,22 +3748,22 @@ xhci_hub_notify_result_t xhci_hub_notify_start(void) {
   if (!dma_begin_device(buffer, DMA_FROM_DEVICE))
     return XHCI_HUB_NOTIFY_DMA_FAILED;
 
-  // One Normal TRB, at the start of the dedicated ring.
+  // Submit one TD at the current producer position.
+  unsigned int index = device->interrupt_index;
+  uint32_t cycle = device->interrupt_cycle ? XHCI_TRB_CYCLE : 0U;
+
   xhci_trb_t *ring = device->interrupt_ring.virtual;
-  ring[0].parameter = buffer->bus;
-  ring[0].status = device->interrupt_mps;
-  ring[0].control = (1U << XHCI_TRB_TYPE_SHIFT) |
-      XHCI_TRB_IOC | XHCI_TRB_CYCLE;
-
-  uintptr_t line = (uintptr_t)&ring[0] &
-      ~(uintptr_t)(cache.data_line_size - 1U);
-
-  if (!cache_clean((const void *)line, cache.data_line_size)) {
+  xhci_trb_t *trb = &ring[index];
+  trb->parameter = buffer->bus;
+  trb->status = device->interrupt_mps;
+  trb->control = (1U << XHCI_TRB_TYPE_SHIFT) | XHCI_TRB_IOC | cycle;
+  if (!xhci_hub_notify_publish(index, cache.data_line_size)) {
     dma_end_device(buffer);
     return XHCI_HUB_NOTIFY_RING_FAILED;
   }
 
-  uint64_t trb_address = device->interrupt_ring.bus;
+  uint64_t trb_address = device->interrupt_ring.bus +
+      (uint64_t)index * sizeof(xhci_trb_t);
   hub_notify_waiter = xhci_waiter_register(XHCI_TRB_TRANSFER_EVENT,
       device->slot_id, device->interrupt_dci, trb_address);
   if (!hub_notify_waiter) {
@@ -3730,12 +3771,10 @@ xhci_hub_notify_result_t xhci_hub_notify_start(void) {
     return XHCI_HUB_NOTIFY_WAITER_FAILED;
   }
 
-  hub_notify_info = (xhci_hub_notify_info_t){
-    .state = XHCI_HUB_NOTIFY_PENDING,
-    .slot_id = device->slot_id,
-    .endpoint_id = device->interrupt_dci,
-    .transfer_trb = trb_address
-  };
+  hub_notify_info.state = XHCI_HUB_NOTIFY_PENDING;
+  hub_notify_info.slot_id = device->slot_id;
+  hub_notify_info.endpoint_id = device->interrupt_dci;
+  hub_notify_info.transfer_trb = trb_address;
   hub_notify_started = true;
 
   __asm__ volatile("dsb sy" ::: "memory");
@@ -3744,6 +3783,13 @@ xhci_hub_notify_result_t xhci_hub_notify_start(void) {
       4U * device->slot_id, device->interrupt_dci);
 
   return XHCI_HUB_NOTIFY_OK;
+}
+
+xhci_hub_notify_result_t xhci_hub_notify_start(void) {
+  if (hub_notify_started)
+    return XHCI_HUB_NOTIFY_ALREADY_STARTED;
+
+  return xhci_hub_notify_arm();
 }
 
 void xhci_hub_notify_service(void) {
@@ -3795,6 +3841,26 @@ void xhci_hub_notify_service(void) {
 
   hub_notify_info.changes = changes;
   hub_notify_info.length = (uint8_t)received;
+  hub_notify_info.notifications++;
+
+  cache_info_t cache;
+  if (!cache_get_info(&cache) || cache.data_line_size == 0U ||
+      cache.data_line_size > PAGE_SIZE ||
+      (cache.data_line_size & (cache.data_line_size - 1U)) ||
+      !xhci_hub_notify_advance(cache.data_line_size)) {
+    hub_notify_info.state = XHCI_HUB_NOTIFY_FAILED;
+    return;
+  }
+
+  // Retain the completed notification until the
+  // corresponding hub status has been processed.
   hub_notify_info.state = XHCI_HUB_NOTIFY_COMPLETE;
 }
 
+xhci_hub_notify_result_t xhci_hub_notify_resume(void) {
+  if (!hub_notify_started ||
+      hub_notify_info.state != XHCI_HUB_NOTIFY_COMPLETE)
+    return XHCI_HUB_NOTIFY_NOT_READY;
+
+  return xhci_hub_notify_arm();
+}

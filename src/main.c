@@ -404,6 +404,13 @@ void main(void) {
             if (scan_result == USB_HUB_OK) {
               console_printf("OK (connected mask 0x%04x).\n",
                   (unsigned int)scan.connected);
+              console_puts("Starting hub notifications... ");
+              xhci_hub_notify_result_t notify_result =
+                  xhci_hub_notify_start();
+              if (notify_result == XHCI_HUB_NOTIFY_OK)
+                console_puts("OK.\n");
+              else
+                console_printf("FAILED (%u).\n", (unsigned int)notify_result);
             } else {
               console_printf("FAILED (port %u, result %u).\n",
                   (unsigned int)scan.failed_port, (unsigned int)scan_result);
