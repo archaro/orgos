@@ -200,6 +200,7 @@ typedef struct {
   uint64_t trb_address;
 } xhci_stop_event_state_t;
 static xhci_stop_event_state_t stop_out_event;
+static xhci_stop_event_state_t stop_in_event;
 
 static xhci_bulk_in_state_t bulk_in_state;
 static xhci_bulk_in_info_t bulk_in_info;
@@ -220,6 +221,7 @@ static bool slot_requested;
 static bool downstream_slot_requested;
 static bool downstream_disable_attempted;
 static bool downstream_stop_out_attempted;
+static bool downstream_stop_in_attempted;
 static bool downstream_slot_disabled;
 static bool downstream_cleaned;
 static uint8_t internal_hub_slot;
@@ -1477,10 +1479,43 @@ static xhci_dispatch_result_t xhci_dispatch_one() {
     }
     waiter->event = event;
     waiter->completed = true;
+    // A stopped Bulk IN event may belong to
+    // the outstanding receive TD itself.
+    if (stop_in_event.armed && !stop_in_event.received &&
+        event.type == XHCI_TRB_TRANSFER_EVENT &&
+        event.slot_id == stop_in_event.slot_id &&
+        endpoint_id == stop_in_event.endpoint_id &&
+        event.completion_code >= 26U && event.completion_code <= 28U) {
+      stop_in_event.received = true;
+      stop_in_event.completion_code = event.completion_code;
+      stop_in_event.trb_address = event.parameter;
+    }
     if (event.type == XHCI_TRB_COMMAND_EVENT)
       event_stats.command_events++;
     else
       event_stats.transfer_events++;
+    return XHCI_DISPATCH_OK;
+  }
+
+  // Stop Endpoint may report a dequeue position
+  // rather than the outstanding Bulk IN TD.
+  if (event.type == XHCI_TRB_TRANSFER_EVENT && stop_in_event.armed &&
+      !stop_in_event.received && event.slot_id == stop_in_event.slot_id &&
+      endpoint_id == stop_in_event.endpoint_id &&
+      event.completion_code >= 26U && event.completion_code <= 28U) {
+
+    xhci_device_t *device = &devices[1];
+    uint64_t base = device->bulk_in_ring.bus;
+
+    if (event.parameter < base || event.parameter - base >= PAGE_SIZE ||
+        ((event.parameter - base) % sizeof(xhci_trb_t)) != 0U)
+      return xhci_dispatch_unhandled(&event);
+
+    stop_in_event.received = true;
+    stop_in_event.completion_code = event.completion_code;
+    stop_in_event.trb_address = event.parameter;
+
+    event_stats.transfer_events++;
     return XHCI_DISPATCH_OK;
   }
 
@@ -4245,6 +4280,122 @@ xhci_stop_result_t xhci_downstream_stop_bulk_out( xhci_stop_info_t *info) {
   return XHCI_STOP_OK;
 }
 
+xhci_stop_result_t xhci_downstream_stop_bulk_in(xhci_stop_info_t *info) {
+
+  if (!info)
+    return XHCI_STOP_NOT_READY;
+
+  *info = (xhci_stop_info_t){
+    .command_result = XHCI_COMMAND_UNAVAILABLE
+  };
+
+  if (downstream_stop_in_attempted)
+    return XHCI_STOP_ALREADY_ATTEMPTED;
+
+  xhci_device_t *device = &devices[1];
+  if (!downstream_quiesced || downstream_slot_disabled ||
+      !device->addressed || !device->bulk_in_ready ||
+      !bulk_in_stream_started || device->slot_id == 0U ||
+      !controller_running || !controller_verified ||
+      command_outstanding || command_ring_failed ||
+      dispatch_fault != XHCI_DISPATCH_NONE)
+    return XHCI_STOP_NOT_READY;
+
+  // A completed waiter should be reconciled,
+  // not cancelled.
+  if (bulk_in_state != XHCI_BULK_IN_PENDING ||
+      !bulk_in_waiter || bulk_in_waiter->completed ||
+      device->ep0_active || device->bulk_out_active)
+    return XHCI_STOP_BUSY;
+
+  // Other outstanding operations must not
+  // interfere with this cancellation.
+  for (unsigned int i = 0U; i < XHCI_EVENT_WAITERS; i++) {
+    xhci_event_waiter_t *waiter = &event_waiters[i];
+    if (!waiter->active || waiter == bulk_in_waiter)
+      continue;
+    if (waiter->slot_id == device->slot_id)
+      return XHCI_STOP_BUSY;
+  }
+
+  uint8_t in_state = 0U;
+  uint8_t out_state = 0U;
+
+  if (!xhci_downstream_endpoint_states(&in_state, &out_state))
+    return XHCI_STOP_NOT_READY;
+
+  info->slot_id = device->slot_id;
+  info->endpoint_id = XHCI_BULK_IN_DCI;
+  info->before_state = in_state;
+
+  // Only a Running endpoint requires stopping.
+  if (in_state != 1U)
+    return XHCI_STOP_INVALID_STATE;
+
+  xhci_trb_t command = {
+    .parameter = 0U,
+    .status = 0U,
+    .control = (XHCI_TRB_STOP_ENDPOINT << XHCI_TRB_TYPE_SHIFT) |
+        ((uint32_t)XHCI_BULK_IN_DCI << 16) |
+        ((uint32_t)device->slot_id << 24)
+  };
+
+  downstream_stop_in_attempted = true;
+
+  stop_in_event = (xhci_stop_event_state_t){
+    .armed = true,
+    .slot_id = device->slot_id,
+    .endpoint_id = XHCI_BULK_IN_DCI
+  };
+
+  xhci_command_completion_t completion = {0};
+  xhci_command_result_t status = xhci_command_submit(&command, &completion);
+
+  stop_in_event.armed = false;
+
+  info->command_result = status;
+  info->completion_code = completion.completion_code;
+  info->stop_event_received = stop_in_event.received;
+  info->stop_event_code = stop_in_event.completion_code;
+  info->stop_event_trb = stop_in_event.trb_address;
+
+  if (status != XHCI_COMMAND_OK || completion.slot_id != device->slot_id)
+    return XHCI_STOP_COMMAND_FAILED;
+
+  if (!stop_in_event.received)
+    return XHCI_STOP_VERIFY_FAILED;
+
+  if (!xhci_downstream_endpoint_states(&in_state, &out_state))
+    return XHCI_STOP_VERIFY_FAILED;
+
+  info->after_state = in_state;
+  if (in_state != 3U)
+    return XHCI_STOP_VERIFY_FAILED;
+
+  // The controller has stopped executing this
+  // endpoint. Reconcile its software owner.
+  if (bulk_in_waiter && bulk_in_waiter->completed) {
+    xhci_in_reconcile_result_t result = xhci_bulk_in_quiesced_reconcile();
+    if (result != XHCI_IN_RECONCILE_OK)
+      return XHCI_STOP_VERIFY_FAILED;
+  } else if (bulk_in_waiter && bulk_in_state == XHCI_BULK_IN_PENDING) {
+    // The stopped event described the dequeue
+    // position, not the pending receive TD.
+    // Stop Endpoint completed successfully,
+    // so this TD can no longer execute.
+    xhci_waiter_release(bulk_in_waiter);
+    bulk_in_waiter = NULL;
+    bulk_in_info.completion_code = stop_in_event.completion_code;
+    bulk_in_info.event_parameter = stop_in_event.trb_address;
+    bulk_in_state = XHCI_BULK_IN_FAILED;
+    bulk_in_stream_failed = true;
+  } else {
+    return XHCI_STOP_VERIFY_FAILED;
+  }
+
+  return XHCI_STOP_OK;
+}
+
 xhci_disable_result_t xhci_downstream_disable(xhci_disable_info_t *info) {
   if (!info)
     return XHCI_DISABLE_NOT_READY;
@@ -4362,6 +4513,7 @@ xhci_recycle_result_t xhci_downstream_recycle(void) {
   downstream_slot_disabled = false;
   downstream_cleaned = false;
   downstream_stop_out_attempted = false;
+  downstream_stop_in_attempted = false;
 
   bulk_in_state = XHCI_BULK_IN_IDLE;
   bulk_in_info = (xhci_bulk_in_info_t){0};
@@ -4372,6 +4524,7 @@ xhci_recycle_result_t xhci_downstream_recycle(void) {
   bulk_in_stream_stats = (xhci_bulk_in_stream_stats_t){0};
 
   stop_out_event = (xhci_stop_event_state_t){0};
+  stop_in_event = (xhci_stop_event_state_t){0};
 
   return XHCI_RECYCLE_OK;
 }

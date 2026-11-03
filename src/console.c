@@ -1299,6 +1299,23 @@ static void cmd_usb_stopout(void) {
       (unsigned long long)info.stop_event_trb);
 }
 
+static void cmd_usb_stopin(void) {
+  xhci_stop_info_t info = {0};
+  xhci_stop_result_t result = xhci_downstream_stop_bulk_in(&info);
+  console_printf("Stop Bulk IN: %u\n", (unsigned int)result);
+  console_printf("  Slot       : %u\n", (unsigned int)info.slot_id);
+  console_printf("  Endpoint   : %u\n", (unsigned int)info.endpoint_id);
+  console_printf("  Before     : %u\n", (unsigned int)info.before_state);
+  console_printf("  After      : %u\n", (unsigned int)info.after_state);
+  console_printf("  Command    : %u\n", (unsigned int)info.command_result);
+  console_printf("  Completion : %u\n", (unsigned int)info.completion_code);
+  console_printf("  Stop event : %s\n",
+      info.stop_event_received ? "Yes" : "No");
+  console_printf("  Event code : %u\n", (unsigned int)info.stop_event_code);
+  console_printf("  Event TRB  : %016llx\n",
+      (unsigned long long)info.stop_event_trb);
+}
+
 static void cmd_usb_disable(void) {
   xhci_disable_info_t info = {0};
   xhci_disable_result_t result = xhci_downstream_disable(&info);
@@ -1725,6 +1742,10 @@ static void cmd_usb(const char *args) {
     cmd_usb_stopout();
     return;
   }
+  if (next_word_is(&args, "stopin") && end_of_args(args)) {
+    cmd_usb_stopin();
+    return;
+  }
   if (next_word_is(&args, "transfers") && end_of_args(args)) {
     cmd_usb_transfers();
     return;
@@ -1828,7 +1849,7 @@ static void cmd_usb(const char *args) {
   if (!end_of_args(args)) {
     console_puts(
         "Usage: usb [scan | state | ports | events | device | devices | "
-        "stopout | disable | cleanup | detach | recycle | rearm | transfers | "
+        "stopout | stopin | disable | cleanup | detach | recycle | rearm | transfers | "
 	"retirein | reconcilein | hubports | hubirq | enumerate | test]\n");
     return;
   }
