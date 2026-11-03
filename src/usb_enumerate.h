@@ -32,7 +32,8 @@ typedef enum {
   USB_ENUM_SET_INTERFACE_FAILED,
   USB_ENUM_MIDI_QUIRK_FAILED,
   USB_ENUM_DEBOUNCE_FAILED,
-  USB_ENUM_TEST_ABORT
+  USB_ENUM_TEST_ABORT,
+  USB_ENUM_TEST_CONFIG_ABORT
 } usb_enum_result_t;
 
 typedef enum {
@@ -80,3 +81,4 @@ void usb_device_port_changed(uint8_t port, uint16_t status, uint16_t change);
 bool usb_device_finalize_disconnect(void);
 bool usb_enumeration_rearm(void);
 bool usb_enumeration_test_abort_arm(void);
+bool usb_enumeration_test_config_abort_arm(void);

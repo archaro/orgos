@@ -887,6 +887,13 @@ static void cmd_usb_test_enumabort(void) {
       armed ? "ARMED" : "NOT READY");
 }
 
+static void cmd_usb_test_enumconfigabort(void) {
+  bool armed = usb_enumeration_test_config_abort_arm();
+
+  console_printf("USB configuration test abort: %s\n",
+      armed ? "ARMED" : "NOT READY");
+}
+
 static void cmd_usb_test_noops(void) {
   const unsigned int count = 600U;
   console_puts("Executing 600 sequential No Op commands...\n");
@@ -2164,6 +2171,11 @@ static void cmd_usb(const char *args) {
       cmd_usb_test_enumabort();
       return;
     }
+    if (next_word_is(&other_args, "enumconfigabort") &&
+        end_of_args(other_args)) {
+      cmd_usb_test_enumconfigabort();
+      return;
+    }
     if (next_word_is(&other_args, "noops") &&
         end_of_args(other_args)) {
       cmd_usb_test_noops();
@@ -2188,7 +2200,8 @@ static void cmd_usb(const char *args) {
       cmd_usb_test_midiin(other_args);
       return;
     }
-    console_puts("Usage: usb test [noops | quiesce | midiout | midiwrap | midiin]\n");
+    console_puts("Usage: usb test [noops | quiesce | midiout | midiwrap | midiin | "
+                 "enumabort | enumconfigabort ]\n");
     return;
   }
   if (next_word_is(&args, "state") && end_of_args(args)) {

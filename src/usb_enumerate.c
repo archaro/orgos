@@ -19,6 +19,7 @@
 
 static bool enumeration_attempted;
 static bool test_abort_after_address;
+static bool test_abort_after_config;
 static usb_enum_info_t enumeration_state;
 static usb_device_t current_device;
 static bool device_record_valid;
@@ -393,6 +394,15 @@ usb_enum_result_t usb_enumerate(usb_enum_info_t *info) {
   if (result != USB_ENUM_OK)
     goto complete;
 
+  // Diagnostic: descriptor transfers and parsing
+  // succeeded, but enumeration stops before the
+  // device configuration is selected.
+  if (test_abort_after_config) {
+    test_abort_after_config = false;
+    result = USB_ENUM_TEST_CONFIG_ABORT;
+    goto complete;
+  }
+
   state.stage = USB_ENUM_STAGE_SELECT_CONFIGURATION;
   result = select_configuration(&state);
   if (result != USB_ENUM_OK)
@@ -441,7 +451,9 @@ bool usb_enumeration_recovery_ready(void) {
       enumeration_state.result == USB_ENUM_OK ||
       !enumeration_state.slot_confirmed ||
       !enumeration_state.address_attempted ||
-      enumeration_state.stage < USB_ENUM_STAGE_DEVICE_DESCRIPTOR)
+      enumeration_state.address == 0U ||
+      enumeration_state.stage < USB_ENUM_STAGE_DEVICE_DESCRIPTOR ||
+      enumeration_state.bulk_attempted)
     return false;
 
   // Only an attempt that successfully passed
@@ -570,10 +582,20 @@ bool usb_enumeration_rearm(void) {
 }
 
 bool usb_enumeration_test_abort_arm(void) {
-  if (enumeration_attempted || test_abort_after_address)
+  if (enumeration_attempted || test_abort_after_address ||
+      test_abort_after_config)
     return false;
 
   test_abort_after_address = true;
+  return true;
+}
+
+bool usb_enumeration_test_config_abort_arm(void) {
+  if (enumeration_attempted || test_abort_after_address ||
+      test_abort_after_config)
+    return false;
+
+  test_abort_after_config = true;
   return true;
 }
 
