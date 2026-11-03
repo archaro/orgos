@@ -22,6 +22,7 @@ static usb_change_event_t change_queue[USB_CHANGE_QUEUE_CAPACITY];
 static unsigned int change_head;
 static unsigned int change_count;
 static usb_change_stats_t change_stats;
+static usb_lifecycle_run_info_t lifecycle_run;
 
 // A completed notification may identify several ports.
 // Retain progress until all have been processed.
@@ -464,6 +465,133 @@ bool usb_lifecycle_inspect(usb_lifecycle_info_t *info) {
   return true;
 }
 
+bool usb_lifecycle_get_run_info(
+    usb_lifecycle_run_info_t *info) {
+  if (!info)
+    return false;
+
+  *info = lifecycle_run;
+  return true;
+}
+
+bool usb_lifecycle_arm(void) {
+  usb_device_t device = {0};
+
+  if (!usb_service_available() || !usb_get_device(&device) ||
+      (device.state != USB_DEVICE_ACTIVE &&
+       device.state != USB_DEVICE_DISCONNECTING))
+    return false;
+
+  if (lifecycle_run.state == USB_LIFECYCLE_RUN_ARMED)
+    return false;
+
+  // Never retry a failed teardown or start another
+  // one for the same generation.
+  if (lifecycle_run.state != USB_LIFECYCLE_RUN_DISARMED &&
+      lifecycle_run.generation == device.generation)
+    return false;
+
+  lifecycle_run = (usb_lifecycle_run_info_t){
+    .state = USB_LIFECYCLE_RUN_ARMED,
+    .generation = device.generation
+  };
+
+  return true;
+}
+
+static void usb_lifecycle_service(void) {
+  if (lifecycle_run.state != USB_LIFECYCLE_RUN_ARMED)
+    return;
+
+  usb_lifecycle_info_t info = {0};
+
+  if (!usb_lifecycle_inspect(&info) ||
+      info.generation != lifecycle_run.generation) {
+    lifecycle_run.state = USB_LIFECYCLE_RUN_FAILED;
+    return;
+  }
+
+  // No teardown is needed while the device
+  // remains active.
+  if (info.next == USB_LIFECYCLE_IDLE)
+    return;
+
+  lifecycle_run.last_action = info.next;
+  lifecycle_run.last_succeeded = false;
+  lifecycle_run.last_result = 0U;
+
+  bool succeeded = false;
+
+  switch (info.next) {
+    case USB_LIFECYCLE_RECONCILE_IN: {
+      xhci_in_reconcile_result_t result = xhci_bulk_in_quiesced_reconcile();
+      lifecycle_run.last_result = (uint32_t)result;
+      succeeded = result == XHCI_IN_RECONCILE_OK ||
+          result == XHCI_IN_RECONCILE_RESOLVED;
+      break;
+    }
+    case USB_LIFECYCLE_STOP_IN: {
+      xhci_stop_info_t result = {0};
+      xhci_stop_result_t status = xhci_downstream_stop_bulk_in(&result);
+      lifecycle_run.last_result = (uint32_t)status;
+      succeeded = status == XHCI_STOP_OK;
+      break;
+    }
+    case USB_LIFECYCLE_DISABLE: {
+      xhci_disable_info_t result = {0};
+      xhci_disable_result_t status = xhci_downstream_disable(&result);
+      lifecycle_run.last_result = (uint32_t)status;
+      succeeded = status == XHCI_DISABLE_OK;
+      break;
+    }
+    case USB_LIFECYCLE_RETIRE_IN: {
+      xhci_bulk_in_retire_result_t status = xhci_bulk_in_stream_retire();
+      lifecycle_run.last_result = (uint32_t)status;
+      succeeded = status == XHCI_BULK_IN_RETIRE_OK;
+      break;
+    }
+    case USB_LIFECYCLE_CLEANUP: {
+      xhci_cleanup_info_t result = {0};
+      xhci_cleanup_result_t status = xhci_downstream_cleanup(&result);
+      lifecycle_run.last_result = (uint32_t)status;
+      succeeded = status == XHCI_CLEANUP_OK;
+      break;
+    }
+    case USB_LIFECYCLE_DETACH: {
+      succeeded = usb_device_finalize_disconnect();
+      lifecycle_run.last_result = succeeded ? 0U : 1U;
+      break;
+    }
+    case USB_LIFECYCLE_RECYCLE: {
+      xhci_recycle_result_t status = xhci_downstream_recycle();
+      lifecycle_run.last_result = (uint32_t)status;
+      succeeded = status == XHCI_RECYCLE_OK;
+      break;
+    }
+    case USB_LIFECYCLE_REARM: {
+      succeeded = usb_enumeration_rearm();
+      lifecycle_run.last_result = succeeded ? 0U : 1U;
+      break;
+    }
+    default: {
+      // A blocked or unsupported state is not
+      // permission to guess the next operation.
+      lifecycle_run.state = USB_LIFECYCLE_RUN_FAILED;
+      return;
+    }
+  }
+
+  lifecycle_run.steps++;
+  lifecycle_run.last_succeeded = succeeded;
+  if (!succeeded) {
+    lifecycle_run.state = USB_LIFECYCLE_RUN_FAILED;
+    return;
+  }
+
+  if (info.next == USB_LIFECYCLE_REARM)
+    lifecycle_run.state = USB_LIFECYCLE_RUN_COMPLETE;
+}
+
 void usb_service(void) {
   if (!usb_initialised || usb_service_failed)
     return;
@@ -494,5 +622,9 @@ void usb_service(void) {
 
   // Service the diagnostic MIDI receiver, if active.
   usb_midi_in_stress_service();
+
+  // Perform at most one lifecycle operation per
+  // foreground service pass, when explicitly armed.
+  usb_lifecycle_service();
 }
 

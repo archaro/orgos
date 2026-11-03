@@ -60,6 +60,25 @@ typedef struct {
 
 bool usb_lifecycle_inspect(usb_lifecycle_info_t *info);
 
+typedef enum {
+  USB_LIFECYCLE_RUN_DISARMED,
+  USB_LIFECYCLE_RUN_ARMED,
+  USB_LIFECYCLE_RUN_COMPLETE,
+  USB_LIFECYCLE_RUN_FAILED
+} usb_lifecycle_run_state_t;
+
+typedef struct {
+  usb_lifecycle_run_state_t state;
+  usb_lifecycle_action_t last_action;
+  uint32_t generation;
+  uint32_t steps;
+  uint32_t last_result;
+  bool last_succeeded;
+} usb_lifecycle_run_info_t;
+
+bool usb_lifecycle_arm(void);
+bool usb_lifecycle_get_run_info(usb_lifecycle_run_info_t *info);
+
 typedef struct {
   uint32_t processed;
   uint32_t failures;

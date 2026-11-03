@@ -1459,6 +1459,38 @@ static void cmd_usb_lifecycle(void) {
       usb_lifecycle_action_name(info.next));
 }
 
+static const char *usb_lifecycle_run_name(
+    usb_lifecycle_run_state_t state) {
+  switch (state) {
+    case USB_LIFECYCLE_RUN_DISARMED: return "Disarmed";
+    case USB_LIFECYCLE_RUN_ARMED: return "Armed";
+    case USB_LIFECYCLE_RUN_COMPLETE: return "Complete";
+    case USB_LIFECYCLE_RUN_FAILED: return "Failed";
+    default: return "Unknown";
+  }
+}
+
+static void cmd_usb_lifecycle_arm(void) {
+  bool armed = usb_lifecycle_arm();
+  console_printf("USB lifecycle arm: %s\n", armed ? "OK" : "NOT READY");
+}
+
+static void cmd_usb_lifecycle_status(void) {
+  usb_lifecycle_run_info_t info = {0};
+  if (!usb_lifecycle_get_run_info(&info)) {
+    console_puts("USB lifecycle executor unavailable.\n");
+    return;
+  }
+  console_puts("USB lifecycle executor:\n");
+  console_printf("  State       : %s\n", usb_lifecycle_run_name(info.state));
+  console_printf("  Generation  : %u\n", (unsigned int)info.generation);
+  console_printf("  Steps       : %u\n", (unsigned int)info.steps);
+  console_printf("  Last action : %s\n",
+      usb_lifecycle_action_name(info.last_action));
+  console_printf("  Last result : %u\n", (unsigned int)info.last_result);
+  console_printf("  Succeeded   : %s\n", info.last_succeeded ? "Yes" : "No");
+}
+
 static void cmd_usb_test_midiout(void) {
   usb_enum_info_t enumeration = {0};
   usb_device_t device = {0};
@@ -1771,8 +1803,20 @@ static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
   const char *other_args = args;
-  if (next_word_is(&args, "lifecycle") && end_of_args(args)) {
-    cmd_usb_lifecycle();
+  if (next_word_is(&args, "lifecycle")) {
+    if (end_of_args(args)) {
+      cmd_usb_lifecycle();
+      return;
+    }
+    if (next_word_is(&args, "arm") && end_of_args(args)) {
+      cmd_usb_lifecycle_arm();
+      return;
+    }
+    if (next_word_is(&args, "status") && end_of_args(args)) {
+      cmd_usb_lifecycle_status();
+      return;
+    }
+    console_puts("Usage: usb lifecycle [arm | status]\n");
     return;
   }
   if (next_word_is(&args, "retirein") && end_of_args(args)) {
