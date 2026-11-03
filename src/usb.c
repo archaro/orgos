@@ -789,3 +789,93 @@ bool usb_reenum_inspect(usb_reenum_info_t *info) {
   return true;
 }
 
+bool usb_enum_admission_inspect(usb_enum_admission_info_t *info) {
+  if (!info)
+    return false;
+
+  *info = (usb_enum_admission_info_t){0};
+
+  if (!usb_service_available()) {
+    info->result = USB_ENUM_ADMIT_SERVICE_FAILED;
+    return true;
+  }
+
+  if (change_stats.failed) {
+    info->result = USB_ENUM_ADMIT_HUB_FAILED;
+    return true;
+  }
+
+  usb_hub_init_info_t hub = {0};
+  if (!usb_hub_get_init_info(&hub) || hub.result != USB_HUB_INIT_OK) {
+    info->result = USB_ENUM_ADMIT_HUB_NOT_READY;
+    return true;
+  }
+
+  usb_enum_info_t enumeration = {0};
+  if (usb_get_enumeration(&enumeration)) {
+    info->result = USB_ENUM_ADMIT_ALREADY_ATTEMPTED;
+    return true;
+  }
+
+  usb_device_t device = {0};
+  if (usb_get_device(&device)) {
+    info->generation = device.generation;
+
+    usb_reenum_info_t reconnect = {0};
+    if (!usb_reenum_inspect(&reconnect)) {
+      info->result = USB_ENUM_ADMIT_RECONNECT_BLOCKED;
+      return true;
+    }
+
+    info->port = reconnect.port;
+    info->reconnect_reason = reconnect.result;
+    info->result = reconnect.result == USB_REENUM_READY ?
+        USB_ENUM_ADMIT_RECONNECT : USB_ENUM_ADMIT_RECONNECT_BLOCKED;
+
+    return true;
+  }
+
+  // Initial enumeration has no previous device
+  // generation or downstream slot to reclaim.
+  if (xhci_downstream_is_quiesced() || xhci_downstream_is_slot_disabled() ||
+      xhci_downstream_is_cleaned()) {
+    info->result = USB_ENUM_ADMIT_XHCI_BUSY;
+    return true;
+  }
+
+  for (uint8_t port = 1U; port <= hub.ports; port++) {
+    usb_hub_port_t status = {0};
+
+    if (usb_hub_port_status(port, &status) != USB_HUB_OK) {
+      info->result = USB_ENUM_ADMIT_PORT_FAILED;
+      return true;
+    }
+
+    if (!(status.status & 0x0001U))
+      continue;
+
+    info->connected_count++;
+    info->port = port;
+
+    if (!(status.status & 0x0100U)) {
+      info->result = USB_ENUM_ADMIT_PORT_FAILED;
+      return true;
+    }
+
+    uint16_t bit = (uint16_t)(1U << port);
+    if (status.change != 0U || (change_pending_mask & bit) != 0U) {
+      info->result = USB_ENUM_ADMIT_CHANGE_PENDING;
+      return true;
+    }
+  }
+
+  if (info->connected_count == 0U)
+    info->result = USB_ENUM_ADMIT_NO_DEVICE;
+  else if (info->connected_count != 1U)
+    info->result = USB_ENUM_ADMIT_MULTIPLE_DEVICES;
+  else
+    info->result = USB_ENUM_ADMIT_INITIAL;
+
+  return true;
+}
+

@@ -1489,6 +1489,54 @@ static const char *usb_lifecycle_action_name(usb_lifecycle_action_t action) {
   }
 }
 
+static const char *usb_enum_admission_name(usb_enum_admission_result_t result) {
+  switch (result) {
+    case USB_ENUM_ADMIT_INITIAL:
+      return "Ready for initial enumeration";
+    case USB_ENUM_ADMIT_RECONNECT:
+      return "Ready for re-enumeration";
+    case USB_ENUM_ADMIT_SERVICE_FAILED:
+      return "USB service unavailable";
+    case USB_ENUM_ADMIT_HUB_FAILED:
+      return "Hub monitoring failed";
+    case USB_ENUM_ADMIT_HUB_NOT_READY:
+      return "Hub not initialised";
+    case USB_ENUM_ADMIT_ALREADY_ATTEMPTED:
+      return "Enumeration already attempted";
+    case USB_ENUM_ADMIT_XHCI_BUSY:
+      return "xHCI downstream state busy";
+    case USB_ENUM_ADMIT_NO_DEVICE:
+      return "No connected device";
+    case USB_ENUM_ADMIT_MULTIPLE_DEVICES:
+      return "Multiple connected devices";
+    case USB_ENUM_ADMIT_PORT_FAILED:
+      return "Port inspection failed";
+    case USB_ENUM_ADMIT_CHANGE_PENDING:
+      return "Hub change pending";
+    case USB_ENUM_ADMIT_RECONNECT_BLOCKED:
+      return "Re-enumeration blocked";
+    default:
+      return "Unknown";
+  }
+}
+
+static void cmd_usb_lifecycle_admission(void) {
+  usb_enum_admission_info_t info = {0};
+  if (!usb_enum_admission_inspect(&info)) {
+    console_puts("Enumeration admission unavailable.\n");
+    return;
+  }
+  console_puts("USB enumeration admission:\n");
+  console_printf("  Decision   : %s\n", usb_enum_admission_name(info.result));
+  console_printf("  Generation : %u\n", (unsigned int)info.generation);
+  console_printf("  Hub port   : %u\n", (unsigned int)info.port);
+  console_printf("  Connected  : %u\n", (unsigned int)info.connected_count);
+  if (info.result == USB_ENUM_ADMIT_RECONNECT_BLOCKED) {
+    console_printf("  Reason     : %s\n",
+        usb_reenum_result_name(info.reconnect_reason));
+  }
+}
+
 static void cmd_usb_lifecycle(void) {
   usb_lifecycle_info_t info = {0};
   if (!usb_lifecycle_inspect(&info)) {
@@ -1910,6 +1958,10 @@ static void cmd_usb(const char *args) {
       cmd_usb_lifecycle();
       return;
     }
+    if (next_word_is(&args, "admission") && end_of_args(args)) {
+      cmd_usb_lifecycle_admission();
+      return;
+    }
     if (next_word_is(&args, "ready") && end_of_args(args)) {
       cmd_usb_lifecycle_ready();
       return;
@@ -1926,7 +1978,7 @@ static void cmd_usb(const char *args) {
       cmd_usb_lifecycle_status();
       return;
     }
-    console_puts("Usage: usb lifecycle [arm | status | port | ready]\n");
+    console_puts("Usage: usb lifecycle [arm | status | port | ready | admission]\n");
     return;
   }
   if (next_word_is(&args, "retirein") && end_of_args(args)) {

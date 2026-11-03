@@ -295,6 +295,15 @@ usb_enum_result_t usb_enumerate(usb_enum_info_t *info) {
     return USB_ENUM_ALREADY_ATTEMPTED;
   }
 
+  usb_enum_admission_info_t admission = {0};
+  if (!usb_enum_admission_inspect(&admission) ||
+      (admission.result != USB_ENUM_ADMIT_INITIAL &&
+       admission.result != USB_ENUM_ADMIT_RECONNECT)) {
+    *info = (usb_enum_info_t){0};
+    info->result = USB_ENUM_NOT_READY;
+    return USB_ENUM_NOT_READY;
+  }
+
   usb_init_info_t root;
   if (!usb_get_init_info(&root) ||
       root.result != USB_INIT_OK || root.address == 0U)

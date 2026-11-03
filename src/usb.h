@@ -171,3 +171,28 @@ typedef struct {
 
 bool usb_reenum_inspect(usb_reenum_info_t *info);
 
+typedef enum {
+  USB_ENUM_ADMIT_INITIAL,
+  USB_ENUM_ADMIT_RECONNECT,
+  USB_ENUM_ADMIT_SERVICE_FAILED,
+  USB_ENUM_ADMIT_HUB_FAILED,
+  USB_ENUM_ADMIT_HUB_NOT_READY,
+  USB_ENUM_ADMIT_ALREADY_ATTEMPTED,
+  USB_ENUM_ADMIT_XHCI_BUSY,
+  USB_ENUM_ADMIT_NO_DEVICE,
+  USB_ENUM_ADMIT_MULTIPLE_DEVICES,
+  USB_ENUM_ADMIT_PORT_FAILED,
+  USB_ENUM_ADMIT_CHANGE_PENDING,
+  USB_ENUM_ADMIT_RECONNECT_BLOCKED
+} usb_enum_admission_result_t;
+
+typedef struct {
+  usb_enum_admission_result_t result;
+  usb_reenum_result_t reconnect_reason;
+  uint32_t generation;
+  uint8_t port;
+  uint8_t connected_count;
+} usb_enum_admission_info_t;
+
+bool usb_enum_admission_inspect(usb_enum_admission_info_t *info);
+
