@@ -1327,6 +1327,11 @@ static void cmd_usb_cleanup(void) {
       xhci_downstream_is_cleaned() ? "Yes" : "No");
 }
 
+static void cmd_usb_retirein(void) {
+  xhci_bulk_in_retire_result_t result = xhci_bulk_in_stream_retire();
+  console_printf("Bulk IN retirement: %u\n", (unsigned int)result);
+}
+
 static void cmd_usb_recycle(void) {
   usb_device_t device = {0};
   if (!usb_get_device(&device) || device.state != USB_DEVICE_DETACHED) {
@@ -1697,6 +1702,10 @@ static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
   const char *other_args = args;
+  if (next_word_is(&args, "retirein") && end_of_args(args)) {
+    cmd_usb_retirein();
+    return;
+  }
   if (next_word_is(&args, "stopout") && end_of_args(args)) {
     cmd_usb_stopout();
     return;
@@ -1804,8 +1813,8 @@ static void cmd_usb(const char *args) {
   if (!end_of_args(args)) {
     console_puts(
         "Usage: usb [scan | state | ports | events | device | devices | "
-        "stopout | disable | cleanup | detach | recycle | ream | transfers | "
-	"hubports | hubirq | enumerate | test]\n");
+        "stopout | disable | cleanup | detach | recycle | rearm | transfers | "
+	"retirein | hubports | hubirq | enumerate | test]\n");
     return;
   }
 

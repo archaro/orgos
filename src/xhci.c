@@ -2798,6 +2798,53 @@ bool xhci_bulk_in_stream_read(xhci_bulk_in_info_t *result) {
   return true;
 }
 
+xhci_bulk_in_retire_result_t xhci_bulk_in_stream_retire(void) {
+  xhci_device_t *device = &devices[1];
+
+  if (!bulk_in_stream_started)
+    return XHCI_BULK_IN_RETIRE_NOT_STARTED;
+
+  // The controller must have relinquished
+  // the slot before retiring receiver state.
+  if (!downstream_quiesced || !downstream_slot_disabled ||
+      downstream_cleaned || !controller_running ||
+      !controller_verified || command_outstanding ||
+      command_ring_failed || dispatch_fault != XHCI_DISPATCH_NONE)
+    return XHCI_BULK_IN_RETIRE_NOT_READY;
+
+  // The event dispatcher must no longer have
+  // any outstanding owner for this device.
+  if (bulk_in_waiter || bulk_in_state == XHCI_BULK_IN_PENDING ||
+      device->ep0_active || device->bulk_out_active)
+    return XHCI_BULK_IN_RETIRE_BUSY;
+
+  for (unsigned int i = 0U; i < XHCI_EVENT_WAITERS; i++) {
+    xhci_event_waiter_t *waiter = &event_waiters[i];
+    if (waiter->active && waiter->slot_id == device->slot_id)
+      return XHCI_BULK_IN_RETIRE_BUSY;
+  }
+
+  // The receiver must have reached a terminal
+  // transfer state before we discard its state.
+  if (bulk_in_state != XHCI_BULK_IN_FAILED &&
+      bulk_in_state != XHCI_BULK_IN_COMPLETE)
+    return XHCI_BULK_IN_RETIRE_BUSY;
+
+  // Disable Slot has completed. The controller
+  // no longer owns this endpoint's execution.
+  bulk_in_stream_started = false;
+  bulk_in_stream_failed = false;
+  bulk_in_stream_queued = false;
+  bulk_in_state = XHCI_BULK_IN_IDLE;
+  bulk_in_waiter = NULL;
+  bulk_in_queue_head = 0U;
+  bulk_in_queue_count = 0U;
+
+  // Preserve the last transfer information and
+  // statistics until downstream recycling.
+  return XHCI_BULK_IN_RETIRE_OK;
+}
+
 xhci_hub_result_t xhci_hub_configure(
     uint8_t ports, uint8_t tt_think_time, xhci_hub_info_t *result) {
 
@@ -4018,6 +4065,12 @@ xhci_cleanup_result_t xhci_downstream_cleanup(xhci_cleanup_info_t *info) {
     return XHCI_CLEANUP_NOT_READY;
 
   info->slot_id = device->slot_id;
+
+  // A continuous receiver must be retired
+  // before its buffers can be reclaimed.
+  if (bulk_in_stream_started || bulk_in_waiter ||
+      bulk_in_state == XHCI_BULK_IN_PENDING)
+    return XHCI_CLEANUP_BUSY;
 
   // Never destroy the state belonging
   // to an unresolved transfer.

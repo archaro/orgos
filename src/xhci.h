@@ -564,6 +564,16 @@ bool xhci_bulk_in_stream_get_stats(xhci_bulk_in_stream_stats_t *result);
 bool xhci_bulk_in_stream_read(xhci_bulk_in_info_t *result);
 
 typedef enum {
+  XHCI_BULK_IN_RETIRE_OK,
+  XHCI_BULK_IN_RETIRE_NOT_READY,
+  XHCI_BULK_IN_RETIRE_BUSY,
+  XHCI_BULK_IN_RETIRE_NOT_STARTED
+} xhci_bulk_in_retire_result_t;
+
+xhci_bulk_in_retire_result_t
+xhci_bulk_in_stream_retire(void);
+
+typedef enum {
   XHCI_CONTROL_OK,
   XHCI_CONTROL_NOT_READY,
   XHCI_CONTROL_ALLOCATION_FAILED,
