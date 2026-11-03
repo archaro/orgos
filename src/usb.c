@@ -22,6 +22,7 @@ static usb_change_event_t change_queue[USB_CHANGE_QUEUE_CAPACITY];
 static unsigned int change_head;
 static unsigned int change_count;
 static usb_change_stats_t change_stats;
+static usb_change_event_t last_port_change[16];
 static usb_lifecycle_run_info_t lifecycle_run;
 
 // A completed notification may identify several ports.
@@ -273,6 +274,11 @@ static void usb_change_enqueue( uint8_t port, const usb_hub_port_t *status) {
     .status = status->status,
     .change = status->change
   };
+
+  // Keep the latest notification independently
+  // of the consumable diagnostic event queue.
+  if (port < 16U)
+    last_port_change[port] = change_queue[tail];
 
   change_count++;
   // Notify the lifecycle manager independently
@@ -653,5 +659,45 @@ void usb_service(void) {
   // Perform at most one lifecycle operation per
   // foreground service pass, when explicitly armed.
   usb_lifecycle_service();
+}
+
+bool usb_lifecycle_port_inspect(usb_lifecycle_port_info_t *info) {
+  if (!info)
+    return false;
+
+  *info = (usb_lifecycle_port_info_t){0};
+
+  usb_device_t device = {0};
+  if (!usb_get_device(&device))
+    return false;
+
+  uint8_t port = device.parent_port;
+  if (port == 0U || port >= 16U)
+    return false;
+
+  usb_hub_port_t current = {0};
+  if (usb_hub_port_status(port, &current) != USB_HUB_OK)
+    return false;
+
+  info->generation = device.generation;
+  info->port = port;
+  info->current_status = current.status;
+  info->current_change = current.change;
+
+  // Hub port status bit 0 is CurrentConnectStatus.
+  // Bit 8 is PortPower.
+  info->connected = (current.status & 0x0001U) != 0U;
+  info->powered = (current.status & 0x0100U) != 0U;
+
+  const usb_change_event_t *last = &last_port_change[port];
+
+  if (last->sequence != 0U) {
+    info->notification_seen = true;
+    info->last_sequence = last->sequence;
+    info->last_status = last->status;
+    info->last_change = last->change;
+  }
+
+  return true;
 }
 

@@ -126,3 +126,18 @@ typedef struct {
 bool usb_change_read(usb_change_event_t *event);
 bool usb_change_get_stats(usb_change_stats_t *stats);
 
+typedef struct {
+  uint32_t generation;
+  uint32_t last_sequence;
+  uint8_t port;
+  uint16_t last_status;
+  uint16_t last_change;
+  uint16_t current_status;
+  uint16_t current_change;
+  bool notification_seen;
+  bool connected;
+  bool powered;
+} usb_lifecycle_port_info_t;
+
+bool usb_lifecycle_port_inspect(usb_lifecycle_port_info_t *info);
+

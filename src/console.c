@@ -1521,6 +1521,28 @@ static void cmd_usb_lifecycle_status(void) {
   console_printf("  Completion  : %u\n", (unsigned int)info.completion_code);
 }
 
+static void cmd_usb_lifecycle_port(void) {
+  usb_lifecycle_port_info_t info = {0};
+  if (!usb_lifecycle_port_inspect(&info)) {
+    console_puts("USB lifecycle port unavailable.\n");
+    return;
+  }
+  console_puts("USB lifecycle physical port:\n");
+  console_printf("  Generation  : %u\n", (unsigned int)info.generation);
+  console_printf("  Hub port    : %u\n", (unsigned int)info.port);
+  console_printf("  Connected   : %s\n", info.connected ? "Yes" : "No");
+  console_printf("  Powered     : %s\n", info.powered ? "Yes" : "No");
+  console_printf("  Status      : 0x%04x\n",
+      (unsigned int)info.current_status);
+  console_printf("  Change      : 0x%04x\n",
+      (unsigned int)info.current_change);
+  console_printf("  Last notify : %s\n",
+      info.notification_seen ? "Yes" : "No");
+  console_printf("  Sequence    : %u\n", (unsigned int)info.last_sequence);
+  console_printf("  Last status : 0x%04x\n", (unsigned int)info.last_status);
+  console_printf("  Last change : 0x%04x\n", (unsigned int)info.last_change);
+}
+
 static void cmd_usb_test_midiout(void) {
   usb_enum_info_t enumeration = {0};
   usb_device_t device = {0};
@@ -1838,6 +1860,10 @@ static void cmd_usb(const char *args) {
       cmd_usb_lifecycle();
       return;
     }
+    if (next_word_is(&args, "port") && end_of_args(args)) {
+      cmd_usb_lifecycle_port();
+      return;
+    }
     if (next_word_is(&args, "arm") && end_of_args(args)) {
       cmd_usb_lifecycle_arm();
       return;
@@ -1846,7 +1872,7 @@ static void cmd_usb(const char *args) {
       cmd_usb_lifecycle_status();
       return;
     }
-    console_puts("Usage: usb lifecycle [arm | status]\n");
+    console_puts("Usage: usb lifecycle [arm | status | port]\n");
     return;
   }
   if (next_word_is(&args, "retirein") && end_of_args(args)) {
