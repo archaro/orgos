@@ -457,35 +457,90 @@ bool usb_get_device(usb_device_t *device) {
   return true;
 }
 
-bool usb_enumeration_recovery_ready(void) {
+bool usb_enumeration_recovery_inspect(usb_recovery_info_t *info) {
+  if (!info)
+    return false;
+
+  *info = (usb_recovery_info_t){0};
+
   if (!device_record_valid || current_device.state != USB_DEVICE_FAILED ||
-      current_device.slot_id == 0U || xhci_downstream_is_quiesced() ||
-      xhci_downstream_is_slot_disabled() || xhci_downstream_is_cleaned())
-    return false;
+      !enumeration_attempted || enumeration_state.result == USB_ENUM_OK) {
+    info->result = USB_RECOVERY_NO_FAILED_DEVICE;
+    return true;
+  }
 
-  if (!enumeration_attempted || enumeration_state.result == USB_ENUM_OK ||
-      !enumeration_state.slot_confirmed ||
-      !enumeration_state.address_attempted ||
+  info->generation = current_device.generation;
+  info->slot_id = current_device.slot_id;
+
+  if (!enumeration_state.slot_confirmed || current_device.slot_id == 0U) {
+    info->result = USB_RECOVERY_NO_CONFIRMED_SLOT;
+    return true;
+  }
+
+  if (!enumeration_state.address_attempted ||
       enumeration_state.address == 0U ||
-      enumeration_state.stage < USB_ENUM_STAGE_DEVICE_DESCRIPTOR ||
-      enumeration_state.bulk_attempted ||
-      enumeration_state.ep0_operation_failed)
-    return false;
+      enumeration_state.stage < USB_ENUM_STAGE_DEVICE_DESCRIPTOR) {
+    info->result = USB_RECOVERY_ADDRESS_UNCONFIRMED;
+    return true;
+  }
 
-  // Only an attempt that successfully passed
-  // Address Device is eligible for this path.
+  if (enumeration_state.bulk_attempted) {
+    info->result = USB_RECOVERY_BULK_ATTEMPTED;
+    return true;
+  }
+
+  if (xhci_downstream_is_quiesced() || xhci_downstream_is_slot_disabled() ||
+      xhci_downstream_is_cleaned()) {
+    info->result = USB_RECOVERY_ALREADY_QUIESCED;
+    return true;
+  }
+
   xhci_downstream_transfer_state_t transfers = {0};
 
-  if (!xhci_downstream_transfer_state(&transfers))
-    return false;
+  if (!xhci_downstream_transfer_state(&transfers)) {
+    info->result = USB_RECOVERY_TRANSFER_STATE_UNAVAILABLE;
+    return true;
+  }
 
-  if (transfers.slot_id != current_device.slot_id ||
-      transfers.active_waiters != 0U || transfers.ep0_active ||
-      transfers.ep0_failed || transfers.bulk_out_active ||
-      transfers.bulk_in_pending || transfers.bulk_in_started)
-    return false;
+  info->ep0_submitted = transfers.ep0_submitted;
+  info->ep0_completion_seen = transfers.ep0_completion_seen;
+  info->ep0_completion_code = transfers.ep0_completion_code;
+  info->ep0_state_valid = transfers.ep0_state_valid;
+  info->ep0_state = transfers.ep0_state;
 
+  if (transfers.slot_id != current_device.slot_id) {
+    info->result = USB_RECOVERY_TRANSFER_STATE_UNAVAILABLE;
+    return true;
+  }
+
+  if (transfers.active_waiters != 0U || transfers.ep0_active ||
+      transfers.bulk_out_active || transfers.bulk_in_pending ||
+      transfers.bulk_in_started) {
+    info->result = USB_RECOVERY_TRANSFER_BUSY;
+    return true;
+  }
+
+  if (enumeration_state.ep0_operation_failed || transfers.ep0_failed) {
+    if (transfers.ep0_submitted && transfers.ep0_completion_seen &&
+        transfers.ep0_completion_code != 1U) {
+      info->result = USB_RECOVERY_EP0_ERROR_COMPLETION;
+    } else if (transfers.ep0_submitted && !transfers.ep0_completion_seen) {
+      info->result = USB_RECOVERY_EP0_OUTCOME_UNKNOWN;
+    } else {
+      info->result = USB_RECOVERY_EP0_FAULT;
+    }
+    return true;
+  }
+
+  info->result = USB_RECOVERY_READY;
   return true;
+}
+
+bool usb_enumeration_recovery_ready(void) {
+  usb_recovery_info_t info = {0};
+
+  return usb_enumeration_recovery_inspect(&info) &&
+      info.result == USB_RECOVERY_READY;
 }
 
 bool usb_enumeration_recovery_begin(void) {

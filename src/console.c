@@ -1388,6 +1388,61 @@ static void cmd_usb_enumstate(void) {
   }
 }
 
+static const char *usb_recovery_result_name(
+    usb_recovery_result_t result) {
+  switch (result) {
+    case USB_RECOVERY_READY:
+      return "Ready";
+    case USB_RECOVERY_NO_FAILED_DEVICE:
+      return "No failed device";
+    case USB_RECOVERY_NO_CONFIRMED_SLOT:
+      return "Slot not confirmed";
+    case USB_RECOVERY_ADDRESS_UNCONFIRMED:
+      return "Address not confirmed";
+    case USB_RECOVERY_BULK_ATTEMPTED:
+      return "Bulk configuration attempted";
+    case USB_RECOVERY_ALREADY_QUIESCED:
+      return "Teardown already started";
+    case USB_RECOVERY_EP0_ERROR_COMPLETION:
+      return "EP0 error completion";
+    case USB_RECOVERY_EP0_OUTCOME_UNKNOWN:
+      return "EP0 outcome uncertain";
+    case USB_RECOVERY_EP0_FAULT:
+      return "EP0 operation fault";
+    case USB_RECOVERY_TRANSFER_BUSY:
+      return "Transfers still active";
+    case USB_RECOVERY_TRANSFER_STATE_UNAVAILABLE:
+      return "Transfer state unavailable";
+    default:
+      return "Unknown";
+  }
+}
+
+static void cmd_usb_recover_status(void) {
+  usb_recovery_info_t info = {0};
+  if (!usb_enumeration_recovery_inspect(&info)) {
+    console_puts("USB recovery inspection failed.\n");
+    return;
+  }
+  console_puts("USB enumeration recovery:\n");
+  console_printf("  Decision   : %s\n",
+      usb_recovery_result_name(info.result));
+  console_printf("  Generation : %u\n", (unsigned int)info.generation);
+  console_printf("  Slot       : %u\n", (unsigned int)info.slot_id);
+  console_printf("  Submitted  : %s\n", info.ep0_submitted ? "Yes" : "No");
+  console_printf("  Completed  : %s\n",
+      info.ep0_completion_seen ? "Yes" : "No");
+  console_printf("  Code       : %u\n",
+      (unsigned int)info.ep0_completion_code);
+
+  if (info.ep0_state_valid) {
+    console_printf("  EP0 state  : %s (%u)\n",
+        xhci_ep_state_name(info.ep0_state), (unsigned int)info.ep0_state);
+  } else {
+    console_puts("  EP0 state  : Unavailable\n");
+  }
+}
+
 static void cmd_usb_recover(void) {
   if (!usb_service_available()) {
     console_puts("USB recovery: SERVICE UNAVAILABLE\n");
@@ -2076,8 +2131,16 @@ static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
   const char *other_args = args;
-  if (next_word_is(&args, "recover") && end_of_args(args)) {
-    cmd_usb_recover();
+  if (next_word_is(&args, "recover")) {
+    if (end_of_args(args)) {
+      cmd_usb_recover();
+      return;
+    }
+    if (next_word_is(&args, "status") && end_of_args(args)) {
+      cmd_usb_recover_status();
+      return;
+    }
+    console_puts("Usage: usb recover [status]\n");
     return;
   }
   if (next_word_is(&args, "lifecycle")) {

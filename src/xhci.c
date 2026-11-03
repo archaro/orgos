@@ -3434,12 +3434,6 @@ static xhci_control_result_t xhci_control_transfer(
 
   *result = (xhci_control_info_t){0};
 
-  if (device) {
-    device->ep0_submitted = false;
-    device->ep0_completion_seen = false;
-    device->ep0_completion_code = 0U;
-  }
-
   if (!device || !setup || setup->length > XHCI_CONTROL_MAX_DATA)
     return XHCI_CONTROL_NOT_READY;
 
@@ -3472,6 +3466,14 @@ static xhci_control_result_t xhci_control_transfer(
       cache.data_line_size > PAGE_SIZE ||
       (cache.data_line_size & (cache.data_line_size - 1U)))
     return XHCI_CONTROL_NOT_READY;
+
+  // A new control-transfer attempt has passed the
+  // controller and endpoint readiness checks.
+  // Preserve evidence from the previous transfer
+  // when an operation is rejected before this point.
+  device->ep0_submitted = false;
+  device->ep0_completion_seen = false;
+  device->ep0_completion_code = 0U;
 
   dma_buffer_t *buffer = &device->control_buffer;
   if (has_data) {

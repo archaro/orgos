@@ -77,8 +77,36 @@ typedef struct {
 usb_enum_result_t usb_enumerate(usb_enum_info_t *info);
 bool usb_get_enumeration(usb_enum_info_t *info);
 bool usb_get_device(usb_device_t *device);
+
+typedef enum {
+  USB_RECOVERY_READY,
+  USB_RECOVERY_NO_FAILED_DEVICE,
+  USB_RECOVERY_NO_CONFIRMED_SLOT,
+  USB_RECOVERY_ADDRESS_UNCONFIRMED,
+  USB_RECOVERY_BULK_ATTEMPTED,
+  USB_RECOVERY_ALREADY_QUIESCED,
+  USB_RECOVERY_EP0_ERROR_COMPLETION,
+  USB_RECOVERY_EP0_OUTCOME_UNKNOWN,
+  USB_RECOVERY_EP0_FAULT,
+  USB_RECOVERY_TRANSFER_BUSY,
+  USB_RECOVERY_TRANSFER_STATE_UNAVAILABLE
+} usb_recovery_result_t;
+
+typedef struct {
+  usb_recovery_result_t result;
+  uint32_t generation;
+  uint8_t slot_id;
+  bool ep0_submitted;
+  bool ep0_completion_seen;
+  uint8_t ep0_completion_code;
+  bool ep0_state_valid;
+  uint8_t ep0_state;
+} usb_recovery_info_t;
+
+bool usb_enumeration_recovery_inspect(usb_recovery_info_t *info);
 bool usb_enumeration_recovery_ready(void);
 bool usb_enumeration_recovery_begin(void);
+
 bool usb_device_test_quiesce(void);
 void usb_device_port_changed(uint8_t port, uint16_t status, uint16_t change);
 bool usb_device_finalize_disconnect(void);
