@@ -1258,8 +1258,13 @@ static void cmd_usb_enumerate(void) {
   console_printf("USB enumeration:\n");
   console_printf("  Result          : %u\n", (unsigned int)result);
   console_printf("  Detail          : %u\n", info.detail);
+  if (result == USB_ENUM_NOT_READY) {
+    console_puts("USB enumeration: NOT READY\n");
+    return;
+  }
+
   if (result != USB_ENUM_OK) {
-    console_printf("USB enumeration: FAILED\n");
+    console_puts("USB enumeration: FAILED\n");
     return;
   }
   console_printf("  Hub ports       : %u\n", (unsigned int)info.hub_ports);
@@ -1285,6 +1290,56 @@ static void cmd_usb_enumerate(void) {
       (unsigned int)info.midi.bulk_in,
       (unsigned int)info.midi.bulk_in_mps);
   console_printf("USB enumeration: PASS\n");
+}
+
+static const char *usb_enum_stage_name(usb_enum_stage_t stage) {
+  switch (stage) {
+    case USB_ENUM_STAGE_NONE:
+      return "None";
+    case USB_ENUM_STAGE_DISCOVER:
+      return "Port discovery";
+    case USB_ENUM_STAGE_ENABLE_SLOT:
+      return "Enable Slot";
+    case USB_ENUM_STAGE_PREPARE:
+      return "Prepare contexts";
+    case USB_ENUM_STAGE_ADDRESS:
+      return "Address Device";
+    case USB_ENUM_STAGE_DEVICE_DESCRIPTOR:
+      return "Device descriptor";
+    case USB_ENUM_STAGE_CONFIGURATION_DESCRIPTOR:
+      return "Configuration descriptor";
+    case USB_ENUM_STAGE_SELECT_CONFIGURATION:
+      return "Select configuration";
+    case USB_ENUM_STAGE_CONFIGURE_BULK:
+      return "Configure Bulk endpoints";
+    case USB_ENUM_STAGE_MIDI_QUIRK:
+      return "MIDI startup quirk";
+    case USB_ENUM_STAGE_COMPLETE:
+      return "Complete";
+    default:
+      return "Unknown";
+  }
+}
+
+static void cmd_usb_enumstate(void) {
+  usb_enum_info_t info = {0};
+  if (!usb_get_enumeration(&info)) {
+    console_puts("No enumeration attempt recorded.\n");
+    return;
+  }
+  console_puts("USB enumeration state:\n");
+  console_printf("  Result       : %u\n", (unsigned int)info.result);
+  console_printf("  Detail       : 0x%08x\n", (unsigned int)info.detail);
+  console_printf("  Stage        : %s\n", usb_enum_stage_name(info.stage));
+  console_printf("  Hub port     : %u\n", (unsigned int)info.hub_port);
+  console_printf("  Slot attempt : %s\n", info.slot_attempted ? "Yes" : "No");
+  console_printf("  Slot known   : %s\n", info.slot_confirmed ? "Yes" : "No");
+  console_printf("  Slot ID      : %u\n", (unsigned int)info.slot_id);
+  console_printf("  Prepare tried: %s\n",
+      info.prepare_attempted ? "Yes" : "No");
+  console_printf("  Address tried: %s\n",
+      info.address_attempted ? "Yes" : "No");
+  console_printf("  Bulk tried   : %s\n", info.bulk_attempted ? "Yes" : "No");
 }
 
 static void cmd_usb_stopout(void) {
@@ -2057,6 +2112,10 @@ static void cmd_usb(const char *args) {
     cmd_usb_enumerate();
     return;
   }
+  if (next_word_is(&args, "enumstate") && end_of_args(args)) {
+    cmd_usb_enumstate();
+    return;
+  }
   if (next_word_is(&args, "hubports") && end_of_args(args)) {
     cmd_usb_hubports();
     return;
@@ -2104,9 +2163,9 @@ static void cmd_usb(const char *args) {
 
   if (!end_of_args(args)) {
     console_puts(
-        "Usage: usb [scan | state | ports | events | device | devices | "
+        "Usage: usb [scan | state | ports | events | device | devices | test"
         "stopout | stopin | disable | cleanup | detach | recycle | rearm | transfers | "
-	"retirein | reconcilein | lifecycle | hubports | hubirq | enumerate | test]\n");
+	"retirein | reconcilein | lifecycle | hubports | hubirq | enumerate | enumstate]\n");
     return;
   }
 

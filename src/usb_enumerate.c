@@ -101,8 +101,10 @@ static usb_enum_result_t discover_port(usb_enum_info_t *state) {
   return USB_ENUM_OK;
 }
 
-static usb_enum_result_t address_device(usb_enum_info_t *state) {
-  xhci_slot_info_t slot;
+static usb_enum_result_t address_device( usb_enum_info_t *state) {
+  xhci_slot_info_t slot = {0};
+  state->stage = USB_ENUM_STAGE_ENABLE_SLOT;
+  state->slot_attempted = true;
   xhci_slot_result_t slot_result = xhci_enable_downstream_slot(&slot);
 
   if (slot_result != XHCI_SLOT_OK) {
@@ -110,17 +112,27 @@ static usb_enum_result_t address_device(usb_enum_info_t *state) {
     return USB_ENUM_SLOT_FAILED;
   }
 
+  state->slot_confirmed = true;
   state->slot_id = slot.slot_id;
-  xhci_device_info_t device;
+
+  // Preserve identity immediately, not after
+  // the later preparation/addressing operations.
+  current_device.slot_id = slot.slot_id;
+
+  state->stage = USB_ENUM_STAGE_PREPARE;
+  state->prepare_attempted = true;
+  xhci_device_info_t device = {0};
   xhci_device_result_t device_result =
-      xhci_downstream_prepare(state->hub_port, state->speed, &device);
+      xhci_downstream_prepare( state->hub_port, state->speed, &device);
 
   if (device_result != XHCI_DEVICE_OK) {
     state->detail = (uint32_t)device_result;
     return USB_ENUM_PREPARE_FAILED;
   }
 
-  xhci_address_info_t address;
+  state->stage = USB_ENUM_STAGE_ADDRESS;
+  state->address_attempted = true;
+  xhci_address_info_t address = {0};
   xhci_address_result_t address_result = xhci_address_downstream(&address);
 
   if (address_result != XHCI_ADDRESS_OK) {
@@ -264,6 +276,7 @@ static usb_enum_result_t select_configuration( usb_enum_info_t *state) {
 
 static usb_enum_result_t configure_bulk( usb_enum_info_t *state) {
 
+  state->bulk_attempted = true;
   xhci_bulk_config_info_t info = {0};
   xhci_bulk_config_result_t result = xhci_downstream_bulk_configure(
           state->midi.bulk_in, state->midi.bulk_in_mps,
@@ -319,6 +332,7 @@ usb_enum_result_t usb_enumerate(usb_enum_info_t *info) {
   // following an uncertain command completion.
   enumeration_attempted = true;
   usb_enum_info_t state = {0};
+  state.stage = USB_ENUM_STAGE_DISCOVER;
 
   // Start with no downstream device identified.
   current_device = (usb_device_t){0};
@@ -355,6 +369,7 @@ usb_enum_result_t usb_enumerate(usb_enum_info_t *info) {
   current_device.slot_id = state.slot_id;
   current_device.address = state.address;
 
+  state.stage = USB_ENUM_STAGE_DEVICE_DESCRIPTOR;
   result = read_device(&state);
   if (result != USB_ENUM_OK)
     goto complete;
@@ -362,24 +377,31 @@ usb_enum_result_t usb_enumerate(usb_enum_info_t *info) {
   current_device.vendor_id = state.vendor_id;
   current_device.product_id = state.product_id;
   state.quirks = usb_midi_quirks_lookup(state.vendor_id, state.product_id);
+
+  state.stage = USB_ENUM_STAGE_CONFIGURATION_DESCRIPTOR;
   result = read_configuration(&state);
   if (result != USB_ENUM_OK)
     goto complete;
 
+  state.stage = USB_ENUM_STAGE_SELECT_CONFIGURATION;
   result = select_configuration(&state);
   if (result != USB_ENUM_OK)
     goto complete;
 
+  state.stage = USB_ENUM_STAGE_CONFIGURE_BULK;
   result = configure_bulk(&state);
   if (result != USB_ENUM_OK)
     goto complete;
-  current_device.state = USB_DEVICE_CONFIGURED;
 
+  current_device.state = USB_DEVICE_CONFIGURED;
+  state.stage = USB_ENUM_STAGE_MIDI_QUIRK;
   if (!usb_midi_quirks_apply(state.quirks, &state.detail))
     result = USB_ENUM_MIDI_QUIRK_FAILED;
 
-  if (result == USB_ENUM_OK)
+  if (result == USB_ENUM_OK) {
     current_device.state = USB_DEVICE_ACTIVE;
+    state.stage = USB_ENUM_STAGE_COMPLETE;
+  }
 
 complete:
   if (result != USB_ENUM_OK && current_device.state != USB_DEVICE_DETACHED)

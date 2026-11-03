@@ -34,6 +34,20 @@ typedef enum {
   USB_ENUM_DEBOUNCE_FAILED
 } usb_enum_result_t;
 
+typedef enum {
+  USB_ENUM_STAGE_NONE,
+  USB_ENUM_STAGE_DISCOVER,
+  USB_ENUM_STAGE_ENABLE_SLOT,
+  USB_ENUM_STAGE_PREPARE,
+  USB_ENUM_STAGE_ADDRESS,
+  USB_ENUM_STAGE_DEVICE_DESCRIPTOR,
+  USB_ENUM_STAGE_CONFIGURATION_DESCRIPTOR,
+  USB_ENUM_STAGE_SELECT_CONFIGURATION,
+  USB_ENUM_STAGE_CONFIGURE_BULK,
+  USB_ENUM_STAGE_MIDI_QUIRK,
+  USB_ENUM_STAGE_COMPLETE
+} usb_enum_stage_t;
+
 typedef struct {
   usb_enum_result_t result;
   uint32_t detail;
@@ -47,6 +61,12 @@ typedef struct {
   uint32_t quirks;
   uint16_t configuration_length;
   usb_midi_config_t midi;
+  usb_enum_stage_t stage;
+  bool slot_attempted;
+  bool slot_confirmed;
+  bool prepare_attempted;
+  bool address_attempted;
+  bool bulk_attempted;
 } usb_enum_info_t;
 
 usb_enum_result_t usb_enumerate(usb_enum_info_t *info);
