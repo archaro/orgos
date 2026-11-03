@@ -32,6 +32,34 @@ bool usb_get_init_info(usb_init_info_t *info);
 void usb_service(void);
 bool usb_service_available(void);
 
+typedef enum {
+  USB_LIFECYCLE_IDLE,
+  USB_LIFECYCLE_RECONCILE_IN,
+  USB_LIFECYCLE_STOP_IN,
+  USB_LIFECYCLE_DISABLE,
+  USB_LIFECYCLE_RETIRE_IN,
+  USB_LIFECYCLE_CLEANUP,
+  USB_LIFECYCLE_DETACH,
+  USB_LIFECYCLE_RECYCLE,
+  USB_LIFECYCLE_REARM,
+  USB_LIFECYCLE_BLOCKED
+} usb_lifecycle_action_t;
+
+typedef struct {
+  usb_lifecycle_action_t next;
+  uint32_t generation;
+  uint8_t slot_id;
+  uint8_t waiters;
+  bool quiesced;
+  bool slot_disabled;
+  bool cleaned;
+  bool in_started;
+  bool in_pending;
+  bool in_completed;
+} usb_lifecycle_info_t;
+
+bool usb_lifecycle_inspect(usb_lifecycle_info_t *info);
+
 typedef struct {
   uint32_t processed;
   uint32_t failures;

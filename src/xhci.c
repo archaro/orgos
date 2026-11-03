@@ -4036,6 +4036,10 @@ bool xhci_downstream_is_quiesced(void) {
   return downstream_quiesced;
 }
 
+bool xhci_downstream_is_slot_disabled(void) {
+  return downstream_slot_disabled;
+}
+
 static bool xhci_downstream_endpoint_states(
     uint8_t *in_state, uint8_t *out_state) {
 

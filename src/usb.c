@@ -378,6 +378,92 @@ static void usb_service_hub_changes(void) {
     usb_change_fail(0U);
 }
 
+bool usb_lifecycle_inspect(usb_lifecycle_info_t *info) {
+  if (!info)
+    return false;
+
+  *info = (usb_lifecycle_info_t){0};
+  usb_device_t device = {0};
+  if (!usb_get_device(&device))
+    return true;
+
+  info->generation = device.generation;
+  info->slot_id = device.slot_id;
+  info->quiesced = xhci_downstream_is_quiesced();
+  info->slot_disabled = xhci_downstream_is_slot_disabled();
+  info->cleaned = xhci_downstream_is_cleaned();
+
+  if (device.state == USB_DEVICE_ACTIVE)
+    return true;
+
+  if (device.state == USB_DEVICE_DETACHED) {
+    if (info->quiesced)
+      info->next = USB_LIFECYCLE_RECYCLE;
+    else {
+      usb_enum_info_t enumeration = {0};
+      if (usb_get_enumeration(&enumeration))
+        info->next = USB_LIFECYCLE_REARM;
+    }
+    return true;
+  }
+
+  if (device.state != USB_DEVICE_DISCONNECTING ||
+      !info->quiesced || !usb_service_available()) {
+    info->next = USB_LIFECYCLE_BLOCKED;
+    return true;
+  }
+
+  if (info->cleaned) {
+    info->next = USB_LIFECYCLE_DETACH;
+    return true;
+  }
+
+  xhci_downstream_transfer_state_t transfers = {0};
+  if (!xhci_downstream_transfer_state(&transfers)) {
+    info->next = USB_LIFECYCLE_BLOCKED;
+    return true;
+  }
+
+  info->waiters = transfers.active_waiters;
+  info->in_started = transfers.bulk_in_started;
+  info->in_pending = transfers.bulk_in_pending;
+  info->in_completed = transfers.bulk_in_completed;
+  if (info->slot_disabled) {
+    if (transfers.active_waiters != 0U || transfers.bulk_in_pending) {
+      info->next = USB_LIFECYCLE_BLOCKED;
+    } else if (transfers.bulk_in_started) {
+      info->next = USB_LIFECYCLE_RETIRE_IN;
+    } else {
+      info->next = USB_LIFECYCLE_CLEANUP;
+    }
+    return true;
+  }
+
+  if (transfers.ep0_active || transfers.bulk_out_active) {
+    info->next = USB_LIFECYCLE_BLOCKED;
+    return true;
+  }
+
+  if (transfers.bulk_in_pending) {
+    if (!transfers.bulk_in_started || transfers.active_waiters != 1U) {
+      info->next = USB_LIFECYCLE_BLOCKED;
+    } else if (transfers.bulk_in_completed) {
+      info->next = USB_LIFECYCLE_RECONCILE_IN;
+    } else if (transfers.endpoint_states_valid &&
+        transfers.bulk_in_ep_state == 1U) {
+      info->next = USB_LIFECYCLE_STOP_IN;
+    } else {
+      info->next = USB_LIFECYCLE_BLOCKED;
+    }
+    return true;
+  }
+
+  info->next = transfers.active_waiters == 0U ?
+      USB_LIFECYCLE_DISABLE : USB_LIFECYCLE_BLOCKED;
+
+  return true;
+}
+
 void usb_service(void) {
   if (!usb_initialised || usb_service_failed)
     return;

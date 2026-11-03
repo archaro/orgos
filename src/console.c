@@ -1423,6 +1423,42 @@ static void cmd_usb_transfers(void) {
   }
 }
 
+static const char *usb_lifecycle_action_name(usb_lifecycle_action_t action) {
+  switch (action) {
+    case USB_LIFECYCLE_IDLE: return "Idle";
+    case USB_LIFECYCLE_RECONCILE_IN: return "Reconcile IN";
+    case USB_LIFECYCLE_STOP_IN: return "Stop Bulk IN";
+    case USB_LIFECYCLE_DISABLE: return "Disable Slot";
+    case USB_LIFECYCLE_RETIRE_IN: return "Retire Bulk IN";
+    case USB_LIFECYCLE_CLEANUP: return "Release DMA";
+    case USB_LIFECYCLE_DETACH: return "Detach device";
+    case USB_LIFECYCLE_RECYCLE: return "Recycle xHCI";
+    case USB_LIFECYCLE_REARM: return "Rearm enumeration";
+    case USB_LIFECYCLE_BLOCKED: return "Blocked";
+    default: return "Unknown";
+  }
+}
+
+static void cmd_usb_lifecycle(void) {
+  usb_lifecycle_info_t info = {0};
+  if (!usb_lifecycle_inspect(&info)) {
+    console_puts("USB lifecycle unavailable.\n");
+    return;
+  }
+  console_puts("USB lifecycle:\n");
+  console_printf("  Generation   : %u\n", (unsigned int)info.generation);
+  console_printf("  Slot         : %u\n", (unsigned int)info.slot_id);
+  console_printf("  Quiesced     : %s\n", info.quiesced ? "Yes" : "No");
+  console_printf("  Disabled     : %s\n", info.slot_disabled ? "Yes" : "No");
+  console_printf("  Cleaned      : %s\n", info.cleaned ? "Yes" : "No");
+  console_printf("  Waiters      : %u\n", (unsigned int)info.waiters);
+  console_printf("  IN started   : %s\n", info.in_started ? "Yes" : "No");
+  console_printf("  IN pending   : %s\n", info.in_pending ? "Yes" : "No");
+  console_printf("  IN completed : %s\n", info.in_completed ? "Yes" : "No");
+  console_printf("  Next action  : %s\n",
+      usb_lifecycle_action_name(info.next));
+}
+
 static void cmd_usb_test_midiout(void) {
   usb_enum_info_t enumeration = {0};
   usb_device_t device = {0};
@@ -1735,6 +1771,10 @@ static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
   const char *other_args = args;
+  if (next_word_is(&args, "lifecycle") && end_of_args(args)) {
+    cmd_usb_lifecycle();
+    return;
+  }
   if (next_word_is(&args, "retirein") && end_of_args(args)) {
     cmd_usb_retirein();
     return;
@@ -1860,7 +1900,7 @@ static void cmd_usb(const char *args) {
     console_puts(
         "Usage: usb [scan | state | ports | events | device | devices | "
         "stopout | stopin | disable | cleanup | detach | recycle | rearm | transfers | "
-	"retirein | reconcilein | hubports | hubirq | enumerate | test]\n");
+	"retirein | reconcilein | lifecycle | hubports | hubirq | enumerate | test]\n");
     return;
   }
 
