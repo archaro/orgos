@@ -1353,6 +1353,9 @@ static void cmd_usb_enumstate(void) {
   console_printf("  Address tried: %s\n",
       info.address_attempted ? "Yes" : "No");
   console_printf("  Bulk tried   : %s\n", info.bulk_attempted ? "Yes" : "No");
+  console_printf("  EP0 failed   : %s\n",
+      info.ep0_operation_failed ? "Yes" : "No");
+  console_printf("  EP0 result   : %u\n", (unsigned int)info.ep0_result);
 }
 
 static void cmd_usb_recover(void) {

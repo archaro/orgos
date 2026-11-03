@@ -4080,6 +4080,7 @@ bool xhci_downstream_transfer_state(xhci_downstream_transfer_state_t *state) {
   state->slot_id = device->slot_id;
   state->quiesced = downstream_quiesced;
   state->ep0_active = device->ep0_active;
+  state->ep0_failed = device->ep0_failed;
   state->bulk_out_active = device->bulk_out_active;
   state->bulk_in_started = bulk_in_stream_started;
   state->bulk_in_pending = bulk_in_state == XHCI_BULK_IN_PENDING;

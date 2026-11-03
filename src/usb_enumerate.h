@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "xhci.h"
 #include "usb_device.h"
 #include "usb_midi.h"
 #include "usb_midi_quirks.h"
@@ -69,6 +70,8 @@ typedef struct {
   bool prepare_attempted;
   bool address_attempted;
   bool bulk_attempted;
+  bool ep0_operation_failed;
+  xhci_control_result_t ep0_result;
 } usb_enum_info_t;
 
 usb_enum_result_t usb_enumerate(usb_enum_info_t *info);

@@ -29,9 +29,9 @@ static uint16_t read_u16(const uint8_t *p) {
   return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
 }
 
-static bool control_in(bool downstream, uint8_t request_type,
-    uint8_t request, uint16_t value, uint16_t length,
-    xhci_control_info_t *info) {
+static bool control_in(usb_enum_info_t *state, bool downstream,
+    uint8_t request_type, uint8_t request, uint16_t value,
+    uint16_t length, xhci_control_info_t *info) {
 
   xhci_setup_packet_t setup = {
     .request_type = request_type,
@@ -45,8 +45,18 @@ static bool control_in(bool downstream, uint8_t request_type,
       xhci_downstream_control_in(&setup, info) :
       xhci_control_in(&setup, info);
 
-  return result == XHCI_CONTROL_OK &&
-      info->length == length;
+  if (result != XHCI_CONTROL_OK) {
+    state->ep0_operation_failed = true;
+    state->ep0_result = result;
+    return false;
+  }
+
+  if (info->length != length) {
+    state->ep0_operation_failed = true;
+    return false;
+  }
+
+  return true;
 }
 
 static usb_enum_result_t discover_port(usb_enum_info_t *state) {
@@ -150,7 +160,7 @@ static usb_enum_result_t read_device(usb_enum_info_t *state) {
   xhci_control_info_t info;
 
   // Full-Speed enumeration begins with eight bytes.
-  if (!control_in(true, 0x80U, USB_REQ_GET_DESCRIPTOR,
+  if (!control_in(state, true, 0x80U, USB_REQ_GET_DESCRIPTOR,
       (uint16_t)(USB_DESC_DEVICE << 8), 8U, &info) ||
       info.data[0] != 18U || info.data[1] != USB_DESC_DEVICE) {
     state->detail = info.completion_code;
@@ -169,10 +179,11 @@ static usb_enum_result_t read_device(usb_enum_info_t *state) {
 
   if (result != XHCI_EP0_UPDATE_OK) {
     state->detail = (uint32_t)result;
+    state->ep0_operation_failed = true;
     return USB_ENUM_MPS_FAILED;
   }
 
-  if (!control_in(true, 0x80U, USB_REQ_GET_DESCRIPTOR,
+  if (!control_in(state, true, 0x80U, USB_REQ_GET_DESCRIPTOR,
       (uint16_t)(USB_DESC_DEVICE << 8), 18U, &info) ||
       info.data[0] != 18U || info.data[1] != USB_DESC_DEVICE ||
       info.data[7] != 64U || info.data[17] == 0U) {
@@ -189,7 +200,7 @@ static usb_enum_result_t read_device(usb_enum_info_t *state) {
 static usb_enum_result_t read_configuration( usb_enum_info_t *state) {
   xhci_control_info_t info;
 
-  if (!control_in(true, 0x80U, USB_REQ_GET_DESCRIPTOR,
+  if (!control_in(state, true, 0x80U, USB_REQ_GET_DESCRIPTOR,
       (uint16_t)(USB_DESC_CONFIGURATION << 8), 9U, &info) ||
       info.data[0] != 9U || info.data[1] != USB_DESC_CONFIGURATION) {
     state->detail = info.completion_code;
@@ -204,7 +215,7 @@ static usb_enum_result_t read_configuration( usb_enum_info_t *state) {
 
   state->configuration_length = length;
 
-  if (!control_in(true, 0x80U, USB_REQ_GET_DESCRIPTOR,
+  if (!control_in(state, true, 0x80U, USB_REQ_GET_DESCRIPTOR,
       (uint16_t)(USB_DESC_CONFIGURATION << 8), length, &info)) {
     state->detail = info.completion_code;
     return USB_ENUM_CONFIG_FAILED;
@@ -238,10 +249,13 @@ static usb_enum_result_t select_configuration( usb_enum_info_t *state) {
       xhci_downstream_control_no_data(&setup, &info);
   if (result != XHCI_CONTROL_OK) {
     state->detail = (uint32_t)result;
+    state->ep0_operation_failed = true;
+    state->ep0_result = result;
     return USB_ENUM_SET_CONFIG_FAILED;
   }
 
-  if (!control_in(true, 0x80U, USB_REQ_GET_CONFIGURATION, 0U, 1U, &info)) {
+  if (!control_in(state, true, 0x80U, USB_REQ_GET_CONFIGURATION,
+        0U, 1U, &info)) {
     state->detail = info.completion_code;
     return USB_ENUM_VERIFY_CONFIG_FAILED;
   }
@@ -270,6 +284,8 @@ static usb_enum_result_t select_configuration( usb_enum_info_t *state) {
   if (interface_result != XHCI_CONTROL_OK) {
     state->detail = (uint32_t)interface_result |
         ((uint32_t)interface_info.completion_code << 8);
+    state->ep0_operation_failed = true;
+    state->ep0_result = interface_result;
     return USB_ENUM_SET_INTERFACE_FAILED;
   }
 
@@ -447,13 +463,13 @@ bool usb_enumeration_recovery_ready(void) {
       xhci_downstream_is_slot_disabled() || xhci_downstream_is_cleaned())
     return false;
 
-  if (!enumeration_attempted ||
-      enumeration_state.result == USB_ENUM_OK ||
+  if (!enumeration_attempted || enumeration_state.result == USB_ENUM_OK ||
       !enumeration_state.slot_confirmed ||
       !enumeration_state.address_attempted ||
       enumeration_state.address == 0U ||
       enumeration_state.stage < USB_ENUM_STAGE_DEVICE_DESCRIPTOR ||
-      enumeration_state.bulk_attempted)
+      enumeration_state.bulk_attempted ||
+      enumeration_state.ep0_operation_failed)
     return false;
 
   // Only an attempt that successfully passed
@@ -465,8 +481,8 @@ bool usb_enumeration_recovery_ready(void) {
 
   if (transfers.slot_id != current_device.slot_id ||
       transfers.active_waiters != 0U || transfers.ep0_active ||
-      transfers.bulk_out_active || transfers.bulk_in_pending ||
-      transfers.bulk_in_started)
+      transfers.ep0_failed || transfers.bulk_out_active ||
+      transfers.bulk_in_pending || transfers.bulk_in_started)
     return false;
 
   return true;

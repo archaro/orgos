@@ -768,6 +768,7 @@ typedef struct {
   uint8_t active_waiters;
   bool quiesced;
   bool ep0_active;
+  bool ep0_failed;
   bool bulk_out_active;
   bool bulk_in_started;
   bool bulk_in_pending;
