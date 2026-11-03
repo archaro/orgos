@@ -1423,6 +1423,56 @@ static void cmd_usb_transfers(void) {
   }
 }
 
+static const char *usb_reenum_result_name(usb_reenum_result_t result) {
+  switch (result) {
+    case USB_REENUM_READY:
+      return "Ready";
+    case USB_REENUM_SERVICE_FAILED:
+      return "USB service unavailable";
+    case USB_REENUM_HUB_FAILED:
+      return "Hub monitoring failed";
+    case USB_REENUM_NO_HISTORY:
+      return "No previous generation";
+    case USB_REENUM_DEVICE_OWNED:
+      return "Previous device still owns resources";
+    case USB_REENUM_EXECUTOR_ACTIVE:
+      return "Lifecycle executor active";
+    case USB_REENUM_EXECUTOR_FAILED:
+      return "Lifecycle executor failed";
+    case USB_REENUM_NOT_REARMED:
+      return "Enumeration not rearmed";
+    case USB_REENUM_XHCI_BUSY:
+      return "xHCI teardown incomplete";
+    case USB_REENUM_PORT_UNAVAILABLE:
+      return "Port status unavailable";
+    case USB_REENUM_DISCONNECTED:
+      return "Port disconnected";
+    case USB_REENUM_NOT_POWERED:
+      return "Port not powered";
+    case USB_REENUM_CHANGE_PENDING:
+      return "Hub changes pending";
+    default:
+      return "Unknown";
+  }
+}
+
+static void cmd_usb_lifecycle_ready(void) {
+  usb_reenum_info_t info = {0};
+  if (!usb_reenum_inspect(&info)) {
+    console_puts("Re-enumeration inspection failed.\n");
+    return;
+  }
+  console_puts("USB re-enumeration eligibility:\n");
+  console_printf("  Result      : %s\n", usb_reenum_result_name(info.result));
+  console_printf("  Generation  : %u\n", (unsigned int)info.generation);
+  console_printf("  Hub port    : %u\n", (unsigned int)info.port);
+  console_printf("  Device state: %u\n", (unsigned int)info.device_state);
+  console_printf("  Attempted   : %s\n",
+      info.enumeration_attempted ? "Yes" : "No");
+  console_printf("  Port status : 0x%04x\n", (unsigned int)info.port_status);
+  console_printf("  Port change : 0x%04x\n", (unsigned int)info.port_change);
+}
+
 static const char *usb_lifecycle_action_name(usb_lifecycle_action_t action) {
   switch (action) {
     case USB_LIFECYCLE_IDLE: return "Idle";
@@ -1860,6 +1910,10 @@ static void cmd_usb(const char *args) {
       cmd_usb_lifecycle();
       return;
     }
+    if (next_word_is(&args, "ready") && end_of_args(args)) {
+      cmd_usb_lifecycle_ready();
+      return;
+    }
     if (next_word_is(&args, "port") && end_of_args(args)) {
       cmd_usb_lifecycle_port();
       return;
@@ -1872,7 +1926,7 @@ static void cmd_usb(const char *args) {
       cmd_usb_lifecycle_status();
       return;
     }
-    console_puts("Usage: usb lifecycle [arm | status | port]\n");
+    console_puts("Usage: usb lifecycle [arm | status | port | ready]\n");
     return;
   }
   if (next_word_is(&args, "retirein") && end_of_args(args)) {

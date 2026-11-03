@@ -3,6 +3,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "usb_device.h"
+
 typedef enum {
   USB_INIT_OK,
   USB_INIT_PORT_CLEAR_FAILED,
@@ -140,4 +142,32 @@ typedef struct {
 } usb_lifecycle_port_info_t;
 
 bool usb_lifecycle_port_inspect(usb_lifecycle_port_info_t *info);
+
+typedef enum {
+  USB_REENUM_READY,
+  USB_REENUM_SERVICE_FAILED,
+  USB_REENUM_HUB_FAILED,
+  USB_REENUM_NO_HISTORY,
+  USB_REENUM_DEVICE_OWNED,
+  USB_REENUM_EXECUTOR_ACTIVE,
+  USB_REENUM_EXECUTOR_FAILED,
+  USB_REENUM_NOT_REARMED,
+  USB_REENUM_XHCI_BUSY,
+  USB_REENUM_PORT_UNAVAILABLE,
+  USB_REENUM_DISCONNECTED,
+  USB_REENUM_NOT_POWERED,
+  USB_REENUM_CHANGE_PENDING
+} usb_reenum_result_t;
+
+typedef struct {
+  usb_reenum_result_t result;
+  uint32_t generation;
+  uint8_t port;
+  usb_device_state_t device_state;
+  uint16_t port_status;
+  uint16_t port_change;
+  bool enumeration_attempted;
+} usb_reenum_info_t;
+
+bool usb_reenum_inspect(usb_reenum_info_t *info);
 

@@ -701,3 +701,91 @@ bool usb_lifecycle_port_inspect(usb_lifecycle_port_info_t *info) {
   return true;
 }
 
+bool usb_reenum_inspect(usb_reenum_info_t *info) {
+  if (!info)
+    return false;
+
+  *info = (usb_reenum_info_t){0};
+
+  if (!usb_service_available()) {
+    info->result = USB_REENUM_SERVICE_FAILED;
+    return true;
+  }
+
+  if (change_stats.failed) {
+    info->result = USB_REENUM_HUB_FAILED;
+    return true;
+  }
+
+  usb_device_t device = {0};
+  if (!usb_get_device(&device)) {
+    info->result = USB_REENUM_NO_HISTORY;
+    return true;
+  }
+
+  info->generation = device.generation;
+  info->port = device.parent_port;
+  info->device_state = device.state;
+
+  if (device.state != USB_DEVICE_DETACHED) {
+    info->result = USB_REENUM_DEVICE_OWNED;
+    return true;
+  }
+
+  if (lifecycle_run.generation == device.generation) {
+    if (lifecycle_run.state == USB_LIFECYCLE_RUN_ARMED) {
+      info->result = USB_REENUM_EXECUTOR_ACTIVE;
+      return true;
+    }
+
+    if (lifecycle_run.state == USB_LIFECYCLE_RUN_FAILED) {
+      info->result = USB_REENUM_EXECUTOR_FAILED;
+      return true;
+    }
+  }
+
+  usb_enum_info_t enumeration = {0};
+  info->enumeration_attempted = usb_get_enumeration(&enumeration);
+
+  if (info->enumeration_attempted) {
+    info->result = USB_REENUM_NOT_REARMED;
+    return true;
+  }
+
+  if (xhci_downstream_is_quiesced() || xhci_downstream_is_slot_disabled() ||
+      xhci_downstream_is_cleaned()) {
+    info->result = USB_REENUM_XHCI_BUSY;
+    return true;
+  }
+
+  usb_lifecycle_port_info_t port = {0};
+  if (!usb_lifecycle_port_inspect(&port)) {
+    info->result = USB_REENUM_PORT_UNAVAILABLE;
+    return true;
+  }
+
+  info->port_status = port.current_status;
+  info->port_change = port.current_change;
+
+  if (!port.powered) {
+    info->result = USB_REENUM_NOT_POWERED;
+    return true;
+  }
+
+  if (!port.connected) {
+    info->result = USB_REENUM_DISCONNECTED;
+    return true;
+  }
+
+  // A pending hub change must be processed before
+  // another device generation can be enumerated.
+  uint16_t bit = (uint16_t)(1U << info->port);
+  if (port.current_change != 0U || (change_pending_mask & bit) != 0U) {
+    info->result = USB_REENUM_CHANGE_PENDING;
+    return true;
+  }
+
+  info->result = USB_REENUM_READY;
+  return true;
+}
+
