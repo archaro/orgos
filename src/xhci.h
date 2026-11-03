@@ -137,6 +137,8 @@ typedef struct {
 
 bool xhci_event_get_stats(xhci_event_stats_t *stats);
 
+bool xhci_ep0_match_selftest(void);
+
 typedef enum {
   XHCI_SERVICE_IDLE,
   XHCI_SERVICE_PROGRESS,

@@ -190,6 +190,7 @@ typedef struct {
   uint8_t slot_id;
   uint8_t endpoint_id;
   uint64_t trb_address;
+  uint64_t td_start;
   xhci_event_t event;
 } xhci_event_waiter_t;
 static xhci_event_waiter_t event_waiters[XHCI_EVENT_WAITERS];
@@ -1358,6 +1359,121 @@ bool xhci_port_event_read(xhci_port_change_t *result) {
   return true;
 }
 
+static bool xhci_waiter_matches(const xhci_event_waiter_t *waiter,
+    const xhci_event_t *event, uint8_t endpoint_id) {
+  if (!waiter || !event || !waiter->active || waiter->type != event->type)
+    return false;
+
+  if (event->type == XHCI_TRB_TRANSFER_EVENT) {
+    if (waiter->slot_id != event->slot_id ||
+        waiter->endpoint_id != endpoint_id)
+      return false;
+  }
+
+  // Normal completion: match the registered TRB.
+  if (event->parameter == waiter->trb_address)
+    return true;
+
+  // Only EP0 control transfers may report errors
+  // against an earlier TRB in their registered TD.
+  if (event->type != XHCI_TRB_TRANSFER_EVENT || endpoint_id != 1U ||
+      event->completion_code == XHCI_COMPLETION_SUCCESS ||
+      waiter->td_start == 0U)
+    return false;
+
+  if (event->parameter < waiter->td_start ||
+      event->parameter >= waiter->trb_address)
+    return false;
+
+  uint64_t offset = event->parameter - waiter->td_start;
+
+  // A control TD has either a Setup and Status TRB,
+  // or a Setup, Data and Status TRB.
+  return offset <= sizeof(xhci_trb_t) && (offset % sizeof(xhci_trb_t)) == 0U;
+}
+
+bool xhci_ep0_match_selftest(void) {
+  const uint64_t first = 0x1000ULL;
+  const uint64_t data = first + sizeof(xhci_trb_t);
+  const uint64_t status = data + sizeof(xhci_trb_t);
+
+  xhci_event_waiter_t waiter = {
+    .active = true,
+    .type = XHCI_TRB_TRANSFER_EVENT,
+    .slot_id = 2U,
+    .endpoint_id = 1U,
+    .trb_address = status,
+    .td_start = first
+  };
+
+  xhci_event_t event = {
+    .type = XHCI_TRB_TRANSFER_EVENT,
+    .slot_id = 2U,
+    .parameter = status,
+    .completion_code = XHCI_COMPLETION_SUCCESS
+  };
+
+  // Successful Status Stage.
+  if (!xhci_waiter_matches(&waiter, &event, 1U))
+    return false;
+
+  // Error against the Setup Stage.
+  event.parameter = first;
+  event.completion_code = 6U;
+  if (!xhci_waiter_matches(&waiter, &event, 1U))
+    return false;
+
+  // Error against the Data Stage.
+  event.parameter = data;
+  if (!xhci_waiter_matches(&waiter, &event, 1U))
+    return false;
+
+  // Success against an earlier TRB is not accepted.
+  event.completion_code = XHCI_COMPLETION_SUCCESS;
+  if (xhci_waiter_matches(&waiter, &event, 1U))
+    return false;
+
+  // An address outside the TD is not accepted.
+  event.parameter = first - sizeof(xhci_trb_t);
+  event.completion_code = 6U;
+  if (xhci_waiter_matches(&waiter, &event, 1U))
+    return false;
+
+  // Nor is an unaligned address.
+  event.parameter = first + 1U;
+  if (xhci_waiter_matches(&waiter, &event, 1U))
+    return false;
+
+  // Slot and endpoint ownership must still match.
+  event.parameter = first;
+  event.slot_id = 3U;
+  if (xhci_waiter_matches(&waiter, &event, 1U))
+    return false;
+
+  event.slot_id = 2U;
+  if (xhci_waiter_matches(&waiter, &event, 2U))
+    return false;
+
+  // No TD extent means exact matching only.
+  waiter.td_start = 0U;
+  if (xhci_waiter_matches(&waiter, &event, 1U))
+    return false;
+
+  // Command completions retain exact matching.
+  waiter.type = XHCI_TRB_COMMAND_EVENT;
+  waiter.trb_address = status;
+  event.type = XHCI_TRB_COMMAND_EVENT;
+
+  if (xhci_waiter_matches(&waiter, &event, 0U))
+    return false;
+
+  event.parameter = status;
+  if (!xhci_waiter_matches(&waiter, &event, 0U))
+    return false;
+
+  return true;
+}
+
 static xhci_event_waiter_t *xhci_waiter_register(
     uint8_t type, uint8_t slot_id, uint8_t endpoint_id,
     uint64_t trb_address) {
@@ -1465,13 +1581,8 @@ static xhci_dispatch_result_t xhci_dispatch_one() {
 
   for (unsigned int i = 0; i < XHCI_EVENT_WAITERS; i++) {
     xhci_event_waiter_t *waiter = &event_waiters[i];
-    if (!waiter->active || waiter->type != event.type ||
-        waiter->trb_address != event.parameter)
-      continue;
 
-    if (event.type == XHCI_TRB_TRANSFER_EVENT &&
-        (waiter->slot_id != event.slot_id ||
-         waiter->endpoint_id != endpoint_id))
+    if (!xhci_waiter_matches(waiter, &event, endpoint_id))
       continue;
 
     // A duplicate completion is a protocol error.
@@ -3543,6 +3654,11 @@ static xhci_control_result_t xhci_control_transfer(
     device->ep0_failed = true;
     return XHCI_CONTROL_EVENT_FAILED;
   }
+
+  // Associate earlier error-generating TRBs
+  // with the same completion owner.
+  waiter->td_start = device->ep0_ring.bus +
+      (uint64_t)first * sizeof(xhci_trb_t);
 
   device->ep0_active = true;
   __asm__ volatile("dsb sy" ::: "memory");

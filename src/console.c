@@ -881,6 +881,11 @@ static void cmd_usb_test_quiesce(void) {
   console_printf("USB test quiesce: %s\n", quiesced ? "OK" : "NOT READY");
 }
 
+static void cmd_usb_test_ep0match(void) {
+  bool passed = xhci_ep0_match_selftest();
+  console_printf("EP0 TD matching: %s\n", passed ? "PASS" : "FAILED");
+}
+
 static void cmd_usb_test_enumabort(void) {
   bool armed = usb_enumeration_test_abort_arm();
   console_printf("USB enumeration test abort: %s\n",
@@ -2264,6 +2269,11 @@ static void cmd_usb(const char *args) {
     return;
   }
   if (next_word_is(&other_args, "test")) {
+    if (next_word_is(&other_args, "ep0match") &&
+        end_of_args(other_args)) {
+      cmd_usb_test_ep0match();
+      return;
+    }
     if (next_word_is(&other_args, "enumabort") &&
         end_of_args(other_args)) {
       cmd_usb_test_enumabort();
