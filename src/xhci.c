@@ -2692,6 +2692,44 @@ static xhci_bulk_in_state_t xhci_downstream_bulk_in_status(
   return bulk_in_state;
 }
 
+xhci_in_reconcile_result_t xhci_bulk_in_quiesced_reconcile(void) {
+  if (!bulk_in_stream_started)
+    return XHCI_IN_RECONCILE_NOT_STARTED;
+
+  // Never inspect an active stream or a controller
+  // whose event-dispatch state is uncertain.
+  if (!downstream_quiesced || downstream_slot_disabled ||
+      dispatch_fault != XHCI_DISPATCH_NONE)
+    return XHCI_IN_RECONCILE_NOT_READY;
+
+  if (bulk_in_state == XHCI_BULK_IN_FAILED ||
+      bulk_in_state == XHCI_BULK_IN_COMPLETE)
+    return XHCI_IN_RECONCILE_RESOLVED;
+
+  if (bulk_in_state != XHCI_BULK_IN_PENDING)
+    return XHCI_IN_RECONCILE_FAILED;
+
+  // A registered waiter must remain intact until
+  // its completion has been delivered and consumed.
+  if (!bulk_in_waiter)
+    return XHCI_IN_RECONCILE_FAILED;
+
+  if (!bulk_in_waiter->completed)
+    return XHCI_IN_RECONCILE_PENDING;
+
+  xhci_bulk_in_info_t info = {0};
+  xhci_bulk_in_state_t state = xhci_downstream_bulk_in_status(&info);
+  if (state != XHCI_BULK_IN_FAILED && state != XHCI_BULK_IN_COMPLETE)
+    return XHCI_IN_RECONCILE_FAILED;
+
+  // The stream is no longer operational. Preserve
+  // its transfer result for diagnostics, and do
+  // not submit another transfer after disconnection.
+  bulk_in_stream_failed = true;
+
+  return XHCI_IN_RECONCILE_OK;
+}
+
 xhci_bulk_in_arm_result_t xhci_bulk_in_stream_start(void) {
   if (bulk_in_stream_started)
     return XHCI_BULK_IN_ARM_ALREADY_STARTED;

@@ -1332,6 +1332,11 @@ static void cmd_usb_retirein(void) {
   console_printf("Bulk IN retirement: %u\n", (unsigned int)result);
 }
 
+static void cmd_usb_reconcilein(void) {
+  xhci_in_reconcile_result_t result = xhci_bulk_in_quiesced_reconcile();
+  console_printf("Bulk IN reconciliation: %u\n", (unsigned int)result);
+}
+
 static void cmd_usb_recycle(void) {
   usb_device_t device = {0};
   if (!usb_get_device(&device) || device.state != USB_DEVICE_DETACHED) {
@@ -1712,6 +1717,10 @@ static void cmd_usb(const char *args) {
     cmd_usb_retirein();
     return;
   }
+  if (next_word_is(&args, "reconcilein") && end_of_args(args)) {
+    cmd_usb_reconcilein();
+    return;
+  }
   if (next_word_is(&args, "stopout") && end_of_args(args)) {
     cmd_usb_stopout();
     return;
@@ -1820,7 +1829,7 @@ static void cmd_usb(const char *args) {
     console_puts(
         "Usage: usb [scan | state | ports | events | device | devices | "
         "stopout | disable | cleanup | detach | recycle | rearm | transfers | "
-	"retirein | hubports | hubirq | enumerate | test]\n");
+	"retirein | reconcilein | hubports | hubirq | enumerate | test]\n");
     return;
   }
 
