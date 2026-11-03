@@ -106,6 +106,9 @@ typedef struct {
   bool ep0_wrap_pending;
   bool ep0_failed;
   bool ep0_active;
+  bool ep0_submitted;
+  bool ep0_completion_seen;
+  uint8_t ep0_completion_code;
   bool prepared;
   bool addressed;
   xhci_device_info_t info;
@@ -3431,6 +3434,12 @@ static xhci_control_result_t xhci_control_transfer(
 
   *result = (xhci_control_info_t){0};
 
+  if (device) {
+    device->ep0_submitted = false;
+    device->ep0_completion_seen = false;
+    device->ep0_completion_code = 0U;
+  }
+
   if (!device || !setup || setup->length > XHCI_CONTROL_MAX_DATA)
     return XHCI_CONTROL_NOT_READY;
 
@@ -3539,6 +3548,7 @@ static xhci_control_result_t xhci_control_transfer(
   // Doorbell index is the hardware slot ID.
   // Target 1 selects the default control endpoint.
   xhci_write(controller.doorbell_offset + 4U * device->slot_id, 1U);
+  device->ep0_submitted = true;
 
   uint64_t started = timer_now_us();
   while (timer_now_us() - started < XHCI_TRANSFER_TIMEOUT_US) {
@@ -3560,6 +3570,8 @@ static xhci_control_result_t xhci_control_transfer(
     // to our slot, endpoint and Status Stage TRB.
     xhci_event_t event = waiter->event;
     xhci_waiter_release(waiter);
+    device->ep0_completion_seen = true;
+    device->ep0_completion_code = event.completion_code;
 
     result->event_type = event.type;
     result->completion_code = event.completion_code;
@@ -4081,6 +4093,9 @@ bool xhci_downstream_transfer_state(xhci_downstream_transfer_state_t *state) {
   state->quiesced = downstream_quiesced;
   state->ep0_active = device->ep0_active;
   state->ep0_failed = device->ep0_failed;
+  state->ep0_submitted = device->ep0_submitted;
+  state->ep0_completion_seen = device->ep0_completion_seen;
+  state->ep0_completion_code = device->ep0_completion_code;
   state->bulk_out_active = device->bulk_out_active;
   state->bulk_in_started = bulk_in_stream_started;
   state->bulk_in_pending = bulk_in_state == XHCI_BULK_IN_PENDING;

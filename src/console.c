@@ -1356,6 +1356,18 @@ static void cmd_usb_enumstate(void) {
   console_printf("  EP0 failed   : %s\n",
       info.ep0_operation_failed ? "Yes" : "No");
   console_printf("  EP0 result   : %u\n", (unsigned int)info.ep0_result);
+  xhci_downstream_transfer_state_t transfers = {0};
+  if (xhci_downstream_transfer_state(&transfers) &&
+      transfers.slot_id == info.slot_id && info.slot_id != 0U) {
+    console_printf("  EP0 submitted: %s\n",
+        transfers.ep0_submitted ? "Yes" : "No");
+    console_printf("  EP0 complete : %s\n",
+        transfers.ep0_completion_seen ? "Yes" : "No");
+    console_printf("  EP0 code     : %u\n",
+        (unsigned int)transfers.ep0_completion_code);
+    console_printf("  EP0 latched  : %s\n",
+        transfers.ep0_failed ? "Yes" : "No");
+  }
 }
 
 static void cmd_usb_recover(void) {

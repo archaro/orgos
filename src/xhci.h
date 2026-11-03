@@ -769,6 +769,9 @@ typedef struct {
   bool quiesced;
   bool ep0_active;
   bool ep0_failed;
+  bool ep0_submitted;
+  bool ep0_completion_seen;
+  uint8_t ep0_completion_code;
   bool bulk_out_active;
   bool bulk_in_started;
   bool bulk_in_pending;
