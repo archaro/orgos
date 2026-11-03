@@ -18,6 +18,7 @@
 #define USB_PORT_POWERED 0x0100U
 
 static bool enumeration_attempted;
+static bool test_abort_after_address;
 static usb_enum_info_t enumeration_state;
 static usb_device_t current_device;
 static bool device_record_valid;
@@ -370,6 +371,15 @@ usb_enum_result_t usb_enumerate(usb_enum_info_t *info) {
   current_device.address = state.address;
 
   state.stage = USB_ENUM_STAGE_DEVICE_DESCRIPTOR;
+
+  // Diagnostic: leave a confirmed, addressed
+  // downstream slot for controlled recovery.
+  if (test_abort_after_address) {
+    test_abort_after_address = false;
+    result = USB_ENUM_TEST_ABORT;
+    goto complete;
+  }
+
   result = read_device(&state);
   if (result != USB_ENUM_OK)
     goto complete;
@@ -418,6 +428,47 @@ bool usb_get_device(usb_device_t *device) {
     return false;
 
   *device = current_device;
+  return true;
+}
+
+bool usb_enumeration_recovery_ready(void) {
+  if (!device_record_valid || current_device.state != USB_DEVICE_FAILED ||
+      current_device.slot_id == 0U || xhci_downstream_is_quiesced() ||
+      xhci_downstream_is_slot_disabled() || xhci_downstream_is_cleaned())
+    return false;
+
+  if (!enumeration_attempted ||
+      enumeration_state.result == USB_ENUM_OK ||
+      !enumeration_state.slot_confirmed ||
+      !enumeration_state.address_attempted ||
+      enumeration_state.stage < USB_ENUM_STAGE_DEVICE_DESCRIPTOR)
+    return false;
+
+  // Only an attempt that successfully passed
+  // Address Device is eligible for this path.
+  xhci_downstream_transfer_state_t transfers = {0};
+
+  if (!xhci_downstream_transfer_state(&transfers))
+    return false;
+
+  if (transfers.slot_id != current_device.slot_id ||
+      transfers.active_waiters != 0U || transfers.ep0_active ||
+      transfers.bulk_out_active || transfers.bulk_in_pending ||
+      transfers.bulk_in_started)
+    return false;
+
+  return true;
+}
+
+bool usb_enumeration_recovery_begin(void) {
+  if (!usb_enumeration_recovery_ready())
+    return false;
+
+  // The old xHCI slot must not accept further
+  // transfers while recovery dismantles it.
+  xhci_downstream_quiesce();
+  current_device.state = USB_DEVICE_DISCONNECTING;
+
   return true;
 }
 
@@ -515,6 +566,14 @@ bool usb_enumeration_rearm(void) {
   enumeration_attempted = false;
   enumeration_state = (usb_enum_info_t){0};
 
+  return true;
+}
+
+bool usb_enumeration_test_abort_arm(void) {
+  if (enumeration_attempted || test_abort_after_address)
+    return false;
+
+  test_abort_after_address = true;
   return true;
 }
 

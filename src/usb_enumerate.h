@@ -31,7 +31,8 @@ typedef enum {
   USB_ENUM_BULK_CONFIG_FAILED,
   USB_ENUM_SET_INTERFACE_FAILED,
   USB_ENUM_MIDI_QUIRK_FAILED,
-  USB_ENUM_DEBOUNCE_FAILED
+  USB_ENUM_DEBOUNCE_FAILED,
+  USB_ENUM_TEST_ABORT
 } usb_enum_result_t;
 
 typedef enum {
@@ -72,7 +73,10 @@ typedef struct {
 usb_enum_result_t usb_enumerate(usb_enum_info_t *info);
 bool usb_get_enumeration(usb_enum_info_t *info);
 bool usb_get_device(usb_device_t *device);
+bool usb_enumeration_recovery_ready(void);
+bool usb_enumeration_recovery_begin(void);
 bool usb_device_test_quiesce(void);
 void usb_device_port_changed(uint8_t port, uint16_t status, uint16_t change);
 bool usb_device_finalize_disconnect(void);
 bool usb_enumeration_rearm(void);
+bool usb_enumeration_test_abort_arm(void);

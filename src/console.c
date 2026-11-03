@@ -881,6 +881,12 @@ static void cmd_usb_test_quiesce(void) {
   console_printf("USB test quiesce: %s\n", quiesced ? "OK" : "NOT READY");
 }
 
+static void cmd_usb_test_enumabort(void) {
+  bool armed = usb_enumeration_test_abort_arm();
+  console_printf("USB enumeration test abort: %s\n",
+      armed ? "ARMED" : "NOT READY");
+}
+
 static void cmd_usb_test_noops(void) {
   const unsigned int count = 600U;
   console_puts("Executing 600 sequential No Op commands...\n");
@@ -1340,6 +1346,26 @@ static void cmd_usb_enumstate(void) {
   console_printf("  Address tried: %s\n",
       info.address_attempted ? "Yes" : "No");
   console_printf("  Bulk tried   : %s\n", info.bulk_attempted ? "Yes" : "No");
+}
+
+static void cmd_usb_recover(void) {
+  if (!usb_service_available()) {
+    console_puts("USB recovery: SERVICE UNAVAILABLE\n");
+    return;
+  }
+  if (!usb_enumeration_recovery_ready()) {
+    console_puts("USB recovery: NOT READY\n");
+    return;
+  }
+  if (!usb_enumeration_recovery_begin()) {
+    console_puts("USB recovery: FAILED\n");
+    return;
+  }
+  if (!usb_lifecycle_arm()) {
+    console_puts("USB recovery: QUIESCED, NOT ARMED\n");
+    return;
+  }
+  console_puts("USB recovery: STARTED\n");
 }
 
 static void cmd_usb_stopout(void) {
@@ -2008,6 +2034,10 @@ static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
   const char *other_args = args;
+  if (next_word_is(&args, "recover") && end_of_args(args)) {
+    cmd_usb_recover();
+    return;
+  }
   if (next_word_is(&args, "lifecycle")) {
     if (end_of_args(args)) {
       cmd_usb_lifecycle();
@@ -2129,6 +2159,11 @@ static void cmd_usb(const char *args) {
     return;
   }
   if (next_word_is(&other_args, "test")) {
+    if (next_word_is(&other_args, "enumabort") &&
+        end_of_args(other_args)) {
+      cmd_usb_test_enumabort();
+      return;
+    }
     if (next_word_is(&other_args, "noops") &&
         end_of_args(other_args)) {
       cmd_usb_test_noops();
@@ -2163,7 +2198,7 @@ static void cmd_usb(const char *args) {
 
   if (!end_of_args(args)) {
     console_puts(
-        "Usage: usb [scan | state | ports | events | device | devices | test"
+        "Usage: usb [scan | state | ports | events | device | devices | test | recover"
         "stopout | stopin | disable | cleanup | detach | recycle | rearm | transfers | "
 	"retirein | reconcilein | lifecycle | hubports | hubirq | enumerate | enumstate]\n");
     return;
