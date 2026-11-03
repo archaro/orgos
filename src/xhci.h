@@ -302,6 +302,30 @@ typedef struct {
 xhci_disable_result_t xhci_downstream_disable(xhci_disable_info_t *info);
 
 typedef enum {
+  XHCI_STOP_OK,
+  XHCI_STOP_NOT_READY,
+  XHCI_STOP_BUSY,
+  XHCI_STOP_ALREADY_ATTEMPTED,
+  XHCI_STOP_INVALID_STATE,
+  XHCI_STOP_COMMAND_FAILED,
+  XHCI_STOP_VERIFY_FAILED
+} xhci_stop_result_t;
+
+typedef struct {
+  uint8_t slot_id;
+  uint8_t endpoint_id;
+  uint8_t before_state;
+  uint8_t after_state;
+  uint8_t completion_code;
+  xhci_command_result_t command_result;
+  bool stop_event_received;
+  uint8_t stop_event_code;
+  uint64_t stop_event_trb;
+} xhci_stop_info_t;
+
+xhci_stop_result_t xhci_downstream_stop_bulk_out(xhci_stop_info_t *info);
+
+typedef enum {
   XHCI_CLEANUP_OK,
   XHCI_CLEANUP_NOT_READY,
   XHCI_CLEANUP_BUSY,

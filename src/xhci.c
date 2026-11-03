@@ -191,6 +191,16 @@ typedef struct {
 } xhci_event_waiter_t;
 static xhci_event_waiter_t event_waiters[XHCI_EVENT_WAITERS];
 
+typedef struct {
+  bool armed;
+  bool received;
+  uint8_t slot_id;
+  uint8_t endpoint_id;
+  uint8_t completion_code;
+  uint64_t trb_address;
+} xhci_stop_event_state_t;
+static xhci_stop_event_state_t stop_out_event;
+
 static xhci_bulk_in_state_t bulk_in_state;
 static xhci_bulk_in_info_t bulk_in_info;
 static xhci_event_waiter_t *bulk_in_waiter;
@@ -209,6 +219,7 @@ static bool hub_notify_started;
 static bool slot_requested;
 static bool downstream_slot_requested;
 static bool downstream_disable_attempted;
+static bool downstream_stop_out_attempted;
 static bool downstream_slot_disabled;
 static bool downstream_cleaned;
 static uint8_t internal_hub_slot;
@@ -525,6 +536,7 @@ xhci_port_reset_result_t xhci_port_reset(
 #define XHCI_TRB_ADDRESS_DEVICE 11U
 #define XHCI_TRB_CONFIGURE_ENDPOINT 12U
 #define XHCI_TRB_EVALUATE_CONTEXT 13U
+#define XHCI_TRB_STOP_ENDPOINT 15U
 #define XHCI_TRB_NOOP_CMD       23U
 #define XHCI_TRB_TRANSFER_EVENT 32U
 #define XHCI_TRB_COMMAND_EVENT  33U
@@ -1469,6 +1481,31 @@ static xhci_dispatch_result_t xhci_dispatch_one() {
       event_stats.command_events++;
     else
       event_stats.transfer_events++;
+    return XHCI_DISPATCH_OK;
+  }
+
+  // Stop Endpoint can force a Transfer Event for
+  // the endpoint's current dequeue position.
+  // It need not correspond to an outstanding TD.
+  if (event.type == XHCI_TRB_TRANSFER_EVENT && stop_out_event.armed &&
+      !stop_out_event.received && event.slot_id == stop_out_event.slot_id &&
+      endpoint_id == stop_out_event.endpoint_id &&
+      event.completion_code >= 26U && event.completion_code <= 28U) {
+
+    xhci_device_t *device = &devices[1];
+    uint64_t base = device->bulk_out_ring.bus;
+    uint64_t offset = event.parameter - base;
+    // Accept only a TRB address belonging to
+    // this endpoint's existing transfer ring.
+    if (event.parameter < base || offset >= PAGE_SIZE ||
+        (offset % sizeof(xhci_trb_t)) != 0U)
+      return xhci_dispatch_unhandled(&event);
+
+    stop_out_event.received = true;
+    stop_out_event.completion_code = event.completion_code;
+    stop_out_event.trb_address = event.parameter;
+
+    event_stats.transfer_events++;
     return XHCI_DISPATCH_OK;
   }
 
@@ -4027,6 +4064,96 @@ xhci_cleanup_result_t xhci_downstream_cleanup(xhci_cleanup_info_t *info) {
   return XHCI_CLEANUP_OK;
 }
 
+xhci_stop_result_t xhci_downstream_stop_bulk_out( xhci_stop_info_t *info) {
+  if (!info)
+    return XHCI_STOP_NOT_READY;
+
+  *info = (xhci_stop_info_t){
+    .command_result = XHCI_COMMAND_UNAVAILABLE
+  };
+
+  if (downstream_stop_out_attempted)
+    return XHCI_STOP_ALREADY_ATTEMPTED;
+
+  xhci_device_t *device = &devices[1];
+  if (!downstream_quiesced || downstream_slot_disabled ||
+      !device->addressed || !device->bulk_out_ready ||
+      device->slot_id == 0U || !controller_running ||
+      !controller_verified || command_outstanding ||
+      command_ring_failed)
+    return XHCI_STOP_NOT_READY;
+
+  // This first operation is restricted to an idle
+  // Bulk OUT endpoint after device disconnection.
+  if (device->bulk_out_active || device->ep0_active)
+    return XHCI_STOP_BUSY;
+
+  // No outstanding waiter may belong to Bulk OUT.
+  for (unsigned int i = 0U; i < XHCI_EVENT_WAITERS; i++) {
+    xhci_event_waiter_t *waiter = &event_waiters[i];
+    if (waiter->active && waiter->slot_id == device->slot_id &&
+        waiter->endpoint_id == XHCI_BULK_OUT_DCI)
+      return XHCI_STOP_BUSY;
+  }
+
+  uint8_t in_state = 0U;
+  uint8_t out_state = 0U;
+
+  if (!xhci_downstream_endpoint_states(&in_state, &out_state))
+    return XHCI_STOP_NOT_READY;
+
+  info->slot_id = device->slot_id;
+  info->endpoint_id = XHCI_BULK_OUT_DCI;
+  info->before_state = out_state;
+
+  // Stop Endpoint is meaningful here only when
+  // the endpoint is currently Running.
+  if (out_state != 1U)
+    return XHCI_STOP_INVALID_STATE;
+
+  xhci_trb_t command = {
+    .parameter = 0U,
+    .status = 0U,
+    .control = (XHCI_TRB_STOP_ENDPOINT << XHCI_TRB_TYPE_SHIFT) |
+        ((uint32_t)XHCI_BULK_OUT_DCI << 16) |
+        ((uint32_t)device->slot_id << 24)
+  };
+
+  downstream_stop_out_attempted = true;
+  stop_out_event = (xhci_stop_event_state_t){
+    .armed = true,
+    .slot_id = device->slot_id,
+    .endpoint_id = XHCI_BULK_OUT_DCI
+  };
+
+  xhci_command_completion_t completion = {0};
+  xhci_command_result_t status = xhci_command_submit(&command, &completion);
+
+  info->command_result = status;
+  info->completion_code = completion.completion_code;
+  stop_out_event.armed = false;
+  info->stop_event_received = stop_out_event.received;
+  info->stop_event_code = stop_out_event.completion_code;
+  info->stop_event_trb = stop_out_event.trb_address;
+
+  if (status != XHCI_COMMAND_OK || completion.slot_id != device->slot_id)
+    return XHCI_STOP_COMMAND_FAILED;
+
+  // A successful Stop Endpoint command must have
+  // generated its stopped Transfer Event.
+  if (!stop_out_event.received)
+    return XHCI_STOP_VERIFY_FAILED;
+
+  if (!xhci_downstream_endpoint_states(&in_state, &out_state))
+    return XHCI_STOP_VERIFY_FAILED;
+
+  info->after_state = out_state;
+  if (out_state != 3U)
+    return XHCI_STOP_VERIFY_FAILED;
+
+  return XHCI_STOP_OK;
+}
+
 xhci_disable_result_t xhci_downstream_disable(xhci_disable_info_t *info) {
   if (!info)
     return XHCI_DISABLE_NOT_READY;
@@ -4143,6 +4270,7 @@ xhci_recycle_result_t xhci_downstream_recycle(void) {
   downstream_disable_attempted = false;
   downstream_slot_disabled = false;
   downstream_cleaned = false;
+  downstream_stop_out_attempted = false;
 
   bulk_in_state = XHCI_BULK_IN_IDLE;
   bulk_in_info = (xhci_bulk_in_info_t){0};
@@ -4151,6 +4279,8 @@ xhci_recycle_result_t xhci_downstream_recycle(void) {
   bulk_in_stream_queued = false;
   bulk_in_stream_failed = false;
   bulk_in_stream_stats = (xhci_bulk_in_stream_stats_t){0};
+
+  stop_out_event = (xhci_stop_event_state_t){0};
 
   return XHCI_RECYCLE_OK;
 }
