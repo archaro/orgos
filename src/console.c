@@ -1470,6 +1470,29 @@ static const char *usb_lifecycle_run_name(
   }
 }
 
+static const char *usb_lifecycle_fault_name(usb_lifecycle_fault_t fault) {
+  switch (fault) {
+    case USB_LIFECYCLE_FAULT_NONE:
+      return "None";
+    case USB_LIFECYCLE_FAULT_INSPECTION:
+      return "Inspection failed";
+    case USB_LIFECYCLE_FAULT_GENERATION:
+      return "Generation mismatch";
+    case USB_LIFECYCLE_FAULT_BLOCKED:
+      return "Blocked action";
+    case USB_LIFECYCLE_FAULT_OPERATION:
+      return "Operation failed";
+    case USB_LIFECYCLE_FAULT_XHCI_SERVICE:
+      return "xHCI service failure";
+    case USB_LIFECYCLE_FAULT_ROOT_PORT:
+      return "Root port failure";
+    case USB_LIFECYCLE_FAULT_HUB:
+      return "Hub service failure";
+    default:
+      return "Unknown";
+  }
+}
+
 static void cmd_usb_lifecycle_arm(void) {
   bool armed = usb_lifecycle_arm();
   console_printf("USB lifecycle arm: %s\n", armed ? "OK" : "NOT READY");
@@ -1489,6 +1512,13 @@ static void cmd_usb_lifecycle_status(void) {
       usb_lifecycle_action_name(info.last_action));
   console_printf("  Last result : %u\n", (unsigned int)info.last_result);
   console_printf("  Succeeded   : %s\n", info.last_succeeded ? "Yes" : "No");
+  console_printf("  Fault       : %s\n",
+      usb_lifecycle_fault_name(info.fault));
+  console_printf("  Slot        : %u\n", (unsigned int)info.slot_id);
+  console_printf("  Observed gen: %u\n",
+      (unsigned int)info.observed_generation);
+  console_printf("  Command     : %u\n", (unsigned int)info.command_result);
+  console_printf("  Completion  : %u\n", (unsigned int)info.completion_code);
 }
 
 static void cmd_usb_test_midiout(void) {

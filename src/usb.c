@@ -477,7 +477,8 @@ bool usb_lifecycle_get_run_info(
 bool usb_lifecycle_arm(void) {
   usb_device_t device = {0};
 
-  if (!usb_service_available() || !usb_get_device(&device) ||
+  if (!usb_service_available() || change_stats.failed ||
+      !usb_get_device(&device) ||
       (device.state != USB_DEVICE_ACTIVE &&
        device.state != USB_DEVICE_DISCONNECTING))
     return false;
@@ -493,10 +494,21 @@ bool usb_lifecycle_arm(void) {
 
   lifecycle_run = (usb_lifecycle_run_info_t){
     .state = USB_LIFECYCLE_RUN_ARMED,
-    .generation = device.generation
+    .generation = device.generation,
+    .observed_generation = device.generation,
+    .slot_id = device.slot_id
   };
 
   return true;
+}
+
+static void usb_lifecycle_fail(usb_lifecycle_fault_t fault) {
+  if (lifecycle_run.state != USB_LIFECYCLE_RUN_ARMED)
+    return;
+
+  lifecycle_run.fault = fault;
+  lifecycle_run.state = USB_LIFECYCLE_RUN_FAILED;
+  lifecycle_run.last_succeeded = false;
 }
 
 static void usb_lifecycle_service(void) {
@@ -504,10 +516,14 @@ static void usb_lifecycle_service(void) {
     return;
 
   usb_lifecycle_info_t info = {0};
+  if (!usb_lifecycle_inspect(&info)) {
+    usb_lifecycle_fail(USB_LIFECYCLE_FAULT_INSPECTION);
+    return;
+  }
 
-  if (!usb_lifecycle_inspect(&info) ||
-      info.generation != lifecycle_run.generation) {
-    lifecycle_run.state = USB_LIFECYCLE_RUN_FAILED;
+  lifecycle_run.observed_generation = info.generation;
+  if (info.generation != lifecycle_run.generation) {
+    usb_lifecycle_fail(USB_LIFECYCLE_FAULT_GENERATION);
     return;
   }
 
@@ -519,7 +535,8 @@ static void usb_lifecycle_service(void) {
   lifecycle_run.last_action = info.next;
   lifecycle_run.last_succeeded = false;
   lifecycle_run.last_result = 0U;
-
+  lifecycle_run.command_result = 0U;
+  lifecycle_run.completion_code = 0U;
   bool succeeded = false;
 
   switch (info.next) {
@@ -534,6 +551,8 @@ static void usb_lifecycle_service(void) {
       xhci_stop_info_t result = {0};
       xhci_stop_result_t status = xhci_downstream_stop_bulk_in(&result);
       lifecycle_run.last_result = (uint32_t)status;
+      lifecycle_run.command_result = (uint8_t)result.command_result;
+      lifecycle_run.completion_code = result.completion_code;
       succeeded = status == XHCI_STOP_OK;
       break;
     }
@@ -541,6 +560,8 @@ static void usb_lifecycle_service(void) {
       xhci_disable_info_t result = {0};
       xhci_disable_result_t status = xhci_downstream_disable(&result);
       lifecycle_run.last_result = (uint32_t)status;
+      lifecycle_run.command_result = (uint8_t)result.command_result;
+      lifecycle_run.completion_code = result.completion_code;
       succeeded = status == XHCI_DISABLE_OK;
       break;
     }
@@ -576,7 +597,7 @@ static void usb_lifecycle_service(void) {
     default: {
       // A blocked or unsupported state is not
       // permission to guess the next operation.
-      lifecycle_run.state = USB_LIFECYCLE_RUN_FAILED;
+      usb_lifecycle_fail(USB_LIFECYCLE_FAULT_BLOCKED);
       return;
     }
   }
@@ -584,7 +605,7 @@ static void usb_lifecycle_service(void) {
   lifecycle_run.steps++;
   lifecycle_run.last_succeeded = succeeded;
   if (!succeeded) {
-    lifecycle_run.state = USB_LIFECYCLE_RUN_FAILED;
+    usb_lifecycle_fail(USB_LIFECYCLE_FAULT_OPERATION);
     return;
   }
 
@@ -599,6 +620,7 @@ void usb_service(void) {
   // Dispatch hardware events to their owners.
   xhci_service_result_t result = xhci_service(8U);
   if (result == XHCI_SERVICE_FAILED || result == XHCI_SERVICE_NOT_READY) {
+    usb_lifecycle_fail(USB_LIFECYCLE_FAULT_XHCI_SERVICE);
     usb_service_failed = true;
     return;
   }
@@ -606,9 +628,10 @@ void usb_service(void) {
   // Consume root-port notifications and acknowledge
   // their change flags before servicing endpoints.
   usb_service_port_events();
-
-  if (usb_service_failed)
+  if (usb_service_failed) {
+    usb_lifecycle_fail(USB_LIFECYCLE_FAULT_ROOT_PORT);
     return;
+  }
 
   // Finalise any internal hub interrupt notification.
   xhci_hub_notify_service();
@@ -616,6 +639,10 @@ void usb_service(void) {
   // Record and acknowledge hub changes, then
   // automatically rearm the notification endpoint.
   usb_service_hub_changes();
+  if (change_stats.failed) {
+    usb_lifecycle_fail(USB_LIFECYCLE_FAULT_HUB);
+    return;
+  }
 
   // Finalise and rearm completed Bulk IN transfers.
   xhci_bulk_in_stream_service();

@@ -67,6 +67,17 @@ typedef enum {
   USB_LIFECYCLE_RUN_FAILED
 } usb_lifecycle_run_state_t;
 
+typedef enum {
+  USB_LIFECYCLE_FAULT_NONE,
+  USB_LIFECYCLE_FAULT_INSPECTION,
+  USB_LIFECYCLE_FAULT_GENERATION,
+  USB_LIFECYCLE_FAULT_BLOCKED,
+  USB_LIFECYCLE_FAULT_OPERATION,
+  USB_LIFECYCLE_FAULT_XHCI_SERVICE,
+  USB_LIFECYCLE_FAULT_ROOT_PORT,
+  USB_LIFECYCLE_FAULT_HUB
+} usb_lifecycle_fault_t;
+
 typedef struct {
   usb_lifecycle_run_state_t state;
   usb_lifecycle_action_t last_action;
@@ -74,6 +85,11 @@ typedef struct {
   uint32_t steps;
   uint32_t last_result;
   bool last_succeeded;
+  usb_lifecycle_fault_t fault;
+  uint8_t slot_id;
+  uint8_t command_result;
+  uint8_t completion_code;
+  uint32_t observed_generation;
 } usb_lifecycle_run_info_t;
 
 bool usb_lifecycle_arm(void);
