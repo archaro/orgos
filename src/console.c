@@ -1437,6 +1437,12 @@ static void cmd_usb_test_midiout(void) {
 }
 
 static void cmd_usb_test_midiin_stress(const char *args) {
+  if (next_word_is(&args, "reset") && end_of_args(args)) {
+    bool reset = usb_midi_in_stress_reset();
+    console_printf("USB-MIDI IN stress reset: %s\n",
+        reset ? "OK" : "NOT READY");
+    return;
+  }
   if (next_word_is(&args, "start") && end_of_args(args)) {
     bool started = usb_midi_in_stress_start();
     console_printf("USB-MIDI IN stress: %s\n",
@@ -1499,7 +1505,7 @@ static void cmd_usb_test_midiin_stress(const char *args) {
           "Too few separate USB transfers; retry with slower MIDI.\n");
     return;
   }
-  console_puts("Usage: usb test midiin stress [start | status]\n");
+  console_puts("Usage: usb test midiin stress [start | status | reset]\n");
 }
 
 static void cmd_usb_test_midiin(const char *args) {

@@ -21,12 +21,39 @@ static void usb_midi_in_stress_fail(usb_midi_in_stress_error_t error) {
   in_stress.elapsed_us = timer_now_us() - in_stress_started;
 }
 
+bool usb_midi_in_stress_reset(void) {
+  usb_device_t device = {0};
+  usb_enum_info_t enumeration = {0};
+  xhci_bulk_in_stream_stats_t stream = {0};
+
+  // Only reset between device generations,
+  // after the previous teardown and rearm.
+  if (!usb_get_device(&device) || device.state != USB_DEVICE_DETACHED ||
+      usb_get_enumeration(&enumeration) || xhci_downstream_is_quiesced() ||
+      xhci_downstream_is_cleaned() ||
+      !xhci_bulk_in_stream_get_stats(&stream) || stream.started ||
+      in_stress.state == USB_MIDI_IN_STRESS_RUNNING)
+    return false;
+
+  // This is diagnostic bookkeeping only.
+  // xHCI resources have already been recycled.
+  in_stress = (usb_midi_in_stress_info_t){0};
+  in_stress_started = 0U;
+  in_stress_ring_base = 0U;
+  in_stress_first_index = 0U;
+
+  return true;
+}
+
 bool usb_midi_in_stress_start(void) {
   if (!usb_service_available() || in_stress.state != USB_MIDI_IN_STRESS_IDLE)
     return false;
 
   usb_enum_info_t enumeration = {0};
-  if (!usb_get_enumeration(&enumeration) || enumeration.result != USB_ENUM_OK)
+  usb_device_t device = {0};
+  if (!usb_get_enumeration(&enumeration) ||
+      enumeration.result != USB_ENUM_OK ||
+      !usb_get_device(&device) || device.state != USB_DEVICE_ACTIVE)
     return false;
 
   xhci_bulk_in_stream_stats_t stream = {0};

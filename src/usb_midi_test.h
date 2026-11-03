@@ -38,6 +38,7 @@ typedef struct {
   uint64_t discarded_transfers;
 } usb_midi_in_stress_info_t;
 
+bool usb_midi_in_stress_reset(void);
 bool usb_midi_in_stress_start(void);
 bool usb_midi_in_stress_get_info(usb_midi_in_stress_info_t *result);
 void usb_midi_in_stress_service(void);
