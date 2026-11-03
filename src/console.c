@@ -1334,6 +1334,17 @@ static const char *usb_enum_stage_name(usb_enum_stage_t stage) {
   }
 }
 
+static const char *xhci_ep_state_name(uint8_t state) {
+  switch (state) {
+    case 0U: return "Disabled";
+    case 1U: return "Running";
+    case 2U: return "Halted";
+    case 3U: return "Stopped";
+    case 4U: return "Error";
+    default: return "Unknown";
+  }
+}
+
 static void cmd_usb_enumstate(void) {
   usb_enum_info_t info = {0};
   if (!usb_get_enumeration(&info)) {
@@ -1359,6 +1370,13 @@ static void cmd_usb_enumstate(void) {
   xhci_downstream_transfer_state_t transfers = {0};
   if (xhci_downstream_transfer_state(&transfers) &&
       transfers.slot_id == info.slot_id && info.slot_id != 0U) {
+    if (transfers.ep0_state_valid) {
+      console_printf("  EP0 endpoint : %s (%u)\n",
+          xhci_ep_state_name(transfers.ep0_state),
+          (unsigned int)transfers.ep0_state);
+    } else {
+      console_puts("  EP0 endpoint : Unavailable\n");
+    }
     console_printf("  EP0 submitted: %s\n",
         transfers.ep0_submitted ? "Yes" : "No");
     console_printf("  EP0 complete : %s\n",
@@ -1479,17 +1497,6 @@ static void cmd_usb_rearm(void) {
     console_puts("USB enumeration rearm not ready.\n");
 }
 
-static const char *xhci_ep_state_name(uint8_t state) {
-  switch (state) {
-    case 0U: return "Disabled";
-    case 1U: return "Running";
-    case 2U: return "Halted";
-    case 3U: return "Stopped";
-    case 4U: return "Error";
-    default: return "Unknown";
-  }
-}
-
 static void cmd_usb_transfers(void) {
   xhci_downstream_transfer_state_t state = {0};
   if (!xhci_downstream_transfer_state(&state)) {
@@ -1502,6 +1509,19 @@ static void cmd_usb_transfers(void) {
   console_printf("  Active waiters: %u\n",
       (unsigned int)state.active_waiters);
   console_printf("  EP0 active    : %s\n", state.ep0_active ? "Yes" : "No");
+  console_printf("  EP0 fault     : %s\n", state.ep0_failed ? "Yes" : "No");
+  console_printf("  EP0 submitted : %s\n",
+      state.ep0_submitted ? "Yes" : "No");
+  console_printf("  EP0 complete  : %s\n",
+      state.ep0_completion_seen ? "Yes" : "No");
+  console_printf("  EP0 code      : %u\n",
+      (unsigned int)state.ep0_completion_code);
+  if (state.ep0_state_valid) {
+    console_printf("  EP0 endpoint  : %s (%u)\n",
+        xhci_ep_state_name(state.ep0_state), (unsigned int)state.ep0_state);
+  } else {
+    console_puts("  EP0 endpoint  : Unavailable\n");
+  }
   console_printf("  Bulk OUT      : %s\n",
       state.bulk_out_active ? "Active" : "Idle");
   console_printf("  Bulk IN stream: %s\n",

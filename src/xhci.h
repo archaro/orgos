@@ -772,6 +772,8 @@ typedef struct {
   bool ep0_submitted;
   bool ep0_completion_seen;
   uint8_t ep0_completion_code;
+  bool ep0_state_valid;
+  uint8_t ep0_state;
   bool bulk_out_active;
   bool bulk_in_started;
   bool bulk_in_pending;

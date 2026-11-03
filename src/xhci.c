@@ -4052,6 +4052,32 @@ bool xhci_downstream_is_slot_disabled(void) {
   return downstream_slot_disabled;
 }
 
+static bool xhci_downstream_ep0_state(uint8_t *state) {
+  if (!state)
+    return false;
+
+  xhci_device_t *device = &devices[1];
+
+  if (!device->addressed || device->slot_id == 0U ||
+      downstream_slot_disabled || device->output.owner != DMA_OWNER_DEVICE ||
+      (device->context_size != 32U && device->context_size != 64U))
+    return false;
+
+  uint32_t size = device->context_size;
+  uint8_t *output = device->output.virtual;
+  if (!output)
+    return false;
+
+  // The Output Device Context is controller-owned.
+  // Read the Slot Context and EP0 Context only.
+  if (!cache_invalidate(output, 2U * size))
+    return false;
+
+  uint32_t *ep0 = (uint32_t *)(output + size);
+  *state = (uint8_t)(ep0[0] & 0x07U);
+  return true;
+}
+
 static bool xhci_downstream_endpoint_states(
     uint8_t *in_state, uint8_t *out_state) {
 
@@ -4096,6 +4122,7 @@ bool xhci_downstream_transfer_state(xhci_downstream_transfer_state_t *state) {
   state->ep0_submitted = device->ep0_submitted;
   state->ep0_completion_seen = device->ep0_completion_seen;
   state->ep0_completion_code = device->ep0_completion_code;
+  state->ep0_state_valid = xhci_downstream_ep0_state(&state->ep0_state);
   state->bulk_out_active = device->bulk_out_active;
   state->bulk_in_started = bulk_in_stream_started;
   state->bulk_in_pending = bulk_in_state == XHCI_BULK_IN_PENDING;
