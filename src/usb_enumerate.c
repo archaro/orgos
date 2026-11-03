@@ -390,8 +390,40 @@ bool usb_get_device(usb_device_t *device) {
   return true;
 }
 
-void usb_device_port_changed(uint8_t port, uint16_t status, uint16_t change) {
+bool usb_device_test_quiesce(void) {
+  if (!device_record_valid || current_device.state != USB_DEVICE_ACTIVE ||
+      current_device.slot_id == 0U || xhci_downstream_is_quiesced())
+    return false;
 
+  xhci_downstream_transfer_state_t state = {0};
+  if (!xhci_downstream_transfer_state(&state))
+    return false;
+
+  // Require exactly one outstanding Bulk IN
+  // transfer, with no other active operations.
+  if (state.slot_id != current_device.slot_id || !state.bulk_in_started ||
+      !state.bulk_in_pending || state.bulk_in_completed ||
+      state.bulk_in_failed || state.active_waiters != 1U ||
+      state.ep0_active || state.bulk_out_active)
+    return false;
+
+  // Verify that the endpoint is Running before
+  // deliberately interrupting its operation.
+  if (!state.endpoint_states_valid || state.bulk_in_ep_state != 1U)
+    return false;
+
+  // This is an irreversible transition for
+  // the current device generation.
+  xhci_downstream_quiesce();
+
+  // Present the same software lifecycle state
+  // as an actual downstream disconnection.
+  current_device.state = USB_DEVICE_DISCONNECTING;
+
+  return true;
+}
+
+void usb_device_port_changed(uint8_t port, uint16_t status, uint16_t change) {
   if (!device_record_valid)
     return;
 

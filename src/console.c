@@ -876,6 +876,11 @@ static void usb_test_delay_ms(uint32_t milliseconds) {
   }
 }
 
+static void cmd_usb_test_quiesce(void) {
+  bool quiesced = usb_device_test_quiesce();
+  console_printf("USB test quiesce: %s\n", quiesced ? "OK" : "NOT READY");
+}
+
 static void cmd_usb_test_noops(void) {
   const unsigned int count = 600U;
   console_puts("Executing 600 sequential No Op commands...\n");
@@ -1824,6 +1829,11 @@ static void cmd_usb(const char *args) {
       cmd_usb_test_noops();
       return;
     }
+    if (next_word_is(&other_args, "quiesce") &&
+        end_of_args(other_args)) {
+      cmd_usb_test_quiesce();
+      return;
+    }
     if (next_word_is(&other_args, "midiout") &&
         end_of_args(other_args)) {
       cmd_usb_test_midiout();
@@ -1838,7 +1848,7 @@ static void cmd_usb(const char *args) {
       cmd_usb_test_midiin(other_args);
       return;
     }
-    console_puts("Usage: usb test [noops | midiout | midiwrap | midiin]\n");
+    console_puts("Usage: usb test [noops | quiesce | midiout | midiwrap | midiin]\n");
     return;
   }
   if (next_word_is(&args, "state") && end_of_args(args)) {

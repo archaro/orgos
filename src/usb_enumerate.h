@@ -52,6 +52,7 @@ typedef struct {
 usb_enum_result_t usb_enumerate(usb_enum_info_t *info);
 bool usb_get_enumeration(usb_enum_info_t *info);
 bool usb_get_device(usb_device_t *device);
+bool usb_device_test_quiesce(void);
 void usb_device_port_changed(uint8_t port, uint16_t status, uint16_t change);
 bool usb_device_finalize_disconnect(void);
 bool usb_enumeration_rearm(void);
