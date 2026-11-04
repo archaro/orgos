@@ -508,6 +508,28 @@ bool usb_lifecycle_arm(void) {
   return true;
 }
 
+static void usb_lifecycle_auto_arm(void) {
+  usb_device_t device = {0};
+  usb_enum_info_t enumeration = {0};
+
+  if (!usb_get_device(&device) || device.state != USB_DEVICE_DISCONNECTING ||
+      device.slot_id == 0U || !xhci_downstream_is_quiesced() ||
+      !usb_get_enumeration(&enumeration) ||
+      enumeration.result != USB_ENUM_OK ||
+      enumeration.slot_id != device.slot_id)
+    return;
+
+  // Never restart teardown for a generation whose
+  // executor is already armed, complete or failed.
+  if (lifecycle_run.generation == device.generation &&
+      lifecycle_run.state != USB_LIFECYCLE_RUN_DISARMED)
+    return;
+
+  // All controller operations remain the
+  // responsibility of the existing executor.
+  (void)usb_lifecycle_arm();
+}
+
 static void usb_lifecycle_fail(usb_lifecycle_fault_t fault) {
   if (lifecycle_run.state != USB_LIFECYCLE_RUN_ARMED)
     return;
@@ -656,8 +678,12 @@ void usb_service(void) {
   // Service the diagnostic MIDI receiver, if active.
   usb_midi_in_stress_service();
 
+  // A disconnected, successfully enumerated device
+  // is automatically admitted to lifecycle teardown.
+  usb_lifecycle_auto_arm();
+
   // Perform at most one lifecycle operation per
-  // foreground service pass, when explicitly armed.
+  // foreground service pass, once armed.
   usb_lifecycle_service();
 }
 
