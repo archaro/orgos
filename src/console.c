@@ -1398,6 +1398,8 @@ static const char *usb_recovery_result_name(
   switch (result) {
     case USB_RECOVERY_READY:
       return "Ready";
+    case USB_RECOVERY_READY_EP0_ERROR:
+      return "Ready (confirmed EP0 error)";
     case USB_RECOVERY_NO_FAILED_DEVICE:
       return "No failed device";
     case USB_RECOVERY_NO_CONFIRMED_SLOT:

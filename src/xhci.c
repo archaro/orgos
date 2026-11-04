@@ -83,6 +83,8 @@
 #define XHCI_EP_TYPE_OUT   2U
 #define XHCI_EP_TYPE_IN    6U
 #define XHCI_EP_TYPE_INTERRUPT_IN 7U
+#define XHCI_EP_STATE_HALTED 2U
+#define XHCI_EP_STATE_ERROR  4U
 #define XHCI_COMPLETION_SHORT_PACKET 13U
 
 typedef struct {
@@ -4196,6 +4198,39 @@ static bool xhci_downstream_ep0_state(uint8_t *state) {
   return true;
 }
 
+bool xhci_downstream_ep0_fault_reclaimable(void) {
+  xhci_device_t *device = &devices[1];
+
+  if (device->slot_id == 0U || !device->addressed ||
+      !controller_running || !controller_verified ||
+      command_outstanding || command_ring_failed ||
+      dispatch_fault != XHCI_DISPATCH_NONE || downstream_slot_disabled ||
+      device->ep0_active || !device->ep0_failed ||
+      !device->ep0_submitted || !device->ep0_completion_seen ||
+      device->ep0_completion_code == 0U ||
+      device->ep0_completion_code == XHCI_COMPLETION_SUCCESS)
+    return false;
+
+  // No completion owner may remain on EP0.
+  for (unsigned int i = 0U; i < XHCI_EVENT_WAITERS; i++) {
+    xhci_event_waiter_t *waiter = &event_waiters[i];
+
+    if (waiter->active && waiter->slot_id == device->slot_id &&
+        waiter->endpoint_id == 1U)
+      return false;
+  }
+
+  uint8_t state = 0U;
+
+  if (!xhci_downstream_ep0_state(&state))
+    return false;
+
+  // Halted and Error endpoints are not executing
+  // transfers. Their slot may be discarded without
+  // restarting the failed endpoint.
+  return state == XHCI_EP_STATE_HALTED || state == XHCI_EP_STATE_ERROR;
+}
+
 static bool xhci_downstream_endpoint_states(
     uint8_t *in_state, uint8_t *out_state) {
 
@@ -4578,6 +4613,11 @@ xhci_disable_result_t xhci_downstream_disable(xhci_disable_info_t *info) {
       !controller_verified || command_outstanding ||
       command_ring_failed || device->ep0_active ||
       device->bulk_out_active)
+    return XHCI_DISABLE_NOT_READY;
+
+  // A failed EP0 must have a confirmed terminal
+  // outcome before its slot can be disabled.
+  if (device->ep0_failed && !xhci_downstream_ep0_fault_reclaimable())
     return XHCI_DISABLE_NOT_READY;
 
   // Outstanding completions must retain their owners.

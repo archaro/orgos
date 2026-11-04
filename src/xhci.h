@@ -435,6 +435,7 @@ typedef struct {
 
 xhci_ep0_update_result_t xhci_downstream_ep0_update(
     uint16_t max_packet_size, xhci_ep0_update_info_t *result);
+bool xhci_downstream_ep0_fault_reclaimable(void);
 
 typedef enum {
   XHCI_HUB_OK,

@@ -520,8 +520,22 @@ bool usb_enumeration_recovery_inspect(usb_recovery_info_t *info) {
     return true;
   }
 
+  // EP0 error recovery limitations:
+  //
+  // TODO: Uncertain completions (timeouts and event
+  // dispatch failures) have no proven cancellation
+  // or reconciliation path. They remain blocked.
+  //
+  // TODO: Controlled hardware failure testing has
+  // not yet verified teardown following a genuine
+  // EP0 error completion. The confirmed-error path
+  // is implemented but remains unproven on hardware.
   if (enumeration_state.ep0_operation_failed || transfers.ep0_failed) {
-    if (transfers.ep0_submitted && transfers.ep0_completion_seen &&
+    if (enumeration_state.ep0_operation_failed &&
+        enumeration_state.ep0_result == XHCI_CONTROL_TRANSFER_FAILED &&
+        transfers.ep0_failed && xhci_downstream_ep0_fault_reclaimable()) {
+      info->result = USB_RECOVERY_READY_EP0_ERROR;
+    } else if (transfers.ep0_submitted && transfers.ep0_completion_seen &&
         transfers.ep0_completion_code != 1U) {
       info->result = USB_RECOVERY_EP0_ERROR_COMPLETION;
     } else if (transfers.ep0_submitted && !transfers.ep0_completion_seen) {
@@ -539,8 +553,11 @@ bool usb_enumeration_recovery_inspect(usb_recovery_info_t *info) {
 bool usb_enumeration_recovery_ready(void) {
   usb_recovery_info_t info = {0};
 
-  return usb_enumeration_recovery_inspect(&info) &&
-      info.result == USB_RECOVERY_READY;
+  if (!usb_enumeration_recovery_inspect(&info))
+    return false;
+
+  return info.result == USB_RECOVERY_READY ||
+      info.result == USB_RECOVERY_READY_EP0_ERROR;
 }
 
 bool usb_enumeration_recovery_begin(void) {
