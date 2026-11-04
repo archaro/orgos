@@ -34,6 +34,18 @@ bool usb_get_init_info(usb_init_info_t *info);
 void usb_service(void);
 bool usb_service_available(void);
 
+typedef struct {
+  bool enabled;
+  bool pending;
+  uint32_t attempts;
+  uint32_t successes;
+  uint32_t failures;
+  uint32_t last_result;
+} usb_auto_enum_info_t;
+
+bool usb_auto_enum_get_info(usb_auto_enum_info_t *info);
+void usb_auto_enum_set_enabled(bool enabled);
+
 typedef enum {
   USB_LIFECYCLE_IDLE,
   USB_LIFECYCLE_RECONCILE_IN,

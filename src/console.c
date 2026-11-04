@@ -2134,10 +2134,64 @@ static void cmd_usb_hubirq(void) {
   console_printf("  Ring wraps   : %u\n", (unsigned int)info.ring_wraps);
 }
 
+static void cmd_usb_auto_status(void) {
+  usb_auto_enum_info_t info = {0};
+
+  if (!usb_auto_enum_get_info(&info)) {
+    console_puts("USB auto enumeration unavailable.\n");
+    return;
+  }
+
+  console_puts("USB automatic enumeration:\n");
+  console_printf("  Enabled    : %s\n",
+      info.enabled ? "Yes" : "No");
+  console_printf("  Pending    : %s\n",
+      info.pending ? "Yes" : "No");
+  console_printf("  Attempts   : %u\n",
+      (unsigned int)info.attempts);
+  console_printf("  Successful : %u\n",
+      (unsigned int)info.successes);
+  console_printf("  Failed     : %u\n",
+      (unsigned int)info.failures);
+
+  if (info.attempts != 0U)
+    console_printf("  Last result: %u\n",
+        (unsigned int)info.last_result);
+}
+
+static void cmd_usb_auto(const char *args) {
+  if (end_of_args(args)) {
+    cmd_usb_auto_status();
+    return;
+  }
+  const char *word = args;
+  if (next_word_is(&word, "on") && end_of_args(word)) {
+    usb_auto_enum_set_enabled(true);
+    console_puts("USB auto enumeration: ON\n");
+    return;
+  }
+  word = args;
+  if (next_word_is(&word, "off") && end_of_args(word)) {
+    usb_auto_enum_set_enabled(false);
+    console_puts("USB auto enumeration: OFF\n");
+    return;
+  }
+  word = args;
+  if (next_word_is(&word, "status") && end_of_args(word)) {
+    cmd_usb_auto_status();
+    return;
+  }
+  console_puts("Usage: usb auto [on|off|status]\n");
+}
+
 static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
   const char *other_args = args;
+  if (next_word_is(&args, "auto")) {
+    cmd_usb_auto(args);
+    return;
+  }
   if (next_word_is(&args, "recover")) {
     if (end_of_args(args)) {
       cmd_usb_recover();
@@ -2321,8 +2375,8 @@ static void cmd_usb(const char *args) {
 
   if (!end_of_args(args)) {
     console_puts(
-        "Usage: usb [scan | state | ports | events | device | devices | test | recover"
-        "stopout | stopin | disable | cleanup | detach | recycle | rearm | transfers | "
+        "Usage: usb [scan | state | ports | events | device | devices | test | recover | "
+        "stopout | stopin | disable | cleanup | detach | recycle | rearm | transfers | auto | "
 	"retirein | reconcilein | lifecycle | hubports | hubirq | enumerate | enumstate]\n");
     return;
   }

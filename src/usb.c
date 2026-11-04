@@ -24,6 +24,10 @@ static unsigned int change_count;
 static usb_change_stats_t change_stats;
 static usb_change_event_t last_port_change[16];
 static usb_lifecycle_run_info_t lifecycle_run;
+static usb_auto_enum_info_t auto_enum = {
+  .enabled = true,
+  .pending = true
+};
 
 // A completed notification may identify several ports.
 // Retain progress until all have been processed.
@@ -170,6 +174,24 @@ bool usb_get_port_monitor_info(usb_port_monitor_info_t *result) {
   return true;
 }
 
+bool usb_auto_enum_get_info(usb_auto_enum_info_t *info) {
+  if (!info)
+    return false;
+
+  *info = auto_enum;
+  return true;
+}
+
+void usb_auto_enum_set_enabled(bool enabled) {
+  auto_enum.enabled = enabled;
+
+  // Enabling requests one fresh admission check.
+  // It never overrides the existing enumeration
+  // or lifecycle ownership restrictions.
+  if (enabled)
+    auto_enum.pending = true;
+}
+
 static void usb_port_monitor_fault(uint8_t port) {
   port_monitor.failures++;
 
@@ -281,6 +303,14 @@ static void usb_change_enqueue( uint8_t port, const usb_hub_port_t *status) {
     last_port_change[port] = change_queue[tail];
 
   change_count++;
+
+  // A connection change may introduce a new
+  // device or invalidate the previous generation.
+  // Admission will decide whether enumeration
+  // is presently permitted.
+  if (status->change & 0x0001U)
+    auto_enum.pending = true;
+
   // Notify the lifecycle manager independently
   // of diagnostic queue consumption.
   usb_device_port_changed(port, status->status, status->change);
@@ -637,8 +667,55 @@ static void usb_lifecycle_service(void) {
     return;
   }
 
-  if (info.next == USB_LIFECYCLE_REARM)
+  if (info.next == USB_LIFECYCLE_REARM) {
     lifecycle_run.state = USB_LIFECYCLE_RUN_COMPLETE;
+
+    // The previous generation no longer owns
+    // the downstream controller resources.
+    // Check for a device already reconnected.
+    auto_enum.pending = true;
+  }
+}
+
+static void usb_auto_enum_service(void) {
+  if (!auto_enum.enabled || !auto_enum.pending ||
+      lifecycle_run.state == USB_LIFECYCLE_RUN_ARMED)
+    return;
+
+  usb_enum_admission_info_t admission = {0};
+  if (!usb_enum_admission_inspect(&admission)) {
+    auto_enum.pending = false;
+    return;
+  }
+
+  if (admission.result != USB_ENUM_ADMIT_INITIAL &&
+      admission.result != USB_ENUM_ADMIT_RECONNECT) {
+    // Allow the hub-change handler to finish
+    // acknowledging a connection notification.
+    if (admission.result == USB_ENUM_ADMIT_CHANGE_PENDING ||
+        (admission.result == USB_ENUM_ADMIT_RECONNECT_BLOCKED &&
+         admission.reconnect_reason == USB_REENUM_CHANGE_PENDING))
+      return;
+
+    // All other refusals end this request.
+    // Another connection event, completed teardown
+    // or explicit enable will request a fresh check.
+    auto_enum.pending = false;
+    return;
+  }
+
+  // Consume the request before attempting enumeration.
+  // Failure must never cause an automatic retry loop.
+  auto_enum.pending = false;
+  usb_enum_info_t enumeration = {0};
+  usb_enum_result_t result = usb_enumerate(&enumeration);
+  auto_enum.attempts++;
+  auto_enum.last_result = (uint32_t)result;
+
+  if (result == USB_ENUM_OK)
+    auto_enum.successes++;
+  else
+    auto_enum.failures++;
 }
 
 void usb_service(void) {
@@ -685,6 +762,10 @@ void usb_service(void) {
   // Perform at most one lifecycle operation per
   // foreground service pass, once armed.
   usb_lifecycle_service();
+
+  // Enumerate only when a connection or a completed
+  // teardown has requested a fresh admission check.
+  usb_auto_enum_service();
 }
 
 bool usb_lifecycle_port_inspect(usb_lifecycle_port_info_t *info) {
