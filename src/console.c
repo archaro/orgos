@@ -196,45 +196,6 @@ static bool next_word_is(const char **input, const char *word) {
   return true;
 }
 
-
-// Parse an unsigned 64-bit hexadecimal address.
-// Accept either:
-//   0x100000000
-//   100000000
-// Reject missing digits, invalid characters,
-// overflow, and trailing non-whitespace text.
-static bool next_hex64(const char **input, uint64_t *value) {
-  const char *p = *input;
-  uint64_t result = 0;
-  bool found = false;
-
-  while (*p == ' ' || *p == '\t')
-    p++;
-  if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X'))
-    p += 2;
-  for (;;) {
-    unsigned int digit;
-    if (*p >= '0' && *p <= '9')
-      digit = (unsigned int)(*p - '0');
-    else if (*p >= 'a' && *p <= 'f')
-      digit = (unsigned int)(*p - 'a') + 10U;
-    else if (*p >= 'A' && *p <= 'F')
-      digit = (unsigned int)(*p - 'A') + 10U;
-    else
-      break;
-    if (result > (UINT64_MAX - digit) / 16ULL)
-      return false;
-    result = result * 16ULL + digit;
-    found = true;
-    p++;
-  }
-  if (!found || (*p && *p != ' ' && *p != '\t'))
-    return false;
-  *value = result;
-  *input = p;
-  return true;
-}
-
 static bool next_uint(const char **input, unsigned int *value) {
   // Read an unsigned decimal integer.
   // Reject missing values, non-decimal characters and overflow.
@@ -262,42 +223,6 @@ static bool next_uint(const char **input, unsigned int *value) {
   *value = result;
   *input = p;
   return true;
-}
-
-static void print_mmu_translation(uint64_t address) {
-  mmu_translation_t result;
-
-  console_puts("  VA 0x");
-  console_puthex64(address);
-  if (!mmu_translate(address, &result)) {
-    console_puts(" : diagnostic unavailable\n");
-    return;
-  }
-  if (result.fault) {
-    console_puts(" : FAULT (status 0x");
-    console_puthex(result.fault_status, 2);
-    console_puts(")\n");
-  } else {
-    console_puts(" -> PA 0x");
-    console_puthex64(result.physical_address);
-    console_putc('\n');
-  }
-}
-
-static void print_mmu_write_test(uint64_t address) {
-  mmu_translation_t result;
-
-  console_puts("  VA 0x");
-  console_puthex64(address);
-  if (!mmu_translate_write(address, &result)) {
-    console_puts(" : diagnostic unavailable\n");
-  } else if (result.fault) {
-    console_puts(" : WRITE DENIED (status 0x");
-    console_puthex(result.fault_status, 2);
-    console_puts(")\n");
-  } else {
-    console_puts(" : WRITE ALLOWED\n");
-  }
 }
 
 static void cmd_pci_dma_test(void) {
@@ -398,28 +323,6 @@ static void cmd_pci(const char *args) {
       return;
     }
     console_puts("Usage: pci dma [test]\n");
-    return;
-  }
-  if (next_word_is(&args, "init") && end_of_args(args)) {
-    console_puts("Initialising BCM2711 PCIe link...\n");
-    pcie_init_result_t result = pcie_init_link();
-    switch (result) {
-      case PCIE_INIT_OK:
-        console_puts("PCIe link established.\n");
-        break;
-      case PCIE_INIT_ALREADY_UP:
-        console_puts("PCIe link is already active.\n");
-        break;
-      case PCIE_INIT_NOT_ROOT_COMPLEX:
-        console_puts("PCIe initialization failed: not in RC mode.\n");
-        break;
-      case PCIE_INIT_LINK_TIMEOUT:
-        console_puts("PCIe initialization failed: link timeout.\n");
-        break;
-    }
-    console_putc('\n');
-  } else if (!end_of_args(args)) {
-    console_puts("Usage: pci [init]\n");
     return;
   }
 
@@ -2431,238 +2334,6 @@ static void cmd_physmem(const char *args) {
   console_puts( "\nStatus: Inventory constructed; allocation not enabled.\n");
 }
 
-static void print_mmu_descriptor(uint64_t address) {
-  mmu_descriptor_info_t info;
-
-  if (!mmu_inspect(address, &info)) {
-    console_puts("Descriptor inspection unavailable.\n");
-    return;
-  }
-
-  console_puts("MMU descriptor inspection:\n");
-  console_puts("  Virtual address : 0x");
-  console_puthex64(info.virtual_address);
-  console_putc('\n');
-  console_puts("  L1 descriptor   : 0x");
-  console_puthex64(info.l1_descriptor);
-  console_putc('\n');
-
-  if (info.level >= 2) {
-    console_puts("  L2 descriptor   : 0x");
-    console_puthex64(info.l2_descriptor);
-    console_putc('\n');
-  }
-
-  if (info.level >= 3) {
-    console_puts("  L3 descriptor   : 0x");
-    console_puthex64(info.l3_descriptor);
-    console_putc('\n');
-  }
-
-  if (info.kind == MMU_DESC_UNMAPPED) {
-    console_puts("  Mapping         : Unmapped\n");
-    console_puts("  Fault level     : ");
-    console_putu32(info.level);
-    console_putc('\n');
-    return;
-  }
-  console_puts("  Mapping         : ");
-  console_puts(info.kind == MMU_DESC_PAGE ?
-      "4 KiB page\n" : "2 MiB block\n");
-  console_puts("  Physical address: 0x");
-  console_puthex64(info.physical_address);
-  console_putc('\n');
-  console_puts("  Attribute index : ");
-  console_putu32(info.attr_index);
-  if (info.attr_index == 0)
-    console_puts(" (Device-nGnRnE)\n");
-  else if (info.attr_index == 1)
-    console_puts(" (Normal non-cacheable)\n");
-  else if (info.attr_index == 2)
-    console_puts(" (Normal write-back)\n");
-  else
-    console_puts(" (Unknown)\n");
-  console_puts("  Access          : ");
-  console_puts(info.read_only ?  "Read-only\n" : "Read/write\n");
-  console_puts("  EL0 access      : ");
-  console_puts((info.access_permissions & 1U) ?
-      "Permitted by AP\n" : "Denied by AP\n");
-  console_puts("  Access flag     : ");
-  console_puts(info.access_flag ?  "Set\n" : "Clear\n");
-  console_puts("  PXN             : ");
-  console_puts(info.pxn ? "Yes\n" : "No\n");
-  console_puts("  UXN             : ");
-  console_puts(info.uxn ? "Yes\n" : "No\n");
-  console_puts("  WXN             : ");
-  mmu_info_t registers;
-  mmu_get_info(&registers);
-  console_puts((registers.sctlr & (1ULL << 19)) ?
-      "Enabled\n" : "Disabled\n");
-  bool el1_executable =
-      !info.pxn && !(registers.sctlr & (1ULL << 19) && !info.read_only);
-  console_puts("  EL1 execution   : ");
-  console_puts(el1_executable ?
-      "Permitted by leaf permissions\n" :
-      "Prevented by leaf permissions/WXN\n");
-}
-
-static void cmd_mmu(const char *args) {
-  // Inspect transalation descriptors
-  if (next_word_is(&args, "inspect")) {
-    uint64_t address;
-    if (!next_hex64(&args, &address) ||
-        !end_of_args(args)) {
-      console_puts("Usage: mmu inspect <hex-address>\n");
-      return;
-    }
-    print_mmu_descriptor(address);
-    return;
-  }
-
-  // Non-destructive permissions diagnostics.
-  if (next_word_is(&args, "permissions") && end_of_args(args)) {
-    extern char __text_start[];
-    extern char __rodata_start[];
-    extern char __data_start[];
-    extern char __bss_start[];
-    extern char __stack_bottom[];
-    console_puts("EL1 kernel write permissions:\n");
-    console_puts("Text:\n");
-    print_mmu_write_test( (uint64_t)(uintptr_t)__text_start);
-    console_puts("Read-only data:\n");
-    print_mmu_write_test( (uint64_t)(uintptr_t)__rodata_start);
-    console_puts("Initialized data:\n");
-    print_mmu_write_test( (uint64_t)(uintptr_t)__data_start);
-    console_puts("BSS:\n");
-    print_mmu_write_test( (uint64_t)(uintptr_t)__bss_start);
-    console_puts("Kernel stack:\n");
-    print_mmu_write_test( (uint64_t)(uintptr_t)__stack_bottom);
-    return;
-  }
-
-  // Non-destructive translation diagnostics.
-  // With no address, examine representative
-  // addresses from each RAM bank and the
-  // currently configured MMIO regions.
-  if (next_word_is(&args, "translate")) {
-    if (!mmu_enabled()) {
-      console_puts("MMU is disabled.\n");
-      return;
-    }
-    if (end_of_args(args)) {
-      static const uint64_t test_addresses[] = {
-        0x0000000000008000ULL,  // Bank 0
-        0x000000003B400000ULL,  // Gap after Bank 0
-        0x0000000040000000ULL,  // Bank 1
-        0x00000000FC000000ULL,  // Peripheral MMIO
-        0x0000000100000000ULL,  // Bank 2
-        0x0000000180000000ULL,  // Bank 3
-        0x0000000200000000ULL,  // Gap after Bank 3
-        0x0000000600000000ULL   // VL805 MMIO
-      };
-      console_puts("EL1 stage-1 read translations:\n");
-      for (unsigned int i = 0; i < sizeof(test_addresses) /
-               sizeof(test_addresses[0]); i++) {
-        print_mmu_translation(test_addresses[i]);
-      }
-      return;
-    }
-    uint64_t address;
-    if (!next_hex64(&args, &address) || !end_of_args(args)) {
-      console_puts(
-        "Usage: mmu [inspect <hex-address> | "
-        "permissions | translate [hex-address] | fault]\n");
-      return;
-    }
-    console_puts("EL1 stage-1 read translation:\n");
-    print_mmu_translation(address);
-    return;
-  }
-
-  // Deliberately access an unmapped virtual address.
-  // Address 0x3c000000 has no valid translation.
-  // This is a destructive diagnostic: a successful
-  // test enters exception_panic() and halts OrgOS.
-    if (next_word_is(&args, "fault") && end_of_args(args)) {
-    if (!mmu_enabled()) {
-      console_puts("MMU is disabled; refusing fault test.\n");
-      return;
-    }
-
-    console_puts(
-        "MMU translation fault test.\n"
-        "Reading unmapped virtual address 0x3c000000ULL...\n"
-        "Expected result: synchronous EL1 data abort.\n"
-        "OrgOS will halt. Reboot required.\n\n");
-
-    // The volatile load ensures that the compiler
-    // actually emits a memory access.
-    // Because the virtual address is unmapped,
-    // the load should never complete.
-    volatile const uint32_t *address =
-        (volatile const uint32_t *)(uintptr_t)0x3c000000ULL;
-
-    uint32_t value = *address;
-
-    // If execution reaches here, the fault test
-    // did not behave as expected.
-    console_puts("UNEXPECTED: read succeeded: 0x");
-    console_puthex(value, 8);
-    console_putc('\n');
-    return;
-  }
-
-  if (!end_of_args(args)) {
-    console_puts("Usage: mmu [translate [hex-address] | fault]\n");
-    return;
-  }
-
-  // Existing MMU diagnostic code follows here.
-  mmu_info_t info;
-  mmu_get_info(&info);
-
-  console_puts("AArch64 EL1 memory management:\n");
-  console_puts("  Translation       : ");
-  console_puts((info.sctlr & 1U) ?  "Enabled\n" : "Disabled\n");
-  console_puts("  Data cache        : ");
-  console_puts((info.sctlr & (1U << 2)) ?  "Enabled\n" : "Disabled\n");
-  console_puts("  Instruction cache : ");
-  console_puts((info.sctlr & (1U << 12)) ?  "Enabled\n" : "Disabled\n");
-  console_puts("  Alignment check   : ");
-  console_puts((info.sctlr & (1U << 1)) ?  "Enabled\n" : "Disabled\n");
-  console_puts("  Write-execute-never: ");
-  console_puts((info.sctlr & (1ULL << 19)) ?  "Enabled\n" : "Disabled\n");
-  console_puts("  Physical addr bits: ");
-  unsigned int pa_bits = mmu_physical_address_bits();
-  if (pa_bits)
-    console_putu32(pa_bits);
-  else
-    console_puts("Unknown encoding");
-  console_putc('\n');
-  console_puts("  4 KiB granule     : ");
-  console_puts(mmu_granule_4k_supported() ?
-      "Supported\n" : "Unsupported/reserved\n");
-  console_puts("\nArchitectural registers:\n");
-  console_puts("  ID_AA64MMFR0_EL1 : 0x");
-  console_puthex64(info.id_aa64mmfr0);
-  console_putc('\n');
-  console_puts("  SCTLR_EL1        : 0x");
-  console_puthex64(info.sctlr);
-  console_putc('\n');
-  console_puts("  TCR_EL1          : 0x");
-  console_puthex64(info.tcr);
-  console_putc('\n');
-  console_puts("  MAIR_EL1         : 0x");
-  console_puthex64(info.mair);
-  console_putc('\n');
-  console_puts("  TTBR0_EL1        : 0x");
-  console_puthex64(info.ttbr0);
-  console_putc('\n');
-  console_puts("  TTBR1_EL1        : 0x");
-  console_puthex64(info.ttbr1);
-  console_putc('\n');
-}
-
 #define PAGE_TEST_COUNT 32U
 
 // Give each byte a predictable value depending on
@@ -2886,37 +2557,9 @@ static void cmd_page(const char *args) {
     cmd_page_test();
     return;
   }
-  if (next_word_is(&args, "alloc") && end_of_args(args)) {
-    paddr_t address;
-    if (!page_alloc(&address)) {
-      console_puts("Page allocation failed.\n");
-      return;
-    }
-    console_puts("Allocated physical page: 0x");
-    console_puthex64(address);
-    console_putc('\n');
-    return;
-  }
-
-  if (next_word_is(&args, "free")) {
-    uint64_t address;
-    if (!next_hex64(&args, &address) ||
-        !end_of_args(args)) {
-      console_puts("Usage: page free <hex-address>\n");
-      return;
-    }
-    if (!page_free(address)) {
-      console_puts("Page release rejected.\n");
-      return;
-    }
-    console_puts("Released physical page: 0x");
-    console_puthex64(address);
-    console_putc('\n');
-    return;
-  }
   if (!end_of_args(args)) {
     console_puts(
-        "Usage: page [alloc | free <hex-address> | test | runtest]\n");
+        "Usage: page [runtest]\n");
     return;
   }
   page_stats_t stats;
@@ -3103,7 +2746,6 @@ static const console_command_t commands[] = {
   { "irq", cmd_irq, "Display interrupt statistics" },
   { "fdt", cmd_fdt, "Inspect firmware Device Tree, memory and DMA" },
   { "physmem", cmd_physmem, "Display physical RAM and reservations" },
-  { "mmu", cmd_mmu, "Display AArch64 memory management state" },
   { "page", cmd_page, "Inspect, allocate or release physical pages" },
   { "cache", cmd_cache, "Display CPU cache configuration" },
   { "pci", cmd_pci, "Inspect PCIe controller and DMA configuration" },
