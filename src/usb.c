@@ -408,6 +408,12 @@ static void usb_service_hub_changes(void) {
       }
 
       change_stats.acknowledgements++;
+      // A confirmed disconnection can release a
+      // failed pre-slot enumeration attempt.
+      // usb_change_enqueue() has already requested
+      // a new automatic enumeration admission check.
+      if ((status.change & 0x0001U) != 0U && (status.status & 0x0001U) == 0U)
+        (void)usb_enumeration_rearm_rejected(port);
     }
     change_pending_mask &= (uint16_t)~bit;
     change_next_port = port + 1U;

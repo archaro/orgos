@@ -669,6 +669,41 @@ bool usb_enumeration_rearm(void) {
   return true;
 }
 
+bool usb_enumeration_rearm_rejected(uint8_t port) {
+  // Only recover an unsupported-speed rejection
+  // which occurred before acquiring an xHCI slot.
+  // A failed operation after slot acquisition
+  // requires the existing controlled recovery path.
+  if (!enumeration_attempted || enumeration_state.slot_attempted ||
+      enumeration_state.result != USB_ENUM_UNSUPPORTED_SPEED ||
+      enumeration_state.hub_port != port || !device_record_valid ||
+      current_device.state != USB_DEVICE_DETACHED)
+    return false;
+
+  // There must be no outstanding downstream
+  // controller resources awaiting reclamation.
+  if (xhci_downstream_is_quiesced() || xhci_downstream_is_slot_disabled() ||
+      xhci_downstream_is_cleaned())
+    return false;
+
+  // Confirm that the rejected port is now empty
+  // and that all hub change flags have settled.
+  usb_hub_port_t status = {0};
+  if (usb_hub_port_status(port, &status) != USB_HUB_OK ||
+      (status.status & USB_PORT_CONNECTED) != 0U || status.change != 0U)
+    return false;
+
+  // No slot was acquired and no downstream
+  // allocations were handed to the controller.
+  // Discard the unsuccessful enumeration record.
+  enumeration_attempted = false;
+  enumeration_state = (usb_enum_info_t){0};
+  current_device = (usb_device_t){0};
+  device_record_valid = false;
+
+  return true;
+}
+
 bool usb_enumeration_test_abort_arm(void) {
   if (enumeration_attempted || test_abort_after_address ||
       test_abort_after_config)
