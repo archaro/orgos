@@ -285,7 +285,16 @@ bool usb_change_read(usb_change_event_t *event) {
   return true;
 }
 
-static void usb_change_enqueue( uint8_t port, const usb_hub_port_t *status) {
+static void usb_change_enqueue(uint8_t port, const usb_hub_port_t *status) {
+  // The diagnostic queue must never prevent
+  // hardware notifications from being processed.
+  // Discard the oldest record when full.
+  if (change_count == USB_CHANGE_QUEUE_CAPACITY) {
+    change_head = (change_head + 1U) % USB_CHANGE_QUEUE_CAPACITY;
+    change_count--;
+    change_stats.dropped++;
+  }
+
   unsigned int tail = (change_head + change_count) %
       USB_CHANGE_QUEUE_CAPACITY;
 
@@ -297,22 +306,20 @@ static void usb_change_enqueue( uint8_t port, const usb_hub_port_t *status) {
     .change = status->change
   };
 
-  // Keep the latest notification independently
-  // of the consumable diagnostic event queue.
+  // Retain the latest notification independently
+  // of the consumable diagnostic queue.
   if (port < 16U)
     last_port_change[port] = change_queue[tail];
 
   change_count++;
 
-  // A connection change may introduce a new
-  // device or invalidate the previous generation.
-  // Admission will decide whether enumeration
-  // is presently permitted.
+  // Inform automatic enumeration of a possible
+  // new device, regardless of queue occupancy.
   if (status->change & 0x0001U)
     auto_enum.pending = true;
 
-  // Notify the lifecycle manager independently
-  // of diagnostic queue consumption.
+  // Lifecycle notification is operational state,
+  // not a diagnostic queue consumer.
   usb_device_port_changed(port, status->status, status->change);
 }
 
@@ -367,13 +374,6 @@ static void usb_service_hub_changes(void) {
     uint16_t bit = (uint16_t)(1U << port);
     if (!(change_pending_mask & bit))
       continue;
-
-    // Pause without acknowledging anything if
-    // there is no room to preserve another event.
-    if (change_count == USB_CHANGE_QUEUE_CAPACITY) {
-      change_next_port = port;
-      return;
-    }
 
     usb_hub_port_t status = {0};
     usb_hub_result_t result = usb_hub_port_status(port, &status);

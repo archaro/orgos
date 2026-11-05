@@ -2102,6 +2102,7 @@ static void cmd_usb_changes(void) {
   console_puts("USB downstream change events:\n");
   console_printf("  Recorded : %u\n", stats.recorded);
   console_printf("  Consumed : %u\n", stats.consumed);
+  console_printf("  Dropped  : %u\n", stats.dropped);
   console_printf("  Queued   : %u\n", (unsigned int)stats.queued);
   console_printf("  Acked    : %u\n", stats.acknowledgements);
   console_printf("  Errors   : %u\n", stats.errors);

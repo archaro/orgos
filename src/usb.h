@@ -130,6 +130,7 @@ typedef struct {
 typedef struct {
   uint32_t recorded;
   uint32_t consumed;
+  uint32_t dropped;
   uint32_t acknowledgements;
   uint32_t errors;
   uint8_t queued;
