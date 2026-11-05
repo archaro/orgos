@@ -1186,10 +1186,13 @@ static void cmd_usb_devices(void) {
   }
   console_printf("  State          : %s\n",
       usb_device_state_name(device.state));
+  console_printf("  Generation     : %u\n", (unsigned int)device.generation);
   console_printf("  xHCI quiesced  : %s\n",
       xhci_downstream_is_quiesced() ? "Yes" : "No");
   if (device.state == USB_DEVICE_DETACHED) {
-    console_puts("  No enumerated downstream device.\n");
+    console_printf("  Previous port  : %u\n",
+        (unsigned int)device.parent_port);
+    console_puts("  No active downstream device.\n");
     return;
   }
   console_printf("  Root port      : %u\n", (unsigned int)device.root_port);
@@ -1203,8 +1206,6 @@ static void cmd_usb_devices(void) {
       (unsigned int)device.vendor_id);
   console_printf("  Product ID     : 0x%04x\n",
       (unsigned int)device.product_id);
-  console_printf("  Generation     : %u\n",
-      (unsigned int)device.generation);
 }
 
 static void cmd_usb_enumerate(void) {
@@ -1495,25 +1496,6 @@ static const char *usb_reenum_result_name(usb_reenum_result_t result) {
   }
 }
 
-static void cmd_usb_lifecycle_ready(void) {
-  usb_reenum_info_t info = {0};
-  if (!usb_reenum_inspect(&info)) {
-    console_puts("Re-enumeration inspection failed.\n");
-    return;
-  }
-  console_puts("USB re-enumeration eligibility:\n");
-  console_printf("  Result      : %s\n", usb_reenum_result_name(info.result));
-  console_printf("  Generation  : %u\n", (unsigned int)info.generation);
-  console_printf("  Previous port: %u\n", (unsigned int)info.previous_port);
-  console_printf("  Candidate port: %u\n", (unsigned int)info.port);
-  console_printf("  Connected    : %u\n", (unsigned int)info.connected_count);
-  console_printf("  Device state: %u\n", (unsigned int)info.device_state);
-  console_printf("  Attempted   : %s\n",
-      info.enumeration_attempted ? "Yes" : "No");
-  console_printf("  Port status : 0x%04x\n", (unsigned int)info.port_status);
-  console_printf("  Port change : 0x%04x\n", (unsigned int)info.port_change);
-}
-
 static const char *usb_lifecycle_action_name(usb_lifecycle_action_t action) {
   switch (action) {
     case USB_LIFECYCLE_IDLE: return "Idle";
@@ -1568,23 +1550,48 @@ static void cmd_usb_lifecycle_admission(void) {
     return;
   }
   console_puts("USB enumeration admission:\n");
-  console_printf("  Decision   : %s\n", usb_enum_admission_name(info.result));
-  console_printf("  Generation : %u\n", (unsigned int)info.generation);
-  console_printf("  Hub port   : %u\n", (unsigned int)info.port);
-  console_printf("  Connected  : %u\n", (unsigned int)info.connected_count);
+  console_printf("  Decision       : %s\n",
+      usb_enum_admission_name(info.result));
+  usb_device_t device = {0};
+  if (usb_get_device(&device)) {
+    console_printf("  Device state   : %s\n",
+        usb_device_state_name(device.state));
+    console_printf("  Generation     : %u\n",
+        (unsigned int)device.generation);
+    console_printf("  Tracked port  : %u\n",
+        (unsigned int)device.parent_port);
+  } else {
+    console_puts("  Previous device: None\n");
+  }
+  if (info.result == USB_ENUM_ADMIT_INITIAL ||
+      info.result == USB_ENUM_ADMIT_RECONNECT) {
+    console_printf("  Candidate port : %u\n", (unsigned int)info.port);
+    console_printf("  Connected      : %u\n",
+        (unsigned int)info.connected_count);
+  }
+  if (info.result == USB_ENUM_ADMIT_NO_DEVICE ||
+      info.result == USB_ENUM_ADMIT_MULTIPLE_DEVICES) {
+    console_printf("  Connected      : %u\n",
+        (unsigned int)info.connected_count);
+  }
   if (info.result == USB_ENUM_ADMIT_RECONNECT_BLOCKED) {
-    console_printf("  Reason     : %s\n",
+    console_printf("  Reason         : %s\n",
         usb_reenum_result_name(info.reconnect_reason));
+    if (info.reconnect_reason == USB_REENUM_MULTIPLE_DEVICES ||
+        info.reconnect_reason == USB_REENUM_DISCONNECTED) {
+      console_printf("  Connected      : %u\n",
+          (unsigned int)info.connected_count);
+    }
   }
 }
 
-static void cmd_usb_lifecycle(void) {
+static void cmd_usb_lifecycle_current(void) {
   usb_lifecycle_info_t info = {0};
   if (!usb_lifecycle_inspect(&info)) {
     console_puts("USB lifecycle unavailable.\n");
     return;
   }
-  console_puts("USB lifecycle:\n");
+  console_puts("USB current lifecycle:\n");
   console_printf("  Generation   : %u\n", (unsigned int)info.generation);
   console_printf("  Slot         : %u\n", (unsigned int)info.slot_id);
   console_printf("  Quiesced     : %s\n", info.quiesced ? "Yes" : "No");
@@ -1632,18 +1639,15 @@ static const char *usb_lifecycle_fault_name(usb_lifecycle_fault_t fault) {
   }
 }
 
-static void cmd_usb_lifecycle_arm(void) {
-  bool armed = usb_lifecycle_arm();
-  console_printf("USB lifecycle arm: %s\n", armed ? "OK" : "NOT READY");
-}
-
 static void cmd_usb_lifecycle_status(void) {
+  cmd_usb_lifecycle_current();
+  console_putc('\n');
   usb_lifecycle_run_info_t info = {0};
   if (!usb_lifecycle_get_run_info(&info)) {
     console_puts("USB lifecycle executor unavailable.\n");
     return;
   }
-  console_puts("USB lifecycle executor:\n");
+  console_puts("USB lifecycle executor (last run):\n");
   console_printf("  State       : %s\n", usb_lifecycle_run_name(info.state));
   console_printf("  Generation  : %u\n", (unsigned int)info.generation);
   console_printf("  Steps       : %u\n", (unsigned int)info.steps);
@@ -1936,24 +1940,38 @@ static void cmd_usb_test_midiwrap(void) {
 
 static void cmd_usb_changes(void) {
   usb_change_stats_t stats = {0};
-  usb_change_get_stats(&stats);
+  if (!usb_change_get_stats(&stats)) {
+    console_puts("USB change statistics unavailable.\n");
+    return;
+  }
   console_puts("USB downstream change events:\n");
-  console_printf("  Recorded : %u\n", stats.recorded);
-  console_printf("  Consumed : %u\n", stats.consumed);
-  console_printf("  Dropped  : %u\n", stats.dropped);
-  console_printf("  Queued   : %u\n", (unsigned int)stats.queued);
-  console_printf("  Acked    : %u\n", stats.acknowledgements);
-  console_printf("  Errors   : %u\n", stats.errors);
-  console_printf("  Failed   : %s\n", stats.failed ? "Yes" : "No");
+  console_printf("  Recorded  : %u\n", stats.recorded);
+  console_printf("  Consumed  : %u\n", stats.consumed);
+  console_printf("  Dropped   : %u\n", stats.dropped);
+  console_printf("  Queued    : %u\n", (unsigned int)stats.queued);
+  console_printf("  Acked     : %u\n", stats.acknowledgements);
+  console_printf("  Errors    : %u\n", stats.errors);
+  console_printf("  Failed    : %s\n", stats.failed ? "Yes" : "No");
   if (stats.failed)
     console_printf("  Error port: %u\n", (unsigned int)stats.last_error_port);
+}
+
+static void cmd_usb_changes_dump(void) {
   usb_change_event_t event = {0};
+  unsigned int count = 0U;
+  console_puts("USB retained downstream changes:\n");
   while (usb_change_read(&event)) {
     console_printf( "  #%u port %u: status 0x%04x, change 0x%04x\n",
         event.sequence, (unsigned int)event.port,
-        (unsigned int)event.status,
-        (unsigned int)event.change);
+        (unsigned int)event.status, (unsigned int)event.change);
+    count++;
   }
+  if (count == 0U)
+    console_puts("  No queued events.\n");
+  usb_change_stats_t stats = {0};
+  console_printf("  Records read: %u\n", count);
+  if (usb_change_get_stats(&stats))
+    console_printf("  Queued now  : %u\n", (unsigned int)stats.queued);
 }
 
 static void cmd_usb_hubirq(void) {
@@ -2028,7 +2046,11 @@ static void cmd_usb(const char *args) {
   // This command merely inspects the controller.
   const char *other_args = args;
   if (next_word_is(&args, "hubirq")) {
-    cmd_usb_hubirq();
+    if (end_of_args(args)) {
+      cmd_usb_hubirq();
+      return;
+    }
+    console_puts("Usage: usb hubirq\n");
     return;
   }
   if (next_word_is(&args, "auto")) {
@@ -2049,38 +2071,42 @@ static void cmd_usb(const char *args) {
   }
   if (next_word_is(&args, "lifecycle")) {
     if (end_of_args(args)) {
-      cmd_usb_lifecycle();
-      return;
-    }
-    if (next_word_is(&args, "admission") && end_of_args(args)) {
-      cmd_usb_lifecycle_admission();
-      return;
-    }
-    if (next_word_is(&args, "ready") && end_of_args(args)) {
-      cmd_usb_lifecycle_ready();
-      return;
-    }
-    if (next_word_is(&args, "port") && end_of_args(args)) {
-      cmd_usb_lifecycle_port();
-      return;
-    }
-    if (next_word_is(&args, "arm") && end_of_args(args)) {
-      cmd_usb_lifecycle_arm();
+      cmd_usb_lifecycle_status();
       return;
     }
     if (next_word_is(&args, "status") && end_of_args(args)) {
       cmd_usb_lifecycle_status();
       return;
     }
-    console_puts("Usage: usb lifecycle [arm | status | port | ready | admission]\n");
+    if (next_word_is(&args, "admission") && end_of_args(args)) {
+      cmd_usb_lifecycle_admission();
+      return;
+    }
+    if (next_word_is(&args, "port") && end_of_args(args)) {
+      cmd_usb_lifecycle_port();
+      return;
+    }
+    console_puts( "Usage: usb lifecycle [status | admission | port]\n");
     return;
   }
   if (next_word_is(&args, "transfers") && end_of_args(args)) {
     cmd_usb_transfers();
     return;
   }
-  if (next_word_is(&args, "changes") && end_of_args(args)) {
-    cmd_usb_changes();
+  if (next_word_is(&args, "changes")) {
+    if (end_of_args(args)) {
+      cmd_usb_changes();
+      return;
+    }
+    if (next_word_is(&args, "status") && end_of_args(args)) {
+      cmd_usb_changes();
+      return;
+    }
+    if (next_word_is(&args, "dump") && end_of_args(args)) {
+      cmd_usb_changes_dump();
+      return;
+    }
+    console_puts("Usage: usb changes [status | dump]\n");
     return;
   }
   if (next_word_is(&args, "devices") && end_of_args(args)) {
@@ -2155,12 +2181,11 @@ static void cmd_usb(const char *args) {
     cmd_usb_state();
     return;
   }
-
   if (!end_of_args(args)) {
     console_puts(
-        "Usage: usb [ state | ports | events | devices | test | recover | "
-        "transfers | auto | hubirq | "
-	"lifecycle | hubports | enumerate | enumstate]\n");
+        "Usage: usb [state | ports | events | changes | devices | "
+        "test | recover | transfers | auto | hubirq | "
+        "lifecycle | hubports | enumerate | enumstate]\n");
     return;
   }
 
