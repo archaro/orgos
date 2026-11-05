@@ -12,6 +12,7 @@
 #define USB_LINK_U0 0U
 #define USB_ROOT_EVENT_WAIT_MS 100U
 #define USB_CHANGE_QUEUE_CAPACITY 16U
+#define USB_AUTO_ENUM_RECHECK_US 50000ULL
 
 static bool usb_initialised;
 static usb_init_info_t usb_state;
@@ -24,6 +25,7 @@ static unsigned int change_count;
 static usb_change_stats_t change_stats;
 static usb_change_event_t last_port_change[16];
 static usb_lifecycle_run_info_t lifecycle_run;
+static uint64_t auto_enum_next_check_us;
 static usb_auto_enum_info_t auto_enum = {
   .enabled = true,
   .pending = true
@@ -182,14 +184,19 @@ bool usb_auto_enum_get_info(usb_auto_enum_info_t *info) {
   return true;
 }
 
+static void usb_auto_enum_request(void) {
+  auto_enum.pending = true;
+  auto_enum_next_check_us = 0ULL;
+}
+
 void usb_auto_enum_set_enabled(bool enabled) {
   auto_enum.enabled = enabled;
 
-  // Enabling requests one fresh admission check.
-  // It never overrides the existing enumeration
+  // Enabling requests a fresh admission check.
+  // It never overrides existing enumeration
   // or lifecycle ownership restrictions.
   if (enabled)
-    auto_enum.pending = true;
+    usb_auto_enum_request();
 }
 
 static void usb_port_monitor_fault(uint8_t port) {
@@ -316,7 +323,7 @@ static void usb_change_enqueue(uint8_t port, const usb_hub_port_t *status) {
   // Inform automatic enumeration of a possible
   // new device, regardless of queue occupancy.
   if (status->change & 0x0001U)
-    auto_enum.pending = true;
+    usb_auto_enum_request();
 
   // Lifecycle notification is operational state,
   // not a diagnostic queue consumer.
@@ -673,7 +680,7 @@ static void usb_lifecycle_service(void) {
     // The previous generation no longer owns
     // the downstream controller resources.
     // Check for a device already reconnected.
-    auto_enum.pending = true;
+    usb_auto_enum_request();
   }
 }
 
@@ -682,31 +689,49 @@ static void usb_auto_enum_service(void) {
       lifecycle_run.state == USB_LIFECYCLE_RUN_ARMED)
     return;
 
+  // Deferred hub-change inspections are rate-limited.
+  // A new notification or completed lifecycle rearm
+  // can clear this delay and request immediate work.
+  if (auto_enum_next_check_us != 0ULL &&
+      timer_now_us() < auto_enum_next_check_us)
+    return;
+
   usb_enum_admission_info_t admission = {0};
+
   if (!usb_enum_admission_inspect(&admission)) {
     auto_enum.pending = false;
+    auto_enum_next_check_us = 0ULL;
     return;
   }
 
   if (admission.result != USB_ENUM_ADMIT_INITIAL &&
       admission.result != USB_ENUM_ADMIT_RECONNECT) {
-    // Allow the hub-change handler to finish
-    // acknowledging a connection notification.
+
+    // Pending hub changes can settle without a new
+    // device-generation transition. Keep the request
+    // but avoid repeatedly polling the hub at full
+    // foreground-loop speed.
     if (admission.result == USB_ENUM_ADMIT_CHANGE_PENDING ||
         (admission.result == USB_ENUM_ADMIT_RECONNECT_BLOCKED &&
-         admission.reconnect_reason == USB_REENUM_CHANGE_PENDING))
+         admission.reconnect_reason == USB_REENUM_CHANGE_PENDING)) {
+      auto_enum_next_check_us = timer_now_us() + USB_AUTO_ENUM_RECHECK_US;
       return;
+    }
 
-    // All other refusals end this request.
-    // Another connection event, completed teardown
-    // or explicit enable will request a fresh check.
+    // Other refusals consume this request. A new
+    // connection event or completed teardown can
+    // request another check, but this code must not
+    // retry a failed or resource-owning generation.
     auto_enum.pending = false;
+    auto_enum_next_check_us = 0ULL;
     return;
   }
 
-  // Consume the request before attempting enumeration.
-  // Failure must never cause an automatic retry loop.
+  // Consume the request before enumeration.
+  // Failed enumeration must never be retried
+  // automatically against the same generation.
   auto_enum.pending = false;
+  auto_enum_next_check_us = 0ULL;
   usb_enum_info_t enumeration = {0};
   usb_enum_result_t result = usb_enumerate(&enumeration);
   auto_enum.attempts++;
@@ -833,6 +858,8 @@ bool usb_reenum_inspect(usb_reenum_info_t *info) {
   info->generation = device.generation;
   info->previous_port = device.parent_port;
   info->device_state = device.state;
+  usb_enum_info_t enumeration = {0};
+  info->enumeration_attempted = usb_get_enumeration(&enumeration);
 
   if (device.state != USB_DEVICE_DETACHED) {
     info->result = USB_REENUM_DEVICE_OWNED;
@@ -850,9 +877,6 @@ bool usb_reenum_inspect(usb_reenum_info_t *info) {
       return true;
     }
   }
-
-  usb_enum_info_t enumeration = {0};
-  info->enumeration_attempted = usb_get_enumeration(&enumeration);
 
   if (info->enumeration_attempted) {
     info->result = USB_REENUM_NOT_REARMED;
@@ -934,6 +958,18 @@ bool usb_reenum_inspect(usb_reenum_info_t *info) {
   return true;
 }
 
+// TODO: Implement USB 3.x SuperSpeed topology discovery.
+//
+// Enumeration admission currently considers only the
+// downstream ports of the internal USB 2.0 hub. USB 3.x
+// devices operating at SuperSpeed on the VL805's separate
+// root ports are invisible to this check.
+//
+// Consequently, the single-device restriction applies
+// only to the USB 2.0 topology, not the entire controller.
+//
+// Revisit when implementing SuperSpeed root-port
+// discovery, enumeration and lifecycle management.
 bool usb_enum_admission_inspect(usb_enum_admission_info_t *info) {
   if (!info)
     return false;
