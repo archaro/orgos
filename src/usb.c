@@ -839,6 +839,56 @@ bool usb_lifecycle_port_inspect(usb_lifecycle_port_info_t *info) {
   return true;
 }
 
+typedef struct {
+  uint8_t connected_count;
+  uint8_t port;
+  uint16_t status;
+  uint16_t change;
+  bool change_pending;
+} usb_hub_inventory_t;
+
+static bool usb_hub_inventory_read(uint8_t ports,
+    usb_hub_inventory_t *inventory) {
+
+  if (!inventory || ports == 0U || ports >= 16U)
+    return false;
+
+  *inventory = (usb_hub_inventory_t){0};
+  inventory->change_pending = change_pending_mask != 0U;
+
+  for (uint8_t port = 1U; port <= ports; port++) {
+    usb_hub_port_t observed = {0};
+
+    if (usb_hub_port_status(port, &observed) != USB_HUB_OK)
+      return false;
+
+    // A pending change on any port invalidates
+    // the current enumeration admission snapshot.
+    if (observed.change != 0U)
+      inventory->change_pending = true;
+
+    if (!(observed.status & 0x0001U))
+      continue;
+
+    inventory->connected_count++;
+    // A candidate is meaningful only when exactly
+    // one device has been found.
+    if (inventory->connected_count == 1U) {
+      inventory->port = port;
+      inventory->status = observed.status;
+      inventory->change = observed.change;
+    }
+  }
+
+  if (inventory->connected_count != 1U) {
+    inventory->port = 0U;
+    inventory->status = 0U;
+    inventory->change = 0U;
+  }
+
+  return true;
+}
+
 bool usb_reenum_inspect(usb_reenum_info_t *info) {
   if (!info)
     return false;
@@ -905,57 +955,36 @@ bool usb_reenum_inspect(usb_reenum_info_t *info) {
     return true;
   }
 
+  usb_hub_inventory_t inventory = {0};
+
   // Do not inspect a topology whose notifications
   // have not yet been completely processed.
-  if (change_pending_mask != 0U) {
+  if (!usb_hub_inventory_read(hub.ports, &inventory)) {
+    info->result = USB_REENUM_PORT_UNAVAILABLE;
+    return true;
+  }
+
+  info->connected_count = inventory.connected_count;
+  info->port = inventory.port;
+  info->port_status = inventory.status;
+  info->port_change = inventory.change;
+
+  if (inventory.change_pending) {
     info->result = USB_REENUM_CHANGE_PENDING;
     return true;
   }
-  bool unpowered = false;
 
-  for (uint8_t port = 1U; port <= hub.ports; port++) {
-    usb_hub_port_t status = {0};
-    if (usb_hub_port_status(port, &status) != USB_HUB_OK) {
-      info->result = USB_REENUM_PORT_UNAVAILABLE;
-      return true;
-    }
-
-    // Every port must have a settled change state,
-    // including ports with no connected device.
-    if (status.change != 0U) {
-      info->result = USB_REENUM_CHANGE_PENDING;
-      return true;
-    }
-
-    if (!(status.status & 0x0001U))
-      continue;
-
-    info->connected_count++;
-    if (info->connected_count == 1U) {
-      info->port = port;
-      info->port_status = status.status;
-      info->port_change = status.change;
-    }
-
-    if (!(status.status & 0x0100U))
-      unpowered = true;
-  }
-
-  if (info->connected_count == 0U) {
+  if (inventory.connected_count == 0U) {
     info->result = USB_REENUM_DISCONNECTED;
     return true;
   }
 
-  if (info->connected_count != 1U) {
-    // No single candidate can be selected.
-    info->port = 0U;
-    info->port_status = 0U;
-    info->port_change = 0U;
+  if (inventory.connected_count != 1U) {
     info->result = USB_REENUM_MULTIPLE_DEVICES;
     return true;
   }
 
-  if (unpowered) {
+  if (!(inventory.status & 0x0100U)) {
     info->result = USB_REENUM_NOT_POWERED;
     return true;
   }
@@ -1019,7 +1048,6 @@ bool usb_enum_admission_inspect(usb_enum_admission_info_t *info) {
     info->reconnect_reason = reconnect.result;
     info->result = reconnect.result == USB_REENUM_READY ?
         USB_ENUM_ADMIT_RECONNECT : USB_ENUM_ADMIT_RECONNECT_BLOCKED;
-
     return true;
   }
 
@@ -1031,39 +1059,36 @@ bool usb_enum_admission_inspect(usb_enum_admission_info_t *info) {
     return true;
   }
 
-  for (uint8_t port = 1U; port <= hub.ports; port++) {
-    usb_hub_port_t status = {0};
-
-    if (usb_hub_port_status(port, &status) != USB_HUB_OK) {
-      info->result = USB_ENUM_ADMIT_PORT_FAILED;
-      return true;
-    }
-
-    if (!(status.status & 0x0001U))
-      continue;
-
-    info->connected_count++;
-    info->port = port;
-
-    if (!(status.status & 0x0100U)) {
-      info->result = USB_ENUM_ADMIT_PORT_FAILED;
-      return true;
-    }
-
-    uint16_t bit = (uint16_t)(1U << port);
-    if (status.change != 0U || (change_pending_mask & bit) != 0U) {
-      info->result = USB_ENUM_ADMIT_CHANGE_PENDING;
-      return true;
-    }
+  usb_hub_inventory_t inventory = {0};
+  if (!usb_hub_inventory_read(hub.ports, &inventory)) {
+    info->result = USB_ENUM_ADMIT_PORT_FAILED;
+    return true;
   }
 
-  if (info->connected_count == 0U)
-    info->result = USB_ENUM_ADMIT_NO_DEVICE;
-  else if (info->connected_count != 1U)
-    info->result = USB_ENUM_ADMIT_MULTIPLE_DEVICES;
-  else
-    info->result = USB_ENUM_ADMIT_INITIAL;
+  info->connected_count = inventory.connected_count;
+  info->port = inventory.port;
 
+  if (inventory.change_pending) {
+    info->result = USB_ENUM_ADMIT_CHANGE_PENDING;
+    return true;
+  }
+
+  if (inventory.connected_count == 0U) {
+    info->result = USB_ENUM_ADMIT_NO_DEVICE;
+    return true;
+  }
+
+  if (inventory.connected_count != 1U) {
+    info->result = USB_ENUM_ADMIT_MULTIPLE_DEVICES;
+    return true;
+  }
+
+  if (!(inventory.status & 0x0100U)) {
+    info->result = USB_ENUM_ADMIT_PORT_FAILED;
+    return true;
+  }
+
+  info->result = USB_ENUM_ADMIT_INITIAL;
   return true;
 }
 
