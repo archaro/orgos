@@ -1613,6 +1613,108 @@ static void cmd_usb_lifecycle_port(void) {
   console_printf("  Last change : 0x%04x\n", (unsigned int)info.last_change);
 }
 
+static void cmd_usb_topology(void) {
+  uint8_t total_ports = 0U;
+  if (!xhci_port_count(&total_ports)) {
+    console_puts("USB root-port topology unavailable.\n");
+    return;
+  }
+  // Track which root ports are described by
+  // Supported Protocol capabilities. This is
+  // temporary diagnostic data, not controller state.
+  bool covered[256] = {false};
+  usb_init_info_t root = {0};
+  bool hub_known = usb_get_init_info(&root) && root.result == USB_INIT_OK &&
+      root.slot_id != 0U && root.address != 0U;
+  console_printf("xHCI root-port topology (%u ports):\n",
+      (unsigned int)total_ports);
+  unsigned int index = 0U;
+  for (;;) {
+    xhci_protocol_t protocol = {0};
+    bool found = false;
+    if (!xhci_protocol_get(index, &protocol, &found)) {
+      console_printf( "Supported Protocol inspection failed at index %u.\n",
+          index);
+      return;
+    }
+    if (!found)
+      break;
+    console_printf("\nProtocol %u: ", index);
+    // The USB protocol name is "USB ", stored
+    // as a little-endian 32-bit register value.
+    if (protocol.name == 0x20425355U) {
+      // Revision fields use BCD. For example,
+      // minor 0x10 denotes USB 3.1.
+      console_printf("USB %u.%u", (unsigned int)protocol.major,
+          (unsigned int)(protocol.minor >> 4));
+      if ((protocol.minor & 0x0fU) != 0U)
+        console_printf(".%u", (unsigned int)(protocol.minor & 0x0fU));
+    } else {
+      console_printf("Unknown protocol (name 0x%08x)", protocol.name);
+    }
+    console_printf("\n  Capability offset : 0x%04x\n", protocol.offset);
+    console_printf("  Port offset       : %u\n",
+        (unsigned int)protocol.first_port);
+    console_printf("  Port count        : %u\n",
+        (unsigned int)protocol.port_count);
+    console_printf("  Slot type         : %u\n",
+        (unsigned int)protocol.slot_type);
+    console_printf("  Speed ID count    : %u\n",
+        (unsigned int)protocol.speed_id_count);
+    unsigned int first = protocol.first_port;
+    unsigned int count = protocol.port_count;
+    // Root ports are numbered from 1 to MaxPorts.
+    // Never inspect a range outside that boundary.
+    if (first == 0U || count == 0U || first + count - 1U > total_ports) {
+      console_puts("  INVALID root-port range.\n");
+      index++;
+      continue;
+    }
+    for (unsigned int number = first; number < first + count; number++) {
+      if (covered[number])
+        console_printf( "  WARNING: root port %u appears in multiple "
+            "protocol ranges.\n", number);
+      covered[number] = true;
+      xhci_port_t port = {0};
+      if (!xhci_port_read((uint8_t)number, &port)) {
+        console_printf("  Root port %u: unavailable.\n", number);
+        continue;
+      }
+      console_printf( "  Root port %u: %s, %s, %s", number,
+          port.connected ? "Connected" : "Disconnected",
+          port.enabled ? "Enabled" : "Disabled",
+          port.powered ? "Powered" : "Unpowered");
+      if (port.connected)
+        console_printf(", %s", usb_speed_name(port.speed));
+      console_printf(", link %s", usb_link_name(port.link_state));
+      if (hub_known && number == root.root_port)
+        console_printf( " [internal hub, slot %u, address %u]",
+            (unsigned int)root.slot_id, (unsigned int)root.address);
+      console_putc('\n');
+    }
+    index++;
+  }
+  if (index == 0U)
+    console_puts("\nNo Supported Protocol capabilities found.\n");
+  // Detect root ports which have no protocol
+  // capability describing them. Do not read
+  // their PORTSC registers.
+  for (unsigned int number = 1U; number <= total_ports; number++) {
+    if (!covered[number])
+      console_printf( "WARNING: root port %u has no protocol mapping.\n",
+          number);
+  }
+  if (hub_known) {
+    usb_hub_init_info_t hub = {0};
+    if (usb_hub_get_init_info(&hub) && hub.result == USB_HUB_INIT_OK)
+      console_printf( "\nInternal USB hub: %u downstream ports "
+          "(inspect with usb hubports).\n", (unsigned int)hub.ports);
+  }
+  console_puts( "\nNote: protocol ranges do not identify physical "
+      "USB socket pairings.\n");
+  console_puts( "SuperSpeed root-port enumeration is not yet implemented.\n");
+}
+
 static void cmd_usb_test_midiout(void) {
   usb_enum_info_t enumeration = {0};
   usb_device_t device = {0};
@@ -1998,6 +2100,10 @@ static void cmd_usb(const char *args) {
   // The VL805 is configured at boot. Subcommands inspect
   // controller state and exercise explicit diagnostics.
   const char *other_args = args;
+  if (next_word_is(&args, "topology") && end_of_args(args)) {
+    cmd_usb_topology();
+    return;
+  }
   if (next_word_is(&args, "hubirq")) {
     if (end_of_args(args)) {
       cmd_usb_hubirq();
@@ -2137,7 +2243,7 @@ static void cmd_usb(const char *args) {
   }
   if (!end_of_args(args)) {
     console_puts(
-        "Usage: usb [state | ports | events | changes | devices | "
+        "Usage: usb [state | ports | events | changes | devices | tolopogy | "
         "test | recover | transfers | auto | hubirq | "
         "lifecycle | hubports | enumerate | enumstate]\n");
     return;
