@@ -1007,8 +1007,8 @@ xhci_configure_result_t xhci_configure(xhci_configure_info_t *result) {
   uint32_t op = info.capability_length;
   uint32_t intr = info.runtime_offset + XHCI_INTR0_OFFSET;
 
-  // Disable interrupter 0. Interrupts are not
-  // required for this halted-only test.
+  // OrgOS currently polls the xHCI event ring.
+  // Keep interrupter 0 disabled.
   xhci_write(intr + XHCI_IMAN, 0);
 
   // Device Context Base Address Array.
@@ -1534,7 +1534,7 @@ static xhci_dispatch_result_t xhci_dispatch_unhandled(
   return dispatch_fault;
 }
 
-static xhci_dispatch_result_t xhci_dispatch_one() {
+static xhci_dispatch_result_t xhci_dispatch_one(void) {
   // Never consume further events after a fatal
   // dispatch error. Preserve the original fault.
   if (dispatch_fault != XHCI_DISPATCH_NONE)
@@ -1959,9 +1959,9 @@ xhci_slot_result_t xhci_enable_downstream_slot(
   result->root_port = 1U;
   result->command_result = XHCI_COMMAND_UNAVAILABLE;
 
-  // Only one attempt is permitted per controller lifetime.
-  // Never issue another Enable Slot following an uncertain
-  // completion: the first command may have succeeded.
+  // Do not repeat Enable Slot for the same device incarnation.
+  // An uncertain completion may have succeeded, so the guard
+  // is cleared only after confirmed teardown and successful recycling.
   if (downstream_slot_requested)
     return XHCI_SLOT_ALREADY_REQUESTED;
 
@@ -2477,7 +2477,6 @@ xhci_bulk_config_result_t xhci_downstream_bulk_configure(
   device->bulk_in_cycle = 1U;
   device->bulk_in_wrap_pending = false;
   device->bulk_in_ready = true;
-  return XHCI_BULK_CONFIG_OK;
   return XHCI_BULK_CONFIG_OK;
 }
 
@@ -4661,8 +4660,6 @@ xhci_recycle_result_t xhci_downstream_recycle(void) {
       command_outstanding || command_ring_failed || device->slot_id == 0U)
     return XHCI_RECYCLE_NOT_READY;
 
-  // The continuous receiver is not yet equipped
-  // with a cancellation and teardown path.
   if (bulk_in_stream_started || bulk_in_waiter || device->ep0_active ||
       device->bulk_out_active)
     return XHCI_RECYCLE_BUSY;

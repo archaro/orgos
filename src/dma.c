@@ -159,7 +159,6 @@ static bool dma_cache_sync(dma_buffer_t *buffer, bool for_device) {
 }
 
 // Transfer logical ownership from the CPU to the device.
-// Cache maintenance will be added in 4.4b.
 bool dma_begin_device(dma_buffer_t *buffer, dma_direction_t direction) {
   if (!buffer || buffer->pages == 0 ||
       buffer->owner != DMA_OWNER_CPU ||
@@ -184,18 +183,13 @@ bool dma_begin_device(dma_buffer_t *buffer, dma_direction_t direction) {
   return true;
 }
 
-// Return logical ownership to the CPU.
-// The caller must establish that the device has
-// completed its access before calling this.
 bool dma_end_device(dma_buffer_t *buffer) {
   if (!buffer || buffer->pages == 0 ||
       buffer->owner != DMA_OWNER_DEVICE)
     return false;
 
-  // The caller must already have established
-  // hardware completion before invoking this.
-  // Synchronise memory before allowing the CPU
-  // to access the buffer again.
+  // Hardware completion must be established by
+  // the caller before returning ownership to the CPU.
   if (!dma_cache_sync(buffer, false))
     return false;
 
