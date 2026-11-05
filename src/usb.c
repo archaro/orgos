@@ -831,7 +831,7 @@ bool usb_reenum_inspect(usb_reenum_info_t *info) {
   }
 
   info->generation = device.generation;
-  info->port = device.parent_port;
+  info->previous_port = device.parent_port;
   info->device_state = device.state;
 
   if (device.state != USB_DEVICE_DETACHED) {
@@ -865,30 +865,68 @@ bool usb_reenum_inspect(usb_reenum_info_t *info) {
     return true;
   }
 
-  usb_lifecycle_port_info_t port = {0};
-  if (!usb_lifecycle_port_inspect(&port)) {
+  // The previous generation's hub port is history,
+  // not a restriction on the next generation.
+  usb_hub_init_info_t hub = {0};
+
+  if (!usb_hub_get_init_info(&hub) || hub.result != USB_HUB_INIT_OK ||
+      hub.ports == 0U || hub.ports >= 16U) {
     info->result = USB_REENUM_PORT_UNAVAILABLE;
     return true;
   }
 
-  info->port_status = port.current_status;
-  info->port_change = port.current_change;
-
-  if (!port.powered) {
-    info->result = USB_REENUM_NOT_POWERED;
+  // Do not inspect a topology whose notifications
+  // have not yet been completely processed.
+  if (change_pending_mask != 0U) {
+    info->result = USB_REENUM_CHANGE_PENDING;
     return true;
   }
+  bool unpowered = false;
 
-  if (!port.connected) {
+  for (uint8_t port = 1U; port <= hub.ports; port++) {
+    usb_hub_port_t status = {0};
+    if (usb_hub_port_status(port, &status) != USB_HUB_OK) {
+      info->result = USB_REENUM_PORT_UNAVAILABLE;
+      return true;
+    }
+
+    // Every port must have a settled change state,
+    // including ports with no connected device.
+    if (status.change != 0U) {
+      info->result = USB_REENUM_CHANGE_PENDING;
+      return true;
+    }
+
+    if (!(status.status & 0x0001U))
+      continue;
+
+    info->connected_count++;
+    if (info->connected_count == 1U) {
+      info->port = port;
+      info->port_status = status.status;
+      info->port_change = status.change;
+    }
+
+    if (!(status.status & 0x0100U))
+      unpowered = true;
+  }
+
+  if (info->connected_count == 0U) {
     info->result = USB_REENUM_DISCONNECTED;
     return true;
   }
 
-  // A pending hub change must be processed before
-  // another device generation can be enumerated.
-  uint16_t bit = (uint16_t)(1U << info->port);
-  if (port.current_change != 0U || (change_pending_mask & bit) != 0U) {
-    info->result = USB_REENUM_CHANGE_PENDING;
+  if (info->connected_count != 1U) {
+    // No single candidate can be selected.
+    info->port = 0U;
+    info->port_status = 0U;
+    info->port_change = 0U;
+    info->result = USB_REENUM_MULTIPLE_DEVICES;
+    return true;
+  }
+
+  if (unpowered) {
+    info->result = USB_REENUM_NOT_POWERED;
     return true;
   }
 
@@ -935,6 +973,7 @@ bool usb_enum_admission_inspect(usb_enum_admission_info_t *info) {
     }
 
     info->port = reconnect.port;
+    info->connected_count = reconnect.connected_count;
     info->reconnect_reason = reconnect.result;
     info->result = reconnect.result == USB_REENUM_READY ?
         USB_ENUM_ADMIT_RECONNECT : USB_ENUM_ADMIT_RECONNECT_BLOCKED;

@@ -1636,6 +1636,8 @@ static const char *usb_reenum_result_name(usb_reenum_result_t result) {
       return "Port not powered";
     case USB_REENUM_CHANGE_PENDING:
       return "Hub changes pending";
+    case USB_REENUM_MULTIPLE_DEVICES:
+      return "Multiple connected devices";
     default:
       return "Unknown";
   }
@@ -1650,7 +1652,9 @@ static void cmd_usb_lifecycle_ready(void) {
   console_puts("USB re-enumeration eligibility:\n");
   console_printf("  Result      : %s\n", usb_reenum_result_name(info.result));
   console_printf("  Generation  : %u\n", (unsigned int)info.generation);
-  console_printf("  Hub port    : %u\n", (unsigned int)info.port);
+  console_printf("  Previous port: %u\n", (unsigned int)info.previous_port);
+  console_printf("  Candidate port: %u\n", (unsigned int)info.port);
+  console_printf("  Connected    : %u\n", (unsigned int)info.connected_count);
   console_printf("  Device state: %u\n", (unsigned int)info.device_state);
   console_printf("  Attempted   : %s\n",
       info.enumeration_attempted ? "Yes" : "No");

@@ -169,13 +169,16 @@ typedef enum {
   USB_REENUM_PORT_UNAVAILABLE,
   USB_REENUM_DISCONNECTED,
   USB_REENUM_NOT_POWERED,
-  USB_REENUM_CHANGE_PENDING
+  USB_REENUM_CHANGE_PENDING,
+  USB_REENUM_MULTIPLE_DEVICES
 } usb_reenum_result_t;
 
 typedef struct {
   usb_reenum_result_t result;
   uint32_t generation;
   uint8_t port;
+  uint8_t previous_port;
+  uint8_t connected_count;
   usb_device_state_t device_state;
   uint16_t port_status;
   uint16_t port_change;
