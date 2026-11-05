@@ -1108,32 +1108,6 @@ static void cmd_usb_events(void) {
   }
 }
 
-static void cmd_usb_scan(void) {
-  usb_hub_scan_info_t scan = {0};
-  usb_hub_result_t result = usb_hub_scan(&scan);
-  if (result != USB_HUB_OK) {
-    console_printf("USB scan failed: port %u, result %u\n",
-        (unsigned int)scan.failed_port, (unsigned int)result);
-    return;
-  }
-  console_puts("USB downstream discovery:\n");
-  for (uint8_t port = 1U; port <= scan.ports; port++) {
-    uint16_t bit = (uint16_t)(1U << (port - 1U));
-    console_printf("  Port %u: ", (unsigned int)port);
-    if (scan.overcurrent & bit)
-      console_puts("Overcurrent");
-    else if (scan.connected & bit)
-      console_puts("Connected");
-    else
-      console_puts("Empty");
-    if (scan.enabled & bit)
-      console_puts(", enabled");
-    if (scan.changed & bit)
-      console_puts(", change pending");
-    console_putc('\n');
-  }
-}
-
 static void cmd_usb_hubports(void) {
   console_puts("Internal USB hub downstream ports:\n");
 
@@ -1201,39 +1175,6 @@ static void cmd_usb_hubports(void) {
     }
     console_putc('\n');
   }
-}
-
-static void cmd_usb_device_check(void) {
-  usb_device_t device = {0};
-  if (!usb_get_device(&device) || device.state == USB_DEVICE_DETACHED) {
-    console_puts("No tracked downstream device.\n");
-    return;
-  }
-  usb_hub_port_t port = {0};
-  usb_hub_result_t result = usb_hub_port_status(device.parent_port, &port);
-  if (result != USB_HUB_OK) {
-    console_printf("Hub port %u: status read failed (%u).\n",
-        (unsigned int)device.parent_port, (unsigned int)result);
-    return;
-  }
-  bool connected = (port.status & (1U << 0)) != 0U;
-  bool enabled = (port.status & (1U << 1)) != 0U;
-  bool powered = (port.status & (1U << 8)) != 0U;
-  bool changed = (port.change & (1U << 0)) != 0U;
-  console_printf("USB device connection check:\n");
-  console_printf("  Hub port       : %u\n", (unsigned int)device.parent_port);
-  console_printf("  Recorded state : %s\n",
-      usb_device_state_name(device.state));
-  console_printf("  Port status    : 0x%04x\n", (unsigned int)port.status);
-  console_printf("  Port change    : 0x%04x\n", (unsigned int)port.change);
-  console_printf("  Connected      : %s\n", connected ? "Yes" : "No");
-  console_printf("  Enabled        : %s\n", enabled ? "Yes" : "No");
-  console_printf("  Powered        : %s\n", powered ? "Yes" : "No");
-  console_printf("  Conn. changed  : %s\n", changed ? "Yes" : "No");
-  if (!connected || !enabled || !powered || changed)
-    console_puts("  Result         : Device requires attention\n");
-  else
-    console_puts("  Result         : Port appears operational\n");
 }
 
 static void cmd_usb_devices(void) {
@@ -1468,95 +1409,6 @@ static void cmd_usb_recover(void) {
     return;
   }
   console_puts("USB recovery: STARTED\n");
-}
-
-static void cmd_usb_stopout(void) {
-  xhci_stop_info_t info = {0};
-  xhci_stop_result_t result = xhci_downstream_stop_bulk_out(&info);
-  console_printf("Stop Bulk OUT: %u\n", (unsigned int)result);
-  console_printf("  Slot       : %u\n", (unsigned int)info.slot_id);
-  console_printf("  Endpoint   : %u\n", (unsigned int)info.endpoint_id);
-  console_printf("  Before     : %u\n", (unsigned int)info.before_state);
-  console_printf("  After      : %u\n", (unsigned int)info.after_state);
-  console_printf("  Command    : %u\n", (unsigned int)info.command_result);
-  console_printf("  Completion : %u\n", (unsigned int)info.completion_code);
-  console_printf("  Stop event : %s\n",
-      info.stop_event_received ? "Yes" : "No");
-  console_printf("  Event code : %u\n", (unsigned int)info.stop_event_code);
-  console_printf("  Event TRB  : %016llx\n",
-      (unsigned long long)info.stop_event_trb);
-}
-
-static void cmd_usb_stopin(void) {
-  xhci_stop_info_t info = {0};
-  xhci_stop_result_t result = xhci_downstream_stop_bulk_in(&info);
-  console_printf("Stop Bulk IN: %u\n", (unsigned int)result);
-  console_printf("  Slot       : %u\n", (unsigned int)info.slot_id);
-  console_printf("  Endpoint   : %u\n", (unsigned int)info.endpoint_id);
-  console_printf("  Before     : %u\n", (unsigned int)info.before_state);
-  console_printf("  After      : %u\n", (unsigned int)info.after_state);
-  console_printf("  Command    : %u\n", (unsigned int)info.command_result);
-  console_printf("  Completion : %u\n", (unsigned int)info.completion_code);
-  console_printf("  Stop event : %s\n",
-      info.stop_event_received ? "Yes" : "No");
-  console_printf("  Event code : %u\n", (unsigned int)info.stop_event_code);
-  console_printf("  Event TRB  : %016llx\n",
-      (unsigned long long)info.stop_event_trb);
-}
-
-static void cmd_usb_disable(void) {
-  xhci_disable_info_t info = {0};
-  xhci_disable_result_t result = xhci_downstream_disable(&info);
-  console_printf("Disable Slot: %u\n", (unsigned int)result);
-  console_printf("  Slot       : %u\n", (unsigned int)info.slot_id);
-  console_printf("  Command    : %u\n", (unsigned int)info.command_result);
-  console_printf("  Completion : %u\n", (unsigned int)info.completion_code);
-}
-
-static void cmd_usb_detach(void) {
-  if (usb_device_finalize_disconnect()) {
-    console_puts("USB device detached.\n");
-  } else {
-    console_puts("USB detach not ready.\n");
-  }
-}
-
-static void cmd_usb_cleanup(void) {
-  xhci_cleanup_info_t info = {0};
-  xhci_cleanup_result_t result = xhci_downstream_cleanup(&info);
-  console_printf("USB cleanup: %u\n", (unsigned int)result);
-  console_printf("  Slot     : %u\n", (unsigned int)info.slot_id);
-  console_printf("  Buffers  : %u\n", (unsigned int)info.buffers_released);
-  console_printf("  Pages    : %u\n", (unsigned int)info.pages_released);
-  console_printf("  Cleaned  : %s\n",
-      xhci_downstream_is_cleaned() ? "Yes" : "No");
-}
-
-static void cmd_usb_retirein(void) {
-  xhci_bulk_in_retire_result_t result = xhci_bulk_in_stream_retire();
-  console_printf("Bulk IN retirement: %u\n", (unsigned int)result);
-}
-
-static void cmd_usb_reconcilein(void) {
-  xhci_in_reconcile_result_t result = xhci_bulk_in_quiesced_reconcile();
-  console_printf("Bulk IN reconciliation: %u\n", (unsigned int)result);
-}
-
-static void cmd_usb_recycle(void) {
-  usb_device_t device = {0};
-  if (!usb_get_device(&device) || device.state != USB_DEVICE_DETACHED) {
-    console_puts("USB device is not detached.\n");
-    return;
-  }
-  xhci_recycle_result_t result = xhci_downstream_recycle();
-  console_printf("USB recycle: %u\n", (unsigned int)result);
-}
-
-static void cmd_usb_rearm(void) {
-  if (usb_enumeration_rearm())
-    console_puts("USB enumeration rearmed.\n");
-  else
-    console_puts("USB enumeration rearm not ready.\n");
 }
 
 static void cmd_usb_transfers(void) {
@@ -2082,24 +1934,6 @@ static void cmd_usb_test_midiwrap(void) {
       completed == transfers && wraps >= 2U ? "PASS" : "FAILED");
 }
 
-static void cmd_usb_hubirq_start(void) {
-  xhci_hub_notify_result_t result = xhci_hub_notify_start();
-  if (result == XHCI_HUB_NOTIFY_OK)
-    console_puts("Hub notification receiver armed.\n");
-  else
-    console_printf("Hub notification start failed (%u).\n",
-        (unsigned int)result);
-}
-
-static void cmd_usb_hubirq_resume(void) {
-  xhci_hub_notify_result_t result = xhci_hub_notify_resume();
-  if (result == XHCI_HUB_NOTIFY_OK)
-    console_puts("Hub notification receiver rearmed.\n");
-  else
-    console_printf("Hub notification resume failed (%u).\n",
-        (unsigned int)result);
-}
-
 static void cmd_usb_changes(void) {
   usb_change_stats_t stats = {0};
   usb_change_get_stats(&stats);
@@ -2193,6 +2027,10 @@ static void cmd_usb(const char *args) {
   // The VL805 is configured at boot.
   // This command merely inspects the controller.
   const char *other_args = args;
+  if (next_word_is(&args, "hubirq")) {
+    cmd_usb_hubirq();
+    return;
+  }
   if (next_word_is(&args, "auto")) {
     cmd_usb_auto(args);
     return;
@@ -2237,76 +2075,16 @@ static void cmd_usb(const char *args) {
     console_puts("Usage: usb lifecycle [arm | status | port | ready | admission]\n");
     return;
   }
-  if (next_word_is(&args, "retirein") && end_of_args(args)) {
-    cmd_usb_retirein();
-    return;
-  }
-  if (next_word_is(&args, "reconcilein") && end_of_args(args)) {
-    cmd_usb_reconcilein();
-    return;
-  }
-  if (next_word_is(&args, "stopout") && end_of_args(args)) {
-    cmd_usb_stopout();
-    return;
-  }
-  if (next_word_is(&args, "stopin") && end_of_args(args)) {
-    cmd_usb_stopin();
-    return;
-  }
   if (next_word_is(&args, "transfers") && end_of_args(args)) {
     cmd_usb_transfers();
-    return;
-  }
-  if (next_word_is(&args, "rearm") && end_of_args(args)) {
-    cmd_usb_rearm();
-    return;
-  }
-  if (next_word_is(&args, "recycle") && end_of_args(args)) {
-    cmd_usb_recycle();
-    return;
-  }
-  if (next_word_is(&args, "detach") && end_of_args(args)) {
-    cmd_usb_detach();
-    return;
-  }
-  if (next_word_is(&args, "cleanup") && end_of_args(args)) {
-    cmd_usb_cleanup();
-    return;
-  }
-  if (next_word_is(&args, "disable") && end_of_args(args)) {
-    cmd_usb_disable();
     return;
   }
   if (next_word_is(&args, "changes") && end_of_args(args)) {
     cmd_usb_changes();
     return;
   }
-  if (next_word_is(&other_args, "device") &&
-      next_word_is(&other_args, "check") &&
-      end_of_args(other_args)) {
-    cmd_usb_device_check();
-    return;
-  }
-  if (next_word_is(&args, "hubirq")) {
-    if (end_of_args(args)) {
-      cmd_usb_hubirq();
-      return;
-    }
-    if (next_word_is(&args, "start") && end_of_args(args)) {
-      cmd_usb_hubirq_start();
-      return;
-    }
-    if (next_word_is(&args, "resume") && end_of_args(args)) {
-      cmd_usb_hubirq_resume();
-      return;
-    }
-  }
   if (next_word_is(&args, "devices") && end_of_args(args)) {
     cmd_usb_devices();
-    return;
-  }
-  if (next_word_is(&args, "scan") && end_of_args(args)) {
-    cmd_usb_scan();
     return;
   }
   if (next_word_is(&args, "enumerate") && end_of_args(args)) {
@@ -2380,9 +2158,9 @@ static void cmd_usb(const char *args) {
 
   if (!end_of_args(args)) {
     console_puts(
-        "Usage: usb [scan | state | ports | events | device | devices | test | recover | "
-        "stopout | stopin | disable | cleanup | detach | recycle | rearm | transfers | auto | "
-	"retirein | reconcilein | lifecycle | hubports | hubirq | enumerate | enumstate]\n");
+        "Usage: usb [ state | ports | events | devices | test | recover | "
+        "transfers | auto | hubirq | "
+	"lifecycle | hubports | enumerate | enumstate]\n");
     return;
   }
 
