@@ -1,4 +1,3 @@
-
 #include <stddef.h>
 #include <stdarg.h>
 
@@ -25,6 +24,11 @@
 #include "midi.h"
 
 #define CONSOLE_LINE_SIZE 256
+
+static char console_line[CONSOLE_LINE_SIZE];
+static size_t console_length;
+static bool console_last_was_cr;
+static bool console_line_overflowed;
 
 typedef void (*console_command_fn)(const char *args);
 
@@ -112,7 +116,10 @@ static void cmd_mailbox(const char *args) {
 }
 
 static void cmd_timer(const char *args) {
-  (void)args;
+  if (!end_of_args(args)) {
+    console_puts("Usage: timer\n");
+    return;
+  }
 
   // This function tells us some interesting information about the timer.
   uint64_t tick = timer_now_us();
@@ -137,7 +144,10 @@ static void cmd_timer(const char *args) {
 }
 
 static void cmd_uptime(const char *args) {
-  (void)args;
+  if (!end_of_args(args)) {
+    console_puts("Usage: uptime\n");
+    return;
+  }
 
   uint64_t seconds = timer_uptime_us() / 1000000U;
   uint64_t days = seconds / 86400U;
@@ -161,7 +171,10 @@ static void cmd_uptime(const char *args) {
 }
 
 static void cmd_irq(const char *args) {
-  (void)args;
+  if (!end_of_args(args)) {
+    console_puts("Usage: irq\n");
+    return;
+  }
 
   console_puts("Interrupts handled: ");
   console_putu64(irq_count());
@@ -322,7 +335,11 @@ static void cmd_pci(const char *args) {
       cmd_pci_dma();
       return;
     }
-    console_puts("Usage: pci dma [test]\n");
+    console_puts("Usage: pci [dma [test]]\n");
+    return;
+  }
+  if (!end_of_args(args)) {
+    console_puts("Usage: pci [dma [test]]\n");
     return;
   }
 
@@ -720,7 +737,7 @@ static void cmd_dma(const char *args) {
     cmd_dma_edge_test();
     return;
   }
-  console_puts("Usage: dma [test | owner | cache | edge]\n");
+  console_puts("Usage: dma [owner | cache | edge]\n");
 }
 
 static void cmd_usb_state(void) {
@@ -2076,8 +2093,9 @@ static void cmd_usb(const char *args) {
       cmd_usb_test_midiin(other_args);
       return;
     }
-    console_puts("Usage: usb test [noops | quiesce | midiout | midiwrap | midiin | "
-                 "enumabort | enumconfigabort ]\n");
+    console_puts(
+        "Usage: usb test [ep0match | enumabort | enumconfigabort | "
+        "noops | quiesce | midiout | midiwrap | midiin]\n");
     return;
   }
   if (next_word_is(&args, "state") && end_of_args(args)) {
@@ -2238,7 +2256,7 @@ static void cmd_fdt(const char *args) {
   }
 
   if (!end_of_args(args)) {
-    console_puts("Usage: fdt [memory]\n");
+    console_puts("Usage: fdt [dma | memory]\n");
     return;
   }
 
@@ -2665,7 +2683,10 @@ typedef struct {
 } console_command_t;
 
 static void cmd_memory(const char *args) {
-  (void)args;
+  if (!end_of_args(args)) {
+    console_puts("Usage: memory\n");
+    return;
+  }
 
   uint32_t base;
   uint32_t size;
@@ -2756,10 +2777,12 @@ static const console_command_t commands[] = {
 };
 
 static void cmd_help(const char *args) {
-  (void)args;
+  if (!end_of_args(args)) {
+    console_puts("Usage: help\n");
+    return;
+  }
 
   console_puts("Available commands:\n\n");
-
   for (size_t i = 0; commands[i].name != NULL; i++) {
     console_puts("  ");
     console_puts(commands[i].name);
@@ -2783,12 +2806,8 @@ static void cmd_help(const char *args) {
 }
 
 static bool is_space(char c) {
-  return c == ' '  ||
-         c == '\t' ||
-         c == '\n' ||
-         c == '\r' ||
-         c == '\v' ||
-         c == '\f';
+  return c == ' '  || c == '\t' || c == '\n' ||
+         c == '\r' || c == '\v' || c == '\f';
 }
 
 static bool string_equal(const char *a, const char *b) {
@@ -2823,7 +2842,6 @@ static void console_dispatch(char *line) {
 
   // Locate the end of the first word.
   char *p = command;
-
   while (*p && !is_space(*p))
     p++;
 
@@ -2831,13 +2849,11 @@ static void console_dispatch(char *line) {
     // Terminate the command name and skip
     // whitespace preceding its arguments.
     *p++ = '\0';
-
     while (is_space(*p))
       p++;
   }
 
   args = p;
-
   // Look up the command.
   for (size_t i = 0; commands[i].name != NULL; i++) {
     if (string_equal(command, commands[i].name)) {
@@ -2848,10 +2864,6 @@ static void console_dispatch(char *line) {
 
   console_puts("No such command.\n");
 }
-
-static char console_line[CONSOLE_LINE_SIZE];
-static size_t console_length;
-static bool console_last_was_cr;
 
 void console_start(void) {
   console_puts("Console ready.\n");
@@ -2873,12 +2885,25 @@ bool console_poll(void) {
   console_last_was_cr = (c == '\r');
   if (c == '\r' || c == '\n') {
     console_puts("\n");
-    console_line[console_length] = '\0';
-    console_dispatch(console_line);
+
+    if (console_line_overflowed) {
+      console_puts("Input line too long; command discarded.\n");
+    } else {
+      console_line[console_length] = '\0';
+      console_dispatch(console_line);
+    }
+
     console_length = 0U;
+    console_line_overflowed = false;
     console_prompt();
     return true;
   }
+
+  // Once overflow has occurred, discard everything
+  // until the end of the line. In particular, do not
+  // allow backspace to make a truncated line executable.
+  if (console_line_overflowed)
+    return true;
 
   if (c == '\b' || c == 0x7f) {
     if (console_length > 0U) {
@@ -2895,6 +2920,7 @@ bool console_poll(void) {
     return true;
 
   if (console_length >= sizeof(console_line) - 1U) {
+    console_line_overflowed = true;
     console_putc('\a');
     return true;
   }
