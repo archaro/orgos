@@ -1029,9 +1029,15 @@ static void cmd_usb_events(void) {
 }
 
 static void cmd_usb_hubports(void) {
-  console_puts("Internal USB hub downstream ports:\n");
-
-  for (uint8_t port = 1U; port <= 4U; port++) {
+  usb_hub_init_info_t hub = {0};
+  if (!usb_hub_get_init_info(&hub) ||
+      hub.result != USB_HUB_INIT_OK || hub.ports == 0U) {
+    console_puts("Internal USB hub not initialised.\n");
+    return;
+  }
+  console_printf("Internal USB hub downstream ports (%u):\n",
+      (unsigned int)hub.ports);
+  for (uint8_t port = 1U; port <= hub.ports; port++) {
     usb_hub_port_t info;
     usb_hub_result_t result = usb_hub_port_status(port, &info);
     console_puts("  Port ");
@@ -1130,19 +1136,17 @@ static void cmd_usb_devices(void) {
 
 static void cmd_usb_enumerate(void) {
   usb_enum_info_t info = {0};
-  usb_enum_result_t result;
-  if (usb_get_enumeration(&info))
-    result = info.result;
-  else
-    result = usb_enumerate(&info);
-  console_printf("USB enumeration:\n");
+  bool recorded = usb_get_enumeration(&info);
+  usb_enum_result_t result = recorded ?  info.result : usb_enumerate(&info);
+  console_puts("USB enumeration:\n");
+  console_printf("  Source          : %s\n",
+      recorded ? "Recorded result (no new attempt)" : "Manual request");
   console_printf("  Result          : %u\n", (unsigned int)result);
   console_printf("  Detail          : %u\n", info.detail);
   if (result == USB_ENUM_NOT_READY) {
     console_puts("USB enumeration: NOT READY\n");
     return;
   }
-
   if (result != USB_ENUM_OK) {
     console_puts("USB enumeration: FAILED\n");
     return;
@@ -1472,6 +1476,9 @@ static void cmd_usb_lifecycle_admission(void) {
   console_puts("USB enumeration admission:\n");
   console_printf("  Decision       : %s\n",
       usb_enum_admission_name(info.result));
+  if (info.result == USB_ENUM_ADMIT_ALREADY_ATTEMPTED)
+    console_puts( "  Note           : Result already recorded; "
+        "see usb enumstate.\n");
   usb_device_t device = {0};
   if (usb_get_device(&device)) {
     console_printf("  Device state   : %s\n",
@@ -1718,6 +1725,28 @@ static void cmd_usb_test_midiin_stress(const char *args) {
   console_puts("Usage: usb test midiin stress [start | status | reset]\n");
 }
 
+static const char *usb_bulk_in_arm_result_name(
+    xhci_bulk_in_arm_result_t result) {
+  switch (result) {
+    case XHCI_BULK_IN_ARM_OK:
+      return "STARTED";
+    case XHCI_BULK_IN_ARM_NOT_READY:
+      return "NOT READY";
+    case XHCI_BULK_IN_ARM_ALREADY_STARTED:
+      return "ALREADY STARTED";
+    case XHCI_BULK_IN_ARM_ALLOCATION_FAILED:
+      return "ALLOCATION FAILED";
+    case XHCI_BULK_IN_ARM_DMA_FAILED:
+      return "DMA FAILED";
+    case XHCI_BULK_IN_ARM_RING_FAILED:
+      return "RING FAILED";
+    case XHCI_BULK_IN_ARM_WAITER_FAILED:
+      return "WAITER FAILED";
+    default:
+      return "UNKNOWN";
+  }
+}
+
 static void cmd_usb_test_midiin(const char *args) {
   const char *stress_args = args;
   if (next_word_is(&stress_args, "stress")) {
@@ -1732,7 +1761,8 @@ static void cmd_usb_test_midiin(const char *args) {
       return;
     }
     xhci_bulk_in_arm_result_t result = xhci_bulk_in_stream_start();
-    console_printf("USB-MIDI IN stream start: %u\n", (unsigned int)result);
+    console_printf("USB-MIDI IN stream start: %s (%u)\n",
+        usb_bulk_in_arm_result_name(result), (unsigned int)result);
     return;
   }
   if (next_word_is(&args, "read") && end_of_args(args)) {
@@ -1802,7 +1832,10 @@ static void cmd_usb_test_midiwrap(void) {
   unsigned int completed = 0U;
   unsigned int wraps = 0U;
   uint64_t started = timer_now_us();
-  console_puts("USB-MIDI ring-wrap stress test\n");
+  console_printf("USB-MIDI ring-wrap stress test (%u transfers)\n",
+      transfers);
+  console_puts("  WARNING: Sends real MIDI OUT messages: "
+      "channel 16, CC 102.\n");
   for (unsigned int i = 0U; i < transfers; i++) {
     // Cable 0, Control Change, channel 16, controller 102.
     uint8_t packet[4] = { 0x0bU, 0xbfU, 0x66U, (uint8_t)(i & 0x7fU) };
@@ -1962,8 +1995,8 @@ static void cmd_usb_auto(const char *args) {
 }
 
 static void cmd_usb(const char *args) {
-  // The VL805 is configured at boot.
-  // This command merely inspects the controller.
+  // The VL805 is configured at boot. Subcommands inspect
+  // controller state and exercise explicit diagnostics.
   const char *other_args = args;
   if (next_word_is(&args, "hubirq")) {
     if (end_of_args(args)) {
@@ -2577,7 +2610,7 @@ static void cmd_page(const char *args) {
   }
   if (!end_of_args(args)) {
     console_puts(
-        "Usage: page [runtest]\n");
+        "Usage: page [test | runtest]\n");
     return;
   }
   page_stats_t stats;
@@ -2767,12 +2800,12 @@ static const console_command_t commands[] = {
   { "irq", cmd_irq, "Display interrupt statistics" },
   { "fdt", cmd_fdt, "Inspect firmware Device Tree, memory and DMA" },
   { "physmem", cmd_physmem, "Display physical RAM and reservations" },
-  { "page", cmd_page, "Inspect, allocate or release physical pages" },
   { "cache", cmd_cache, "Display CPU cache configuration" },
   { "pci", cmd_pci, "Inspect PCIe controller and DMA configuration" },
-  { "dma", cmd_dma, "Test DMA buffer ownership" },
-  { "usb", cmd_usb, "Inspect VL805 xHCI capabilities" },
-  { "midi", cmd_midi, "Construct and inspect MIDI messages" },
+  { "page", cmd_page, "Inspect physical page statistics and run tests" },
+  { "dma", cmd_dma, "Run DMA ownership and cache tests" },
+  { "usb", cmd_usb, "Inspect and test USB controller and MIDI transport" },
+  { "midi", cmd_midi, "Construct and display MIDI channel messages" },
   { NULL, NULL, NULL }
 };
 
