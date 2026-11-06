@@ -492,7 +492,8 @@ bool usb_enumeration_recovery_inspect(usb_recovery_info_t *info) {
   }
 
   if (xhci_downstream_is_quiesced(current_device.slot_id) ||
-      xhci_downstream_is_slot_disabled() || xhci_downstream_is_cleaned()) {
+      xhci_downstream_is_slot_disabled(current_device.slot_id) ||
+      xhci_downstream_is_cleaned(current_device.slot_id)) {
     info->result = USB_RECOVERY_ALREADY_QUIESCED;
     return true;
   }
@@ -535,7 +536,8 @@ bool usb_enumeration_recovery_inspect(usb_recovery_info_t *info) {
   if (enumeration_state.ep0_operation_failed || transfers.ep0_failed) {
     if (enumeration_state.ep0_operation_failed &&
         enumeration_state.ep0_result == XHCI_CONTROL_TRANSFER_FAILED &&
-        transfers.ep0_failed && xhci_downstream_ep0_fault_reclaimable()) {
+        transfers.ep0_failed &&
+       	xhci_downstream_ep0_fault_reclaimable(current_device.slot_id)) {
       info->result = USB_RECOVERY_READY_EP0_ERROR;
     } else if (transfers.ep0_submitted && transfers.ep0_completion_seen &&
         transfers.ep0_completion_code != 1U) {
@@ -644,7 +646,7 @@ bool usb_device_finalize_disconnect(void) {
   if (!device_record_valid ||
       current_device.state != USB_DEVICE_DISCONNECTING ||
       !xhci_downstream_is_quiesced(current_device.slot_id) ||
-      !xhci_downstream_is_cleaned())
+      !xhci_downstream_is_cleaned(current_device.slot_id))
     return false;
 
   // Controller teardown is complete.
@@ -665,8 +667,7 @@ bool usb_device_finalize_disconnect(void) {
 bool usb_enumeration_rearm(void) {
   if (!device_record_valid || !enumeration_attempted ||
       current_device.state != USB_DEVICE_DETACHED ||
-      xhci_downstream_is_quiesced(current_device.slot_id) ||
-      xhci_downstream_is_cleaned())
+      xhci_downstream_any_owned())
     return false;
 
   // The old device has been detached and
@@ -690,8 +691,7 @@ bool usb_enumeration_rearm_rejected(uint8_t port) {
 
   // There must be no outstanding downstream
   // controller resources awaiting reclamation.
-  if (xhci_downstream_is_quiesced(current_device.slot_id) ||
-      xhci_downstream_is_slot_disabled() || xhci_downstream_is_cleaned())
+  if (xhci_downstream_any_owned())
     return false;
 
   // Confirm that the rejected port is now empty

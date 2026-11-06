@@ -34,9 +34,7 @@ bool usb_midi_in_stress_reset(void) {
   // admission policy, no receiver can remain
   // active after these conditions are satisfied.
   if (!usb_get_device(&device) || device.state != USB_DEVICE_DETACHED ||
-      usb_get_enumeration(&enumeration) ||
-      xhci_downstream_is_quiesced(device.slot_id) ||
-      xhci_downstream_is_slot_disabled() || xhci_downstream_is_cleaned() ||
+      usb_get_enumeration(&enumeration) || xhci_downstream_any_owned() ||
       in_stress.state == USB_MIDI_IN_STRESS_RUNNING)
     return false;
 

@@ -344,8 +344,8 @@ typedef struct {
 } xhci_cleanup_info_t;
 
 xhci_cleanup_result_t xhci_downstream_cleanup(xhci_cleanup_info_t *info);
-bool xhci_downstream_is_cleaned(void);
-
+bool xhci_downstream_is_cleaned(uint8_t slot_id);
+bool xhci_downstream_any_owned(void);
 typedef enum {
   XHCI_RECYCLE_OK,
   XHCI_RECYCLE_NOT_READY,
@@ -437,7 +437,7 @@ typedef struct {
 
 xhci_ep0_update_result_t xhci_downstream_ep0_update(uint8_t slot_id,
     uint16_t max_packet_size, xhci_ep0_update_info_t *result);
-bool xhci_downstream_ep0_fault_reclaimable(void);
+bool xhci_downstream_ep0_fault_reclaimable(uint8_t slot_id);
 
 typedef enum {
   XHCI_HUB_OK,
@@ -766,7 +766,7 @@ bool xhci_hub_notify_get_info(xhci_hub_notify_info_t *info);
 xhci_hub_notify_result_t xhci_hub_notify_resume(void);
 bool xhci_downstream_quiesce(uint8_t slot_id);
 bool xhci_downstream_is_quiesced(uint8_t slot_id);
-bool xhci_downstream_is_slot_disabled(void);
+bool xhci_downstream_is_slot_disabled(uint8_t slot_id);
 
 typedef struct {
   uint8_t slot_id;

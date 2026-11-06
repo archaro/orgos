@@ -314,16 +314,23 @@ static xhci_device_t *xhci_device_by_connection(
   return found;
 }
 
-static bool xhci_device_context_available( const xhci_device_t *device) {
-
+static bool xhci_device_context_available(const xhci_device_t *device) {
   if (!device)
     return false;
 
-  // A context is available only when it has no
-  // hardware identity, outstanding reservation
-  // or retained DMA allocations.
-  return !device->lifecycle.slot_requested && device->slot_id == 0U &&
-      !device->prepared && !device->addressed && device->input.pages == 0U &&
+  const xhci_device_lifecycle_t *life = &device->lifecycle;
+
+  // Only a completely unused or recycled context
+  // may participate in another allocation.
+  return !life->slot_requested && !life->address_attempted &&
+      !life->ep0_update_attempted && !life->bulk_attempted &&
+      !life->disable_attempted && !life->stop_out_attempted &&
+      !life->stop_in_attempted && !life->quiesced && !life->slot_disabled &&
+      !life->cleaned && device->slot_id == 0U && !device->prepared &&
+      !device->addressed && !device->ep0_active && !device->bulk_out_active &&
+      !device->receiver.started && device->receiver.waiter == NULL &&
+      device->receiver.state == XHCI_BULK_IN_IDLE &&
+      device->receiver.queue_count == 0U && device->input.pages == 0U &&
       device->output.pages == 0U && device->ep0_ring.pages == 0U &&
       device->bulk_in_ring.pages == 0U && device->bulk_out_ring.pages == 0U &&
       device->bulk_in_buffer.pages == 0U &&
@@ -331,6 +338,15 @@ static bool xhci_device_context_available( const xhci_device_t *device) {
       device->control_buffer.pages == 0U &&
       device->interrupt_ring.pages == 0U &&
       device->interrupt_buffer.pages == 0U;
+}
+
+bool xhci_downstream_any_owned(void) {
+  for (unsigned int i = 1U; i < XHCI_MAX_DEVICES; i++) {
+    if (!xhci_device_context_available(&devices[i]))
+      return true;
+  }
+
+  return false;
 }
 
 static xhci_device_t *xhci_downstream_context_reserve(uint8_t root_port,
@@ -4475,12 +4491,13 @@ bool xhci_downstream_is_quiesced(uint8_t slot_id) {
   return device->lifecycle.quiesced;
 }
 
-bool xhci_downstream_is_slot_disabled(void) {
-  return devices[1].lifecycle.slot_disabled;
+bool xhci_downstream_is_slot_disabled(uint8_t slot_id) {
+  xhci_device_t *device = xhci_downstream_by_slot(slot_id);
+
+  return device && device->lifecycle.slot_disabled;
 }
 
 static bool xhci_downstream_ep0_state(xhci_device_t *device, uint8_t *state) {
-
   if (!device || !state)
     return false;
 
@@ -4504,8 +4521,11 @@ static bool xhci_downstream_ep0_state(xhci_device_t *device, uint8_t *state) {
   return true;
 }
 
-bool xhci_downstream_ep0_fault_reclaimable(void) {
-  xhci_device_t *device = &devices[1];
+bool xhci_downstream_ep0_fault_reclaimable(uint8_t slot_id) {
+  xhci_device_t *device = xhci_downstream_by_slot(slot_id);
+
+  if (!device)
+    return false;
 
   if (device->slot_id == 0U || !device->addressed ||
       !controller_running || !controller_verified ||
@@ -4628,8 +4648,10 @@ static bool xhci_release_buffer(
   return true;
 }
 
-bool xhci_downstream_is_cleaned(void) {
-  return devices[1].lifecycle.cleaned;
+bool xhci_downstream_is_cleaned(uint8_t slot_id) {
+  xhci_device_t *device = xhci_downstream_by_slot(slot_id);
+
+  return device && device->lifecycle.cleaned;
 }
 
 xhci_cleanup_result_t xhci_downstream_cleanup(xhci_cleanup_info_t *info) {
@@ -4932,7 +4954,8 @@ xhci_disable_result_t xhci_downstream_disable(xhci_disable_info_t *info) {
 
   // A failed EP0 must have a confirmed terminal
   // outcome before its slot can be disabled.
-  if (device->ep0_failed && !xhci_downstream_ep0_fault_reclaimable())
+  if (device->ep0_failed &&
+      !xhci_downstream_ep0_fault_reclaimable(device->slot_id))
     return XHCI_DISABLE_NOT_READY;
 
   // Outstanding completions must retain their owners.

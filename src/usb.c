@@ -456,16 +456,26 @@ bool usb_lifecycle_inspect(usb_lifecycle_info_t *info) {
     inspection_slot = lifecycle_run.slot_id;
 
   info->quiesced = xhci_downstream_is_quiesced(inspection_slot);
-  info->slot_disabled = xhci_downstream_is_slot_disabled();
-  info->cleaned = xhci_downstream_is_cleaned();
+  info->slot_disabled = xhci_downstream_is_slot_disabled(inspection_slot);
+  info->cleaned = xhci_downstream_is_cleaned(inspection_slot);
 
   if (device.state == USB_DEVICE_ACTIVE)
     return true;
 
   if (device.state == USB_DEVICE_DETACHED) {
-    if (info->quiesced)
-      info->next = USB_LIFECYCLE_RECYCLE;
-    else {
+    if (xhci_downstream_any_owned()) {
+      // A detached USB record is not proof that
+      // the controller has relinquished its slot.
+      //
+      // Recycle only the context whose complete
+      // teardown has already been confirmed.
+      if (info->quiesced && info->slot_disabled && info->cleaned)
+        info->next = USB_LIFECYCLE_RECYCLE;
+      else
+        info->next = USB_LIFECYCLE_BLOCKED;
+    } else {
+      // No downstream context retains ownership.
+      // Enumeration may now be rearmed.
       usb_enum_info_t enumeration = {0};
       if (usb_get_enumeration(&enumeration))
         info->next = USB_LIFECYCLE_REARM;
@@ -1060,8 +1070,7 @@ bool usb_reenum_inspect(usb_reenum_info_t *info) {
     return true;
   }
 
-  if (xhci_downstream_is_quiesced(device.slot_id) || xhci_downstream_is_slot_disabled() ||
-      xhci_downstream_is_cleaned()) {
+  if (xhci_downstream_any_owned()) {
     info->result = USB_REENUM_XHCI_BUSY;
     return true;
   }
@@ -1169,8 +1178,7 @@ bool usb_enum_admission_inspect(usb_enum_admission_info_t *info) {
 
   // Initial enumeration has no previous device
   // generation or downstream slot to reclaim.
-  if (xhci_downstream_is_quiesced(device.slot_id) ||
-      xhci_downstream_is_slot_disabled() || xhci_downstream_is_cleaned()) {
+  if (xhci_downstream_any_owned()) {
     info->result = USB_ENUM_ADMIT_XHCI_BUSY;
     return true;
   }
