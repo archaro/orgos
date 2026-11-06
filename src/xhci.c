@@ -4654,18 +4654,25 @@ bool xhci_downstream_is_cleaned(uint8_t slot_id) {
   return device && device->lifecycle.cleaned;
 }
 
-xhci_cleanup_result_t xhci_downstream_cleanup(xhci_cleanup_info_t *info) {
+xhci_cleanup_result_t xhci_downstream_cleanup(
+    uint8_t slot_id, xhci_cleanup_info_t *info) {
+
   if (!info)
     return XHCI_CLEANUP_NOT_READY;
 
   *info = (xhci_cleanup_info_t){0};
 
-  xhci_device_t *device = &devices[1];
+  // DMA resources may only be released by the
+  // context owning this confirmed hardware slot.
+  xhci_device_t *device = xhci_downstream_by_slot(slot_id);
+
+  if (!device)
+    return XHCI_CLEANUP_NOT_READY;
 
   if (device->lifecycle.cleaned)
     return XHCI_CLEANUP_ALREADY_DONE;
 
-  if (!devices[1].lifecycle.slot_disabled || !devices[1].lifecycle.quiesced ||
+  if (!device->lifecycle.slot_disabled || !device->lifecycle.quiesced ||
       device->slot_id == 0U || !controller_running ||
       !controller_verified || command_outstanding ||
       command_ring_failed || device->ep0_active || device->bulk_out_active)
@@ -4734,10 +4741,8 @@ xhci_stop_result_t xhci_downstream_stop_bulk_out(
     .command_result = XHCI_COMMAND_UNAVAILABLE
   };
 
-  // Stop Endpoint may only operate on a known,
-  // uniquely owned downstream hardware slot.
   xhci_device_t *device = xhci_downstream_by_slot(slot_id);
-
+  if (!device)
     return XHCI_STOP_NOT_READY;
 
   xhci_stop_event_state_t *stop = &device->stop_out;
@@ -4945,7 +4950,10 @@ xhci_stop_result_t xhci_downstream_stop_bulk_in(
   return XHCI_STOP_OK;
 }
 
-xhci_disable_result_t xhci_downstream_disable(xhci_disable_info_t *info) {
+xhci_disable_result_t xhci_downstream_disable(uint8_t slot_id,
+    xhci_disable_info_t *info) {
+
+
   if (!info)
     return XHCI_DISABLE_NOT_READY;
 
@@ -4953,11 +4961,15 @@ xhci_disable_result_t xhci_downstream_disable(xhci_disable_info_t *info) {
     .command_result = XHCI_COMMAND_UNAVAILABLE
   };
 
-  if (devices[1].lifecycle.disable_attempted)
+  // Only the confirmed owner of this hardware
+  // slot may submit its Disable Slot command.
+  xhci_device_t *device = xhci_downstream_by_slot(slot_id);
+  if (!device)
+    return XHCI_DISABLE_NOT_READY;
+  if (device->lifecycle.disable_attempted)
     return XHCI_DISABLE_ALREADY_ATTEMPTED;
 
-  xhci_device_t *device = &devices[1];
-  if (!devices[1].lifecycle.quiesced || devices[1].lifecycle.slot_disabled ||
+  if (!device->lifecycle.quiesced || device->lifecycle.slot_disabled ||
       device->slot_id == 0U || !controller_running ||
       !controller_verified || command_outstanding ||
       command_ring_failed || device->ep0_active ||
@@ -4990,7 +5002,7 @@ xhci_disable_result_t xhci_downstream_disable(xhci_disable_info_t *info) {
 
   // Set before submission. A timeout leaves the controller's
   // state uncertain, so we must not blindly retry.
-  devices[1].lifecycle.disable_attempted = true;
+  device->lifecycle.disable_attempted = true;
   xhci_command_completion_t completion = {0};
   xhci_command_result_t status = xhci_command_submit(&command, &completion);
   info->command_result = status;

@@ -624,16 +624,16 @@ static void usb_lifecycle_service(void) {
     return;
   }
 
-  // Receiver teardown and Stop Endpoint must
-  // operate on the hardware slot originally
-  // owned by this lifecycle executor.
-  //
-  // A change of slot identity is not permission
-  // to issue a command against another device.
+  // All slot-specific teardown operations must
+  // target the slot originally owned by this
+  // lifecycle executor.
   if ((info.next == USB_LIFECYCLE_RECONCILE_IN ||
        info.next == USB_LIFECYCLE_STOP_IN ||
-       info.next == USB_LIFECYCLE_RETIRE_IN) &&
-      (info.slot_id == 0U || info.slot_id != lifecycle_run.slot_id)) {
+       info.next == USB_LIFECYCLE_DISABLE ||
+       info.next == USB_LIFECYCLE_RETIRE_IN ||
+       info.next == USB_LIFECYCLE_CLEANUP) &&
+      (info.slot_id == 0U ||
+       info.slot_id != lifecycle_run.slot_id)) {
     usb_lifecycle_fail(USB_LIFECYCLE_FAULT_BLOCKED);
     return;
   }
@@ -671,7 +671,8 @@ static void usb_lifecycle_service(void) {
     }
     case USB_LIFECYCLE_DISABLE: {
       xhci_disable_info_t result = {0};
-      xhci_disable_result_t status = xhci_downstream_disable(&result);
+      xhci_disable_result_t status =
+          xhci_downstream_disable(lifecycle_run.slot_id, &result);
       lifecycle_run.last_result = (uint32_t)status;
       lifecycle_run.command_result = (uint8_t)result.command_result;
       lifecycle_run.completion_code = result.completion_code;
@@ -687,7 +688,8 @@ static void usb_lifecycle_service(void) {
     }
     case USB_LIFECYCLE_CLEANUP: {
       xhci_cleanup_info_t result = {0};
-      xhci_cleanup_result_t status = xhci_downstream_cleanup(&result);
+      xhci_cleanup_result_t status =
+          xhci_downstream_cleanup(lifecycle_run.slot_id, &result);
       lifecycle_run.last_result = (uint32_t)status;
       succeeded = status == XHCI_CLEANUP_OK;
       break;

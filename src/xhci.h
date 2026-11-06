@@ -302,7 +302,8 @@ typedef struct {
   xhci_command_result_t command_result;
 } xhci_disable_info_t;
 
-xhci_disable_result_t xhci_downstream_disable(xhci_disable_info_t *info);
+xhci_disable_result_t xhci_downstream_disable(uint8_t slot_id,
+    xhci_disable_info_t *info);
 
 typedef enum {
   XHCI_STOP_OK,
@@ -345,7 +346,8 @@ typedef struct {
   uint32_t pages_released;
 } xhci_cleanup_info_t;
 
-xhci_cleanup_result_t xhci_downstream_cleanup(xhci_cleanup_info_t *info);
+xhci_cleanup_result_t xhci_downstream_cleanup(
+    uint8_t slot_id, xhci_cleanup_info_t *info);
 bool xhci_downstream_is_cleaned(uint8_t slot_id);
 bool xhci_downstream_any_owned(void);
 typedef enum {
