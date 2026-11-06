@@ -299,8 +299,8 @@ static usb_enum_result_t configure_bulk( usb_enum_info_t *state) {
   state->bulk_attempted = true;
   xhci_bulk_config_info_t info = {0};
   xhci_bulk_config_result_t result = xhci_downstream_bulk_configure(
-          state->midi.bulk_in, state->midi.bulk_in_mps,
-          state->midi.bulk_out, state->midi.bulk_out_mps, &info);
+    state->slot_id, state->midi.bulk_in, state->midi.bulk_in_mps,
+    state->midi.bulk_out, state->midi.bulk_out_mps, &info);
 
   if (result != XHCI_BULK_CONFIG_OK) {
     // Low byte: configuration result.

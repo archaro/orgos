@@ -2513,19 +2513,26 @@ static bool xhci_bulk_ring_init(dma_buffer_t *buffer) {
 }
 
 xhci_bulk_config_result_t xhci_downstream_bulk_configure(
-    uint8_t in_address, uint16_t in_mps,
-    uint8_t out_address, uint16_t out_mps,
-    xhci_bulk_config_info_t *result) {
+    uint8_t slot_id, uint8_t in_address, uint16_t in_mps,
+    uint8_t out_address, uint16_t out_mps, xhci_bulk_config_info_t *result) {
 
   if (!result)
     return XHCI_BULK_CONFIG_NOT_READY;
 
   *result = (xhci_bulk_config_info_t){0};
 
-  if (devices[1].lifecycle.bulk_attempted)
+  // Only the context owning this downstream slot
+  // may configure its transfer endpoints.
+  xhci_device_t *device = xhci_downstream_by_slot(slot_id);
+
+  if (!device)
+    return XHCI_BULK_CONFIG_NOT_READY;
+
+  // An uncertain Configure Endpoint completion
+  // must not permit a second attempt.
+  if (device->lifecycle.bulk_attempted)
     return XHCI_BULK_CONFIG_ALREADY_ATTEMPTED;
 
-  xhci_device_t *device = &devices[1];
   if (!device->prepared || !device->addressed ||
       device->slot_id == 0U || !controller_running ||
       !controller_verified || command_outstanding ||
@@ -2551,7 +2558,7 @@ xhci_bulk_config_result_t xhci_downstream_bulk_configure(
       (cache.data_line_size & (cache.data_line_size - 1U)))
     return XHCI_BULK_CONFIG_DMA_FAILED;
 
-  devices[1].lifecycle.bulk_attempted = true;
+  device->lifecycle.bulk_attempted = true;
 
   if (!xhci_bulk_ring_init(&device->bulk_in_ring))
     return XHCI_BULK_CONFIG_ALLOCATION_FAILED;
@@ -4593,10 +4600,11 @@ xhci_cleanup_result_t xhci_downstream_cleanup(xhci_cleanup_info_t *info) {
 
   *info = (xhci_cleanup_info_t){0};
 
-  if (devices[1].lifecycle.cleaned)
+  xhci_device_t *device = &devices[1];
+
+  if (device->lifecycle.cleaned)
     return XHCI_CLEANUP_ALREADY_DONE;
 
-  xhci_device_t *device = &devices[1];
   if (!devices[1].lifecycle.slot_disabled || !devices[1].lifecycle.quiesced ||
       device->slot_id == 0U || !controller_running ||
       !controller_verified || command_outstanding ||

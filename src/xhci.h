@@ -489,9 +489,8 @@ typedef struct {
 } xhci_bulk_config_info_t;
 
 xhci_bulk_config_result_t xhci_downstream_bulk_configure(
-    uint8_t in_address, uint16_t in_mps,
-    uint8_t out_address, uint16_t out_mps,
-    xhci_bulk_config_info_t *result);
+    uint8_t slot_id, uint8_t in_address, uint16_t in_mps,
+    uint8_t out_address, uint16_t out_mps, xhci_bulk_config_info_t *result);
 
 typedef enum {
   XHCI_BULK_OUT_OK,
