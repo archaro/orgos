@@ -5015,8 +5015,14 @@ xhci_disable_result_t xhci_downstream_disable(uint8_t slot_id,
   return XHCI_DISABLE_OK;
 }
 
-xhci_recycle_result_t xhci_downstream_recycle(void) {
-  xhci_device_t *device = &devices[1];
+xhci_recycle_result_t xhci_downstream_recycle(uint8_t slot_id) {
+  // Recycling must target the original device
+  // context, even though its USB device record
+  // has already been detached.
+  xhci_device_t *device = xhci_downstream_by_slot(slot_id);
+
+  if (!device)
+    return XHCI_RECYCLE_NOT_READY;
 
   if (!device->lifecycle.slot_disabled || !device->lifecycle.cleaned ||
       !device->lifecycle.quiesced || !controller_running || !controller_verified ||
@@ -5034,11 +5040,14 @@ xhci_recycle_result_t xhci_downstream_recycle(void) {
       return XHCI_RECYCLE_BUSY;
   }
 
-  // Cleanup must have released every allocation.
+  // Every allocation belonging to this device
+  // must have been released before its software
+  // context can be discarded.
   if (device->input.pages || device->output.pages ||
       device->ep0_ring.pages || device->control_buffer.pages ||
       device->bulk_in_ring.pages || device->bulk_out_ring.pages ||
-      device->bulk_in_buffer.pages || device->bulk_out_buffer.pages)
+      device->bulk_in_buffer.pages || device->bulk_out_buffer.pages ||
+      device->interrupt_ring.pages || device->interrupt_buffer.pages)
     return XHCI_RECYCLE_BUSY;
 
   dma_buffer_t *dcbaa_buffer = &controller_dma.dcbaa;

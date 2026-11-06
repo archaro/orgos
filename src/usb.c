@@ -638,6 +638,18 @@ static void usb_lifecycle_service(void) {
     return;
   }
 
+  // Recycling occurs after USB detachment has
+  // cleared the public device record's slot ID.
+  //
+  // The lifecycle executor must still retain
+  // the original hardware slot identity.
+  if (info.next == USB_LIFECYCLE_RECYCLE && (info.slot_id != 0U ||
+       lifecycle_run.slot_id == 0U || !info.quiesced ||
+       !info.slot_disabled || !info.cleaned)) {
+    usb_lifecycle_fail(USB_LIFECYCLE_FAULT_BLOCKED);
+    return;
+  }
+
   // No teardown is needed while the device
   // remains active.
   if (info.next == USB_LIFECYCLE_IDLE)
@@ -700,7 +712,8 @@ static void usb_lifecycle_service(void) {
       break;
     }
     case USB_LIFECYCLE_RECYCLE: {
-      xhci_recycle_result_t status = xhci_downstream_recycle();
+      xhci_recycle_result_t status =
+          xhci_downstream_recycle(lifecycle_run.slot_id);
       lifecycle_run.last_result = (uint32_t)status;
       succeeded = status == XHCI_RECYCLE_OK;
       break;

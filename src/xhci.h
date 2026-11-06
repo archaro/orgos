@@ -357,7 +357,7 @@ typedef enum {
   XHCI_RECYCLE_DMA_FAILED
 } xhci_recycle_result_t;
 
-xhci_recycle_result_t xhci_downstream_recycle(void);
+xhci_recycle_result_t xhci_downstream_recycle(uint8_t slot_id);
 
 typedef enum {
   XHCI_DEVICE_OK,
