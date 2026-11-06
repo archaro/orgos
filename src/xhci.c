@@ -3268,21 +3268,35 @@ xhci_in_reconcile_result_t xhci_bulk_in_quiesced_reconcile(void) {
   return xhci_bulk_in_quiesced_reconcile_device(&devices[1]);
 }
 
-xhci_bulk_in_arm_result_t xhci_bulk_in_stream_start(void) {
-  return xhci_bulk_in_stream_start_device(&devices[1]);
+xhci_bulk_in_arm_result_t xhci_bulk_in_stream_start(uint8_t slot_id) {
+  xhci_device_t *device = xhci_downstream_by_slot(slot_id);
+  return xhci_bulk_in_stream_start_device(device);
 }
 
 void xhci_bulk_in_stream_service(void) {
-  xhci_bulk_in_stream_service_device(&devices[1]);
+  for (unsigned int i = 1U; i < XHCI_MAX_DEVICES; i++) {
+    xhci_device_t *device = &devices[i];
+
+    // Do not service an unassigned or ambiguously
+    // owned hardware slot.
+    if (device->slot_id == 0U ||
+        xhci_downstream_by_slot(device->slot_id) != device)
+      continue;
+
+    xhci_bulk_in_stream_service_device(device);
+  }
 }
 
-bool xhci_bulk_in_stream_get_stats(
+bool xhci_bulk_in_stream_get_stats(uint8_t slot_id,
     xhci_bulk_in_stream_stats_t *result) {
-  return xhci_bulk_in_stream_get_stats_device(&devices[1], result);
+
+  xhci_device_t *device = xhci_downstream_by_slot(slot_id);
+  return xhci_bulk_in_stream_get_stats_device(device, result);
 }
 
-bool xhci_bulk_in_stream_read(xhci_bulk_in_info_t *result) {
-  return xhci_bulk_in_stream_read_device(&devices[1], result);
+bool xhci_bulk_in_stream_read(uint8_t slot_id, xhci_bulk_in_info_t *result) {
+  xhci_device_t *device = xhci_downstream_by_slot(slot_id);
+  return xhci_bulk_in_stream_read_device(device, result);
 }
 
 xhci_bulk_in_retire_result_t xhci_bulk_in_stream_retire(void) {

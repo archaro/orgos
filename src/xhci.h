@@ -563,10 +563,11 @@ typedef struct {
   xhci_bulk_in_arm_result_t last_arm_result;
 } xhci_bulk_in_stream_stats_t;
 
-xhci_bulk_in_arm_result_t xhci_bulk_in_stream_start(void);
+xhci_bulk_in_arm_result_t xhci_bulk_in_stream_start( uint8_t slot_id);
 void xhci_bulk_in_stream_service(void);
-bool xhci_bulk_in_stream_get_stats(xhci_bulk_in_stream_stats_t *result);
-bool xhci_bulk_in_stream_read(xhci_bulk_in_info_t *result);
+bool xhci_bulk_in_stream_get_stats( uint8_t slot_id,
+    xhci_bulk_in_stream_stats_t *result);
+bool xhci_bulk_in_stream_read( uint8_t slot_id, xhci_bulk_in_info_t *result);
 
 typedef enum {
   XHCI_BULK_IN_RETIRE_OK,

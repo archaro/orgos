@@ -1866,14 +1866,22 @@ static void cmd_usb_test_midiin(const char *args) {
     cmd_usb_test_midiin_stress(stress_args);
     return;
   }
+  // The manual receiver commands operate on the
+  // currently tracked downstream device.
+  usb_device_t device = {0};
+  bool have_slot = usb_get_device(&device) && device.slot_id != 0U;
   if (next_word_is(&args, "stream") && end_of_args(args)) {
     usb_enum_info_t enumeration = {0};
-    if (!usb_get_enumeration(&enumeration) ||
-        enumeration.result != USB_ENUM_OK) {
-      console_puts("USB-MIDI device not enumerated.\n");
+    if (!have_slot ||
+        device.state != USB_DEVICE_ACTIVE ||
+        !usb_get_enumeration(&enumeration) ||
+        enumeration.result != USB_ENUM_OK ||
+        enumeration.slot_id != device.slot_id) {
+      console_puts("No active USB-MIDI device.\n");
       return;
     }
-    xhci_bulk_in_arm_result_t result = xhci_bulk_in_stream_start();
+    xhci_bulk_in_arm_result_t result =
+        xhci_bulk_in_stream_start(device.slot_id);
     console_printf("USB-MIDI IN stream start: %s (%u)\n",
         usb_bulk_in_arm_result_name(result), (unsigned int)result);
     return;
@@ -1886,7 +1894,7 @@ static void cmd_usb_test_midiin(const char *args) {
       return;
     }
     xhci_bulk_in_info_t info = {0};
-    if (!xhci_bulk_in_stream_read(&info)) {
+    if (!have_slot || !xhci_bulk_in_stream_read(device.slot_id, &info)) {
       console_puts("USB-MIDI IN queue empty.\n");
       return;
     }
@@ -1907,7 +1915,9 @@ static void cmd_usb_test_midiin(const char *args) {
   }
   if (next_word_is(&args, "status") && end_of_args(args)) {
     xhci_bulk_in_stream_stats_t stats = {0};
-    if (!xhci_bulk_in_stream_get_stats(&stats) || !stats.started) {
+    if (!have_slot ||
+        !xhci_bulk_in_stream_get_stats(device.slot_id, &stats) ||
+        !stats.started) {
       console_puts("USB-MIDI IN stream: NOT STARTED\n");
       return;
     }

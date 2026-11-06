@@ -14,6 +14,8 @@ static usb_midi_in_stress_info_t in_stress;
 static uint64_t in_stress_started;
 static uint64_t in_stress_ring_base;
 static unsigned int in_stress_first_index;
+static uint8_t in_stress_slot_id;
+static uint32_t in_stress_generation;
 
 static void usb_midi_in_stress_fail(usb_midi_in_stress_error_t error) {
   in_stress.error = error;
@@ -24,14 +26,16 @@ static void usb_midi_in_stress_fail(usb_midi_in_stress_error_t error) {
 bool usb_midi_in_stress_reset(void) {
   usb_device_t device = {0};
   usb_enum_info_t enumeration = {0};
-  xhci_bulk_in_stream_stats_t stream = {0};
 
-  // Only reset between device generations,
-  // after the previous teardown and rearm.
+  // Reset is permitted only after the previous
+  // device has been detached, its xHCI context
+  // recycled and enumeration rearmed.
+  // With the current single-downstream-device
+  // admission policy, no receiver can remain
+  // active after these conditions are satisfied.
   if (!usb_get_device(&device) || device.state != USB_DEVICE_DETACHED ||
       usb_get_enumeration(&enumeration) || xhci_downstream_is_quiesced() ||
-      xhci_downstream_is_cleaned() ||
-      !xhci_bulk_in_stream_get_stats(&stream) || stream.started ||
+      xhci_downstream_is_slot_disabled() || xhci_downstream_is_cleaned() ||
       in_stress.state == USB_MIDI_IN_STRESS_RUNNING)
     return false;
 
@@ -41,6 +45,8 @@ bool usb_midi_in_stress_reset(void) {
   in_stress_started = 0U;
   in_stress_ring_base = 0U;
   in_stress_first_index = 0U;
+  in_stress_slot_id = 0U;
+  in_stress_generation = 0U;
 
   return true;
 }
@@ -52,15 +58,17 @@ bool usb_midi_in_stress_start(void) {
   usb_enum_info_t enumeration = {0};
   usb_device_t device = {0};
   if (!usb_get_enumeration(&enumeration) ||
-      enumeration.result != USB_ENUM_OK ||
-      !usb_get_device(&device) || device.state != USB_DEVICE_ACTIVE)
+      enumeration.result != USB_ENUM_OK || !usb_get_device(&device) ||
+      device.state != USB_DEVICE_ACTIVE || device.slot_id == 0U ||
+      device.slot_id != enumeration.slot_id)
     return false;
 
   xhci_bulk_in_stream_stats_t stream = {0};
-  if (!xhci_bulk_in_stream_get_stats(&stream) || stream.started)
+  if (!xhci_bulk_in_stream_get_stats(device.slot_id, &stream) ||
+      stream.started)
     return false;
 
-  if (xhci_bulk_in_stream_start() != XHCI_BULK_IN_ARM_OK)
+  if (xhci_bulk_in_stream_start(device.slot_id) != XHCI_BULK_IN_ARM_OK)
     return false;
 
   in_stress = (usb_midi_in_stress_info_t){
@@ -69,40 +77,57 @@ bool usb_midi_in_stress_start(void) {
   in_stress_started = timer_now_us();
   in_stress_ring_base = 0U;
   in_stress_first_index = 0U;
+  // Pin this diagnostic to the device incarnation
+  // which actually started the receive stream.
+  in_stress_slot_id = device.slot_id;
+  in_stress_generation = device.generation;
 
   return true;
 }
 
 void usb_midi_in_stress_service(void) {
-  usb_device_t device = {0};
+  if (in_stress.state == USB_MIDI_IN_STRESS_IDLE)
+    return;
 
+  usb_device_t device = {0};
+  bool owner_present = in_stress_slot_id != 0U && usb_get_device(&device) &&
+      device.slot_id == in_stress_slot_id &&
+      device.generation == in_stress_generation;
+
+  // A different device generation must never
+  // inherit the result of this stress test.
   if (in_stress.state == USB_MIDI_IN_STRESS_RUNNING &&
-      (!usb_get_device(&device) || device.state != USB_DEVICE_ACTIVE)) {
+      (!owner_present || device.state != USB_DEVICE_ACTIVE)) {
     usb_midi_in_stress_fail(USB_MIDI_IN_STRESS_DISCONNECTED);
     return;
   }
 
-  if (in_stress.state == USB_MIDI_IN_STRESS_IDLE)
+  // Following disconnection or recycling, do
+  // not inspect a slot which may have acquired
+  // another hardware owner.
+  if (!owner_present)
     return;
 
   // Once the diagnostic has finished, retain its
-  // result but continue consuming queued transfers.
-  // The Bulk IN endpoint remains active.
+  // result but continue consuming queued transfers
+  // belonging to this same device incarnation.
   if (in_stress.state != USB_MIDI_IN_STRESS_RUNNING) {
     xhci_bulk_in_info_t discarded;
-    while (xhci_bulk_in_stream_read(&discarded))
+    while (xhci_bulk_in_stream_read(in_stress_slot_id, &discarded))
       in_stress.discarded_transfers++;
+
     return;
   }
 
   xhci_bulk_in_stream_stats_t stream = {0};
-  if (!xhci_bulk_in_stream_get_stats(&stream) || stream.failed) {
+  if (!xhci_bulk_in_stream_get_stats(in_stress_slot_id, &stream) ||
+      stream.failed) {
     usb_midi_in_stress_fail(USB_MIDI_IN_STRESS_STREAM_ERROR);
     return;
   }
 
   xhci_bulk_in_info_t info;
-  while (xhci_bulk_in_stream_read(&info)) {
+  while (xhci_bulk_in_stream_read(in_stress_slot_id, &info)) {
     in_stress.fault_transfer = in_stress.transfers + 1U;
     // Verify that each completion refers to the
     // transfer TRB which we actually submitted.
