@@ -88,6 +88,22 @@
 #define XHCI_COMPLETION_SHORT_PACKET 13U
 
 typedef struct {
+  // Operations which must not be retried after
+  // an uncertain controller completion.
+  bool slot_requested;
+  bool address_attempted;
+  bool ep0_update_attempted;
+  bool bulk_attempted;
+  bool disable_attempted;
+  bool stop_out_attempted;
+  bool stop_in_attempted;
+  // State established by controlled teardown.
+  bool quiesced;
+  bool slot_disabled;
+  bool cleaned;
+} xhci_device_lifecycle_t;
+
+typedef struct {
   dma_buffer_t input;
   dma_buffer_t output;
   dma_buffer_t ep0_ring;
@@ -134,6 +150,7 @@ typedef struct {
   unsigned int interrupt_index;
   unsigned int interrupt_cycle;
   bool interrupt_wrap_pending;
+  xhci_device_lifecycle_t lifecycle;
 } xhci_device_t;
 
 typedef enum {
@@ -159,10 +176,6 @@ static bool hub_interrupt_attempted;
 static xhci_device_t devices[XHCI_MAX_DEVICES];
 #define internal_hub devices[0]
 static bool address_attempted;
-static bool downstream_address_attempted;
-static bool downstream_ep0_update_attempted;
-static bool downstream_bulk_attempted;
-static bool downstream_quiesced;
 static bool device_addressed;
 static xhci_address_info_t address_info;
 static xhci_dma_t controller_dma;
@@ -224,12 +237,6 @@ static xhci_event_waiter_t *hub_notify_waiter;
 static bool hub_notify_started;
 
 static bool slot_requested;
-static bool downstream_slot_requested;
-static bool downstream_disable_attempted;
-static bool downstream_stop_out_attempted;
-static bool downstream_stop_in_attempted;
-static bool downstream_slot_disabled;
-static bool downstream_cleaned;
 static uint8_t internal_hub_slot;
 
 static uint32_t xhci_read(uint32_t offset) {
@@ -1962,7 +1969,7 @@ xhci_slot_result_t xhci_enable_downstream_slot(
   // Do not repeat Enable Slot for the same device incarnation.
   // An uncertain completion may have succeeded, so the guard
   // is cleared only after confirmed teardown and successful recycling.
-  if (downstream_slot_requested)
+  if (devices[1].lifecycle.slot_requested)
     return XHCI_SLOT_ALREADY_REQUESTED;
 
   // The upstream hub must already be operational.
@@ -1984,7 +1991,7 @@ xhci_slot_result_t xhci_enable_downstream_slot(
     .control = XHCI_TRB_ENABLE_SLOT << XHCI_TRB_TYPE_SHIFT
   };
 
-  downstream_slot_requested = true;
+  devices[1].lifecycle.slot_requested = true;
   xhci_command_completion_t completion = {0};
   xhci_command_result_t status = xhci_command_submit(&command, &completion);
   result->command_result = status;
@@ -2343,7 +2350,7 @@ xhci_bulk_config_result_t xhci_downstream_bulk_configure(
 
   *result = (xhci_bulk_config_info_t){0};
 
-  if (downstream_bulk_attempted)
+  if (devices[1].lifecycle.bulk_attempted)
     return XHCI_BULK_CONFIG_ALREADY_ATTEMPTED;
 
   xhci_device_t *device = &devices[1];
@@ -2372,7 +2379,7 @@ xhci_bulk_config_result_t xhci_downstream_bulk_configure(
       (cache.data_line_size & (cache.data_line_size - 1U)))
     return XHCI_BULK_CONFIG_DMA_FAILED;
 
-  downstream_bulk_attempted = true;
+  devices[1].lifecycle.bulk_attempted = true;
 
   if (!xhci_bulk_ring_init(&device->bulk_in_ring))
     return XHCI_BULK_CONFIG_ALLOCATION_FAILED;
@@ -2499,7 +2506,7 @@ xhci_bulk_out_result_t xhci_downstream_bulk_out(
 
   *result = (xhci_bulk_out_info_t){0};
   xhci_device_t *device = &devices[1];
-  if (!data || downstream_quiesced || !device->bulk_out_ready ||
+  if (!data || devices[1].lifecycle.quiesced || !device->bulk_out_ready ||
       device->bulk_out_active || device->bulk_out_failed ||
       !controller_running || !controller_verified ||
       command_outstanding || command_ring_failed ||
@@ -2710,7 +2717,7 @@ static xhci_bulk_in_arm_result_t xhci_bulk_in_arm_one(void) {
     return XHCI_BULK_IN_ARM_ALREADY_STARTED;
 
   xhci_device_t *device = &devices[1];
-  if (downstream_quiesced || !device->bulk_in_ready || !device->addressed ||
+  if (devices[1].lifecycle.quiesced || !device->bulk_in_ready || !device->addressed ||
       !controller_running || !controller_verified ||
       command_ring_failed || dispatch_fault != XHCI_DISPATCH_NONE ||
       device->bulk_in_ring.owner != DMA_OWNER_DEVICE)
@@ -2848,7 +2855,7 @@ xhci_in_reconcile_result_t xhci_bulk_in_quiesced_reconcile(void) {
 
   // Never inspect an active stream or a controller
   // whose event-dispatch state is uncertain.
-  if (!downstream_quiesced || downstream_slot_disabled ||
+  if (!devices[1].lifecycle.quiesced || devices[1].lifecycle.slot_disabled ||
       dispatch_fault != XHCI_DISPATCH_NONE)
     return XHCI_IN_RECONCILE_NOT_READY;
 
@@ -2896,7 +2903,7 @@ xhci_bulk_in_arm_result_t xhci_bulk_in_stream_start(void) {
 }
 
 void xhci_bulk_in_stream_service(void) {
-  if (!bulk_in_stream_started || bulk_in_stream_failed || downstream_quiesced)
+  if (!bulk_in_stream_started || bulk_in_stream_failed || devices[1].lifecycle.quiesced)
     return;
 
   xhci_bulk_in_info_t info;
@@ -2994,8 +3001,8 @@ xhci_bulk_in_retire_result_t xhci_bulk_in_stream_retire(void) {
 
   // The controller must have relinquished
   // the slot before retiring receiver state.
-  if (!downstream_quiesced || !downstream_slot_disabled ||
-      downstream_cleaned || !controller_running ||
+  if (!devices[1].lifecycle.quiesced || !devices[1].lifecycle.slot_disabled ||
+      devices[1].lifecycle.cleaned || !controller_running ||
       !controller_verified || command_outstanding ||
       command_ring_failed || dispatch_fault != XHCI_DISPATCH_NONE)
     return XHCI_BULK_IN_RETIRE_NOT_READY;
@@ -3235,7 +3242,7 @@ xhci_address_result_t xhci_address_downstream(xhci_address_info_t *result) {
   *result = (xhci_address_info_t){0};
   xhci_device_t *device = &devices[1];
   // Never repeat Address Device after an uncertain completion.
-  if (downstream_address_attempted)
+  if (devices[1].lifecycle.address_attempted)
     return XHCI_ADDRESS_ALREADY_ATTEMPTED;
 
   // The parent hub must already be registered as a hub
@@ -3302,7 +3309,7 @@ xhci_address_result_t xhci_address_downstream(xhci_address_info_t *result) {
         ((uint32_t)device->slot_id << 24)
   };
 
-  downstream_address_attempted = true;
+  devices[1].lifecycle.address_attempted = true;
   xhci_command_completion_t completion = {0};
   xhci_command_result_t status = xhci_command_submit(&command, &completion);
   result->command_result = status;
@@ -3354,7 +3361,7 @@ xhci_ep0_update_result_t xhci_downstream_ep0_update(
   *result = (xhci_ep0_update_info_t){0};
 
   xhci_device_t *device = &devices[1];
-  if (downstream_ep0_update_attempted)
+  if (devices[1].lifecycle.ep0_update_attempted)
     return XHCI_EP0_UPDATE_ALREADY_ATTEMPTED;
 
   if (!device->prepared || !device->addressed ||
@@ -3431,7 +3438,7 @@ xhci_ep0_update_result_t xhci_downstream_ep0_update(
   };
 
   // An uncertain command completion must not be retried.
-  downstream_ep0_update_attempted = true;
+  devices[1].lifecycle.ep0_update_attempted = true;
   xhci_command_completion_t completion = {0};
   xhci_command_result_t status = xhci_command_submit(&command, &completion);
   result->command_result = status;
@@ -3767,7 +3774,7 @@ xhci_control_result_t xhci_control_no_data(
 xhci_control_result_t xhci_downstream_control_in(
     const xhci_setup_packet_t *setup, xhci_control_info_t *result) {
 
-  if (downstream_quiesced || !setup ||
+  if (devices[1].lifecycle.quiesced || !setup ||
       !(setup->request_type & 0x80U) || setup->length == 0U)
     return XHCI_CONTROL_NOT_READY;
 
@@ -3777,7 +3784,7 @@ xhci_control_result_t xhci_downstream_control_in(
 xhci_control_result_t xhci_downstream_control_no_data(
     const xhci_setup_packet_t *setup, xhci_control_info_t *result) {
 
-  if (downstream_quiesced || !setup || setup->length != 0U)
+  if (devices[1].lifecycle.quiesced || !setup || setup->length != 0U)
     return XHCI_CONTROL_NOT_READY;
 
   return xhci_control_transfer(&devices[1], setup, result);
@@ -4160,15 +4167,15 @@ xhci_hub_notify_result_t xhci_hub_notify_resume(void) {
 }
 
 void xhci_downstream_quiesce(void) {
-  downstream_quiesced = true;
+  devices[1].lifecycle.quiesced = true;
 }
 
 bool xhci_downstream_is_quiesced(void) {
-  return downstream_quiesced;
+  return devices[1].lifecycle.quiesced;
 }
 
 bool xhci_downstream_is_slot_disabled(void) {
-  return downstream_slot_disabled;
+  return devices[1].lifecycle.slot_disabled;
 }
 
 static bool xhci_downstream_ep0_state(uint8_t *state) {
@@ -4178,7 +4185,7 @@ static bool xhci_downstream_ep0_state(uint8_t *state) {
   xhci_device_t *device = &devices[1];
 
   if (!device->addressed || device->slot_id == 0U ||
-      downstream_slot_disabled || device->output.owner != DMA_OWNER_DEVICE ||
+      devices[1].lifecycle.slot_disabled || device->output.owner != DMA_OWNER_DEVICE ||
       (device->context_size != 32U && device->context_size != 64U))
     return false;
 
@@ -4203,7 +4210,7 @@ bool xhci_downstream_ep0_fault_reclaimable(void) {
   if (device->slot_id == 0U || !device->addressed ||
       !controller_running || !controller_verified ||
       command_outstanding || command_ring_failed ||
-      dispatch_fault != XHCI_DISPATCH_NONE || downstream_slot_disabled ||
+      dispatch_fault != XHCI_DISPATCH_NONE || devices[1].lifecycle.slot_disabled ||
       device->ep0_active || !device->ep0_failed ||
       !device->ep0_submitted || !device->ep0_completion_seen ||
       device->ep0_completion_code == 0U ||
@@ -4238,7 +4245,7 @@ static bool xhci_downstream_endpoint_states(
 
   xhci_device_t *device = &devices[1];
   if (!device->addressed || device->slot_id == 0U ||
-      downstream_slot_disabled || device->output.owner != DMA_OWNER_DEVICE ||
+      devices[1].lifecycle.slot_disabled || device->output.owner != DMA_OWNER_DEVICE ||
       (device->context_size != 32U && device->context_size != 64U))
     return false;
 
@@ -4268,7 +4275,7 @@ bool xhci_downstream_transfer_state(xhci_downstream_transfer_state_t *state) {
   *state = (xhci_downstream_transfer_state_t){0};
   xhci_device_t *device = &devices[1];
   state->slot_id = device->slot_id;
-  state->quiesced = downstream_quiesced;
+  state->quiesced = devices[1].lifecycle.quiesced;
   state->ep0_active = device->ep0_active;
   state->ep0_failed = device->ep0_failed;
   state->ep0_submitted = device->ep0_submitted;
@@ -4317,7 +4324,7 @@ static bool xhci_release_buffer(
 }
 
 bool xhci_downstream_is_cleaned(void) {
-  return downstream_cleaned;
+  return devices[1].lifecycle.cleaned;
 }
 
 xhci_cleanup_result_t xhci_downstream_cleanup(xhci_cleanup_info_t *info) {
@@ -4326,11 +4333,11 @@ xhci_cleanup_result_t xhci_downstream_cleanup(xhci_cleanup_info_t *info) {
 
   *info = (xhci_cleanup_info_t){0};
 
-  if (downstream_cleaned)
+  if (devices[1].lifecycle.cleaned)
     return XHCI_CLEANUP_ALREADY_DONE;
 
   xhci_device_t *device = &devices[1];
-  if (!downstream_slot_disabled || !downstream_quiesced ||
+  if (!devices[1].lifecycle.slot_disabled || !devices[1].lifecycle.quiesced ||
       device->slot_id == 0U || !controller_running ||
       !controller_verified || command_outstanding ||
       command_ring_failed || device->ep0_active || device->bulk_out_active)
@@ -4385,7 +4392,7 @@ xhci_cleanup_result_t xhci_downstream_cleanup(xhci_cleanup_info_t *info) {
   device->prepared = false;
   device->addressed = false;
 
-  downstream_cleaned = true;
+  devices[1].lifecycle.cleaned = true;
   return XHCI_CLEANUP_OK;
 }
 
@@ -4397,11 +4404,11 @@ xhci_stop_result_t xhci_downstream_stop_bulk_out( xhci_stop_info_t *info) {
     .command_result = XHCI_COMMAND_UNAVAILABLE
   };
 
-  if (downstream_stop_out_attempted)
+  if (devices[1].lifecycle.stop_out_attempted)
     return XHCI_STOP_ALREADY_ATTEMPTED;
 
   xhci_device_t *device = &devices[1];
-  if (!downstream_quiesced || downstream_slot_disabled ||
+  if (!devices[1].lifecycle.quiesced || devices[1].lifecycle.slot_disabled ||
       !device->addressed || !device->bulk_out_ready ||
       device->slot_id == 0U || !controller_running ||
       !controller_verified || command_outstanding ||
@@ -4444,7 +4451,7 @@ xhci_stop_result_t xhci_downstream_stop_bulk_out( xhci_stop_info_t *info) {
         ((uint32_t)device->slot_id << 24)
   };
 
-  downstream_stop_out_attempted = true;
+  devices[1].lifecycle.stop_out_attempted = true;
   stop_out_event = (xhci_stop_event_state_t){
     .armed = true,
     .slot_id = device->slot_id,
@@ -4488,11 +4495,11 @@ xhci_stop_result_t xhci_downstream_stop_bulk_in(xhci_stop_info_t *info) {
     .command_result = XHCI_COMMAND_UNAVAILABLE
   };
 
-  if (downstream_stop_in_attempted)
+  if (devices[1].lifecycle.stop_in_attempted)
     return XHCI_STOP_ALREADY_ATTEMPTED;
 
   xhci_device_t *device = &devices[1];
-  if (!downstream_quiesced || downstream_slot_disabled ||
+  if (!devices[1].lifecycle.quiesced || devices[1].lifecycle.slot_disabled ||
       !device->addressed || !device->bulk_in_ready ||
       !bulk_in_stream_started || device->slot_id == 0U ||
       !controller_running || !controller_verified ||
@@ -4539,7 +4546,7 @@ xhci_stop_result_t xhci_downstream_stop_bulk_in(xhci_stop_info_t *info) {
         ((uint32_t)device->slot_id << 24)
   };
 
-  downstream_stop_in_attempted = true;
+  devices[1].lifecycle.stop_in_attempted = true;
 
   stop_in_event = (xhci_stop_event_state_t){
     .armed = true,
@@ -4603,11 +4610,11 @@ xhci_disable_result_t xhci_downstream_disable(xhci_disable_info_t *info) {
     .command_result = XHCI_COMMAND_UNAVAILABLE
   };
 
-  if (downstream_disable_attempted)
+  if (devices[1].lifecycle.disable_attempted)
     return XHCI_DISABLE_ALREADY_ATTEMPTED;
 
   xhci_device_t *device = &devices[1];
-  if (!downstream_quiesced || downstream_slot_disabled ||
+  if (!devices[1].lifecycle.quiesced || devices[1].lifecycle.slot_disabled ||
       device->slot_id == 0U || !controller_running ||
       !controller_verified || command_outstanding ||
       command_ring_failed || device->ep0_active ||
@@ -4639,7 +4646,7 @@ xhci_disable_result_t xhci_downstream_disable(xhci_disable_info_t *info) {
 
   // Set before submission. A timeout leaves the controller's
   // state uncertain, so we must not blindly retry.
-  downstream_disable_attempted = true;
+  devices[1].lifecycle.disable_attempted = true;
   xhci_command_completion_t completion = {0};
   xhci_command_result_t status = xhci_command_submit(&command, &completion);
   info->command_result = status;
@@ -4648,15 +4655,15 @@ xhci_disable_result_t xhci_downstream_disable(xhci_disable_info_t *info) {
   if (status != XHCI_COMMAND_OK || completion.slot_id != device->slot_id)
     return XHCI_DISABLE_COMMAND_FAILED;
 
-  downstream_slot_disabled = true;
+  devices[1].lifecycle.slot_disabled = true;
   return XHCI_DISABLE_OK;
 }
 
 xhci_recycle_result_t xhci_downstream_recycle(void) {
   xhci_device_t *device = &devices[1];
 
-  if (!downstream_slot_disabled || !downstream_cleaned ||
-      !downstream_quiesced || !controller_running || !controller_verified ||
+  if (!devices[1].lifecycle.slot_disabled || !devices[1].lifecycle.cleaned ||
+      !devices[1].lifecycle.quiesced || !controller_running || !controller_verified ||
       command_outstanding || command_ring_failed || device->slot_id == 0U)
     return XHCI_RECYCLE_NOT_READY;
 
@@ -4703,19 +4710,6 @@ xhci_recycle_result_t xhci_downstream_recycle(void) {
   // All downstream allocations have been freed.
   // Discard the old software device context.
   *device = (xhci_device_t){0};
-
-  // These guards belong to the old device
-  // generation, not to the controller lifetime.
-  downstream_slot_requested = false;
-  downstream_address_attempted = false;
-  downstream_ep0_update_attempted = false;
-  downstream_bulk_attempted = false;
-  downstream_quiesced = false;
-  downstream_disable_attempted = false;
-  downstream_slot_disabled = false;
-  downstream_cleaned = false;
-  downstream_stop_out_attempted = false;
-  downstream_stop_in_attempted = false;
 
   bulk_in_state = XHCI_BULK_IN_IDLE;
   bulk_in_info = (xhci_bulk_in_info_t){0};
