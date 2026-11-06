@@ -60,8 +60,12 @@
 
 #define PCI_CMD_BUS_MASTER (1U << 2)
 
+#define XHCI_EP0_TYPE_CONTROL 4U
+#define XHCI_EP0_MAX_PACKET 64U
+
 #define XHCI_PORT_CCS     (1U << 0)
 #define XHCI_PORT_PED     (1U << 1)
+#define XHCI_CONTEXT_SIZE_FLAG (1U << 2)
 #define XHCI_PORT_OCA     (1U << 3)
 #define XHCI_PORT_PR      (1U << 4)
 #define XHCI_PORT_PP      (1U << 9)
@@ -270,6 +274,94 @@ static xhci_device_t *xhci_device_by_slot(uint8_t slot_id) {
   }
 
   return found;
+}
+
+static xhci_device_t *xhci_device_by_connection(
+    uint8_t root_port, uint8_t hub_slot, uint8_t hub_port) {
+
+  if (root_port == 0U || hub_slot == 0U || hub_port == 0U)
+    return NULL;
+
+  xhci_device_t *found = NULL;
+
+  // Entry zero is the permanent internal hub.
+  for (unsigned int i = 1U; i < XHCI_MAX_DEVICES; i++) {
+    xhci_device_t *device = &devices[i];
+    if (!device->lifecycle.slot_requested || device->root_port != root_port ||
+        device->hub_slot != hub_slot || device->hub_port != hub_port)
+      continue;
+
+    // A connection must never have two software owners.
+    if (found)
+      return NULL;
+
+    found = device;
+  }
+
+  return found;
+}
+
+static bool xhci_device_context_available( const xhci_device_t *device) {
+
+  if (!device)
+    return false;
+
+  // A context is available only when it has no
+  // hardware identity, outstanding reservation
+  // or retained DMA allocations.
+  return !device->lifecycle.slot_requested && device->slot_id == 0U &&
+      !device->prepared && !device->addressed && device->input.pages == 0U &&
+      device->output.pages == 0U && device->ep0_ring.pages == 0U &&
+      device->bulk_in_ring.pages == 0U && device->bulk_out_ring.pages == 0U &&
+      device->bulk_in_buffer.pages == 0U &&
+      device->bulk_out_buffer.pages == 0U &&
+      device->control_buffer.pages == 0U &&
+      device->interrupt_ring.pages == 0U &&
+      device->interrupt_buffer.pages == 0U;
+}
+
+static xhci_device_t *xhci_downstream_context_reserve(uint8_t root_port,
+    uint8_t hub_slot, uint8_t hub_port, xhci_slot_result_t *failure) {
+
+  if (!failure)
+    return NULL;
+
+  *failure = XHCI_SLOT_NOT_READY;
+
+  if (root_port == 0U || hub_slot == 0U || hub_port == 0U)
+    return NULL;
+
+  // Reject a connection already owned by another
+  // context, including an uncertain slot allocation.
+  for (unsigned int i = 1U; i < XHCI_MAX_DEVICES; i++) {
+    xhci_device_t *device = &devices[i];
+    if (device->lifecycle.slot_requested && device->root_port == root_port &&
+        device->hub_slot == hub_slot && device->hub_port == hub_port) {
+      *failure = XHCI_SLOT_ALREADY_REQUESTED;
+      return NULL;
+    }
+  }
+
+  // First-fit allocation is sufficient while all
+  // device contexts have identical capabilities.
+  for (unsigned int i = 1U; i < XHCI_MAX_DEVICES; i++) {
+    xhci_device_t *device = &devices[i];
+
+    if (!xhci_device_context_available(device))
+      continue;
+
+    // Reserve topology before the irreversible
+    // Enable Slot command is submitted.
+    device->root_port = root_port;
+    device->hub_slot = hub_slot;
+    device->hub_port = hub_port;
+    device->lifecycle.slot_requested = true;
+
+    return device;
+  }
+
+  // No context can be safely allocated.
+  return NULL;
 }
 
 static uint32_t xhci_read(uint32_t offset) {
@@ -2017,24 +2109,10 @@ xhci_slot_result_t xhci_enable_downstream_slot(uint8_t hub_port,
   result->command_result = XHCI_COMMAND_UNAVAILABLE;
 
   // Only direct downstream ports of the internal
-  // four-port USB 2.0 hub are supported for now.
+  // four-port USB 2.0 hub are currently supported.
   if (hub_port == 0U || hub_port > 4U)
     return XHCI_SLOT_NOT_READY;
 
-  xhci_device_t *device = &devices[1];
-
-  // Never repeat Enable Slot after an uncertain
-  // completion. This also prevents an old device
-  // incarnation from acquiring another slot.
-  if (device->lifecycle.slot_requested)
-    return XHCI_SLOT_ALREADY_REQUESTED;
-
-  // A previously owned context must be recycled
-  // before it can participate in another allocation.
-  if (device->slot_id != 0U || device->prepared || device->addressed)
-    return XHCI_SLOT_NOT_READY;
-
-  // The upstream hub must already be operational.
   if (!internal_hub.prepared || !internal_hub.addressed ||
       internal_hub.slot_id == 0U ||
       !controller_running || !controller_verified ||
@@ -2045,36 +2123,17 @@ xhci_slot_result_t xhci_enable_downstream_slot(uint8_t hub_port,
   if (!xhci_probe(&controller) || controller.max_slots < 2U)
     return XHCI_SLOT_NOT_READY;
 
-  // A physical hub connection must not be owned
-  // by two downstream software contexts.
-  //
-  // This also recognises contexts whose hardware
-  // slot allocation has an uncertain outcome.
-  for (unsigned int i = 1U; i < XHCI_MAX_DEVICES; i++) {
-    xhci_device_t *other = &devices[i];
-    if (other == device || (!other->lifecycle.slot_requested &&
-         other->slot_id == 0U))
-      continue;
+  // Obtain a software context and reserve this
+  // connection before requesting a hardware slot.
+  xhci_slot_result_t failure = XHCI_SLOT_NOT_READY;
+  xhci_device_t *device = xhci_downstream_context_reserve(
+      internal_hub.root_port, internal_hub.slot_id, hub_port, &failure);
 
-    if (other->root_port == internal_hub.root_port &&
-        other->hub_slot == internal_hub.slot_id &&
-        other->hub_port == hub_port)
-      return XHCI_SLOT_NOT_READY;
-  }
+  if (!device)
+    return failure;
 
-  // Reserve the connection's software identity
-  // before submitting an irreversible command.
-  //
-  // If the command times out, this association
-  // survives for diagnosis and controlled recovery.
-  device->root_port = internal_hub.root_port;
-  device->hub_slot = internal_hub.slot_id;
-  device->hub_port = hub_port;
-  device->lifecycle.slot_requested = true;
-
-  // Enable Slot reserves a controller slot. The
-  // topology is not programmed into hardware until
-  // the later Address Device operation.
+  // Enable Slot reserves a controller slot.
+  // Topology is programmed later by Address Device.
   xhci_trb_t command = {
     .parameter = 0U,
     .status = 0U,
@@ -2083,6 +2142,7 @@ xhci_slot_result_t xhci_enable_downstream_slot(uint8_t hub_port,
 
   xhci_command_completion_t completion = {0};
   xhci_command_result_t status = xhci_command_submit(&command, &completion);
+
   result->command_result = status;
   result->completion_code = completion.completion_code;
   result->controller_status = completion.controller_status;
@@ -2091,26 +2151,22 @@ xhci_slot_result_t xhci_enable_downstream_slot(uint8_t hub_port,
   if (status != XHCI_COMMAND_OK)
     return XHCI_SLOT_COMMAND_FAILED;
 
-  // The controller must return a valid hardware
-  // slot distinct from every existing software owner.
   if (completion.slot_id == 0U || completion.slot_id > controller.max_slots)
     return XHCI_SLOT_INVALID_ID;
 
+  // Never associate one controller slot with
+  // two software contexts.
   for (unsigned int i = 0U; i < XHCI_MAX_DEVICES; i++) {
     if (&devices[i] != device && devices[i].slot_id == completion.slot_id)
       return XHCI_SLOT_INVALID_ID;
   }
 
-  // Only now associate the confirmed hardware slot
-  // with its already-reserved software context.
+  // The software connection was reserved before
+  // submission. Now bind the hardware slot to it.
   device->slot_id = completion.slot_id;
 
   return XHCI_SLOT_OK;
 }
-
-#define XHCI_CONTEXT_SIZE_FLAG (1U << 2)
-#define XHCI_EP0_TYPE_CONTROL 4U
-#define XHCI_EP0_MAX_PACKET 64U
 
 static bool xhci_device_alloc_buffers(xhci_device_t *device,
     uint32_t context_size) {
@@ -2301,7 +2357,14 @@ xhci_device_result_t xhci_downstream_prepare(
     return XHCI_DEVICE_NOT_READY;
 
   *result = (xhci_device_info_t){0};
-  xhci_device_t *device = &devices[1];
+  // Locate the context reserved for this physical
+  // connection before Enable Slot was submitted.
+  xhci_device_t *device = xhci_device_by_connection(
+      internal_hub.root_port, internal_hub.slot_id, hub_port);
+
+  if (!device)
+    return XHCI_DEVICE_NOT_READY;
+
   if (device->prepared)
     return XHCI_DEVICE_ALREADY_PREPARED;
 
