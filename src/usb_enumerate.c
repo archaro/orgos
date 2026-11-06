@@ -117,7 +117,8 @@ static usb_enum_result_t address_device( usb_enum_info_t *state) {
   xhci_slot_info_t slot = {0};
   state->stage = USB_ENUM_STAGE_ENABLE_SLOT;
   state->slot_attempted = true;
-  xhci_slot_result_t slot_result = xhci_enable_downstream_slot(&slot);
+  xhci_slot_result_t slot_result =
+    xhci_enable_downstream_slot(state->hub_port, &slot);
 
   if (slot_result != XHCI_SLOT_OK) {
     state->detail = (uint32_t)slot_result;

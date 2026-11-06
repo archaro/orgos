@@ -1726,8 +1726,8 @@ static xhci_dispatch_result_t xhci_dispatch_wait_step(void) {
     for (unsigned int i = 0U; i < XHCI_MAX_DEVICES; i++) {
       xhci_device_t *device = &devices[i];
       xhci_bulk_in_receiver_t *receiver = &device->receiver;
-      if (device->slot_id == 0U ||
-          !receiver->started || receiver->failed ||
+      if (device->slot_id == 0U || device->lifecycle.quiesced ||
+          !receiver->started || receiver->failed || 
           !receiver->waiter || !receiver->waiter->completed ||
           receiver->waiter->slot_id != device->slot_id)
         continue;
@@ -2006,7 +2006,7 @@ xhci_slot_result_t xhci_enable_slot(xhci_slot_info_t *result) {
   return XHCI_SLOT_OK;
 }
 
-xhci_slot_result_t xhci_enable_downstream_slot(
+xhci_slot_result_t xhci_enable_downstream_slot(uint8_t hub_port,
     xhci_slot_info_t *result) {
 
   if (!result)
@@ -2016,11 +2016,23 @@ xhci_slot_result_t xhci_enable_downstream_slot(
   result->root_port = 1U;
   result->command_result = XHCI_COMMAND_UNAVAILABLE;
 
-  // Do not repeat Enable Slot for the same device incarnation.
-  // An uncertain completion may have succeeded, so the guard
-  // is cleared only after confirmed teardown and successful recycling.
-  if (devices[1].lifecycle.slot_requested)
+  // Only direct downstream ports of the internal
+  // four-port USB 2.0 hub are supported for now.
+  if (hub_port == 0U || hub_port > 4U)
+    return XHCI_SLOT_NOT_READY;
+
+  xhci_device_t *device = &devices[1];
+
+  // Never repeat Enable Slot after an uncertain
+  // completion. This also prevents an old device
+  // incarnation from acquiring another slot.
+  if (device->lifecycle.slot_requested)
     return XHCI_SLOT_ALREADY_REQUESTED;
+
+  // A previously owned context must be recycled
+  // before it can participate in another allocation.
+  if (device->slot_id != 0U || device->prepared || device->addressed)
+    return XHCI_SLOT_NOT_READY;
 
   // The upstream hub must already be operational.
   if (!internal_hub.prepared || !internal_hub.addressed ||
@@ -2033,15 +2045,42 @@ xhci_slot_result_t xhci_enable_downstream_slot(
   if (!xhci_probe(&controller) || controller.max_slots < 2U)
     return XHCI_SLOT_NOT_READY;
 
-  // Enable Slot does not yet describe the device's topology.
-  // It merely reserves a hardware device slot.
+  // A physical hub connection must not be owned
+  // by two downstream software contexts.
+  //
+  // This also recognises contexts whose hardware
+  // slot allocation has an uncertain outcome.
+  for (unsigned int i = 1U; i < XHCI_MAX_DEVICES; i++) {
+    xhci_device_t *other = &devices[i];
+    if (other == device || (!other->lifecycle.slot_requested &&
+         other->slot_id == 0U))
+      continue;
+
+    if (other->root_port == internal_hub.root_port &&
+        other->hub_slot == internal_hub.slot_id &&
+        other->hub_port == hub_port)
+      return XHCI_SLOT_NOT_READY;
+  }
+
+  // Reserve the connection's software identity
+  // before submitting an irreversible command.
+  //
+  // If the command times out, this association
+  // survives for diagnosis and controlled recovery.
+  device->root_port = internal_hub.root_port;
+  device->hub_slot = internal_hub.slot_id;
+  device->hub_port = hub_port;
+  device->lifecycle.slot_requested = true;
+
+  // Enable Slot reserves a controller slot. The
+  // topology is not programmed into hardware until
+  // the later Address Device operation.
   xhci_trb_t command = {
     .parameter = 0U,
     .status = 0U,
     .control = XHCI_TRB_ENABLE_SLOT << XHCI_TRB_TYPE_SHIFT
   };
 
-  devices[1].lifecycle.slot_requested = true;
   xhci_command_completion_t completion = {0};
   xhci_command_result_t status = xhci_command_submit(&command, &completion);
   result->command_result = status;
@@ -2052,14 +2091,20 @@ xhci_slot_result_t xhci_enable_downstream_slot(
   if (status != XHCI_COMMAND_OK)
     return XHCI_SLOT_COMMAND_FAILED;
 
-  if (completion.slot_id == 0U ||
-      completion.slot_id > controller.max_slots ||
-      completion.slot_id == internal_hub.slot_id)
+  // The controller must return a valid hardware
+  // slot distinct from every existing software owner.
+  if (completion.slot_id == 0U || completion.slot_id > controller.max_slots)
     return XHCI_SLOT_INVALID_ID;
 
-  devices[1].slot_id = completion.slot_id;
-  devices[1].root_port = 1U;
-  devices[1].hub_slot = internal_hub.slot_id;
+  for (unsigned int i = 0U; i < XHCI_MAX_DEVICES; i++) {
+    if (&devices[i] != device && devices[i].slot_id == completion.slot_id)
+      return XHCI_SLOT_INVALID_ID;
+  }
+
+  // Only now associate the confirmed hardware slot
+  // with its already-reserved software context.
+  device->slot_id = completion.slot_id;
+
   return XHCI_SLOT_OK;
 }
 
@@ -2263,9 +2308,11 @@ xhci_device_result_t xhci_downstream_prepare(
   // For now, support the single downstream Full-Speed
   // device attached directly to our four-port hub.
   if (hub_port == 0U || hub_port > 4U || speed != 1U ||
-      device->slot_id == 0U ||
-      !internal_hub.prepared || !internal_hub.addressed ||
-      !controller_running || !controller_verified)
+      !device->lifecycle.slot_requested || device->slot_id == 0U ||
+      device->hub_port != hub_port ||
+      device->hub_slot != internal_hub.slot_id ||
+      device->root_port != internal_hub.root_port || !internal_hub.prepared ||
+      !internal_hub.addressed || !controller_running || !controller_verified)
     return XHCI_DEVICE_NOT_READY;
 
   xhci_info_t controller;
@@ -2280,9 +2327,8 @@ xhci_device_result_t xhci_downstream_prepare(
   if (!xhci_device_alloc_buffers(device, context_size))
     return XHCI_DEVICE_ALLOCATION_FAILED;
 
-  device->root_port = internal_hub.root_port;
-  device->hub_slot = internal_hub.slot_id;
-  device->hub_port = hub_port;
+  // Topology was reserved before Enable Slot.
+  // Preparation must not change device ownership.
   device->speed = speed;
   device->ep0_max_packet = 8U;
   device->route_string = hub_port;
