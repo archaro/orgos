@@ -276,6 +276,19 @@ static xhci_device_t *xhci_device_by_slot(uint8_t slot_id) {
   return found;
 }
 
+static xhci_device_t *xhci_downstream_by_slot(uint8_t slot_id) {
+  xhci_device_t *device = xhci_device_by_slot(slot_id);
+
+  if (!device || device == &internal_hub ||
+      !device->lifecycle.slot_requested || internal_hub.slot_id == 0U ||
+      device->root_port != internal_hub.root_port ||
+      device->hub_slot != internal_hub.slot_id ||
+      device->hub_port == 0U || device->hub_port > 4U)
+    return NULL;
+
+  return device;
+}
+
 static xhci_device_t *xhci_device_by_connection(
     uint8_t root_port, uint8_t hub_slot, uint8_t hub_port) {
 
@@ -3459,12 +3472,21 @@ xhci_address_result_t xhci_address_device(
   return XHCI_ADDRESS_OK;
 }
 
-xhci_address_result_t xhci_address_downstream(xhci_address_info_t *result) {
+xhci_address_result_t xhci_address_downstream(
+    uint8_t slot_id, xhci_address_info_t *result) {
+
   if (!result)
     return XHCI_ADDRESS_NOT_READY;
 
   *result = (xhci_address_info_t){0};
-  xhci_device_t *device = &devices[1];
+
+  // Address only the context owning this slot.
+  // Unknown or ambiguous slot ownership is
+  // not permission to issue a hardware command.
+  xhci_device_t *device = xhci_downstream_by_slot(slot_id);
+  if (!device)
+    return XHCI_ADDRESS_NOT_READY;
+
   // Never repeat Address Device after an uncertain completion.
   if (device->lifecycle.address_attempted)
     return XHCI_ADDRESS_ALREADY_ATTEMPTED;
@@ -3576,7 +3598,7 @@ xhci_address_result_t xhci_address_downstream(xhci_address_info_t *result) {
   return XHCI_ADDRESS_OK;
 }
 
-xhci_ep0_update_result_t xhci_downstream_ep0_update(
+xhci_ep0_update_result_t xhci_downstream_ep0_update(uint8_t slot_id,
     uint16_t max_packet_size, xhci_ep0_update_info_t *result) {
 
   if (!result)
@@ -3584,7 +3606,10 @@ xhci_ep0_update_result_t xhci_downstream_ep0_update(
 
   *result = (xhci_ep0_update_info_t){0};
 
-  xhci_device_t *device = &devices[1];
+  xhci_device_t *device = xhci_downstream_by_slot(slot_id);
+  if (!device)
+    return XHCI_EP0_UPDATE_NOT_READY;
+
   if (device->lifecycle.ep0_update_attempted)
     return XHCI_EP0_UPDATE_ALREADY_ATTEMPTED;
 

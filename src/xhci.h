@@ -411,7 +411,8 @@ typedef struct {
 } xhci_address_info_t;
 
 xhci_address_result_t xhci_address_device(xhci_address_info_t *result);
-xhci_address_result_t xhci_address_downstream( xhci_address_info_t *result);
+xhci_address_result_t xhci_address_downstream(
+    uint8_t slot_id, xhci_address_info_t *result);
 
 typedef enum {
   XHCI_EP0_UPDATE_OK,
@@ -434,7 +435,7 @@ typedef struct {
   xhci_command_result_t command_result;
 } xhci_ep0_update_info_t;
 
-xhci_ep0_update_result_t xhci_downstream_ep0_update(
+xhci_ep0_update_result_t xhci_downstream_ep0_update(uint8_t slot_id,
     uint16_t max_packet_size, xhci_ep0_update_info_t *result);
 bool xhci_downstream_ep0_fault_reclaimable(void);
 

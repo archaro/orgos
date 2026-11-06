@@ -136,7 +136,7 @@ static usb_enum_result_t address_device( usb_enum_info_t *state) {
   state->prepare_attempted = true;
   xhci_device_info_t device = {0};
   xhci_device_result_t device_result =
-      xhci_downstream_prepare( state->hub_port, state->speed, &device);
+      xhci_downstream_prepare(state->hub_port, state->speed, &device);
 
   if (device_result != XHCI_DEVICE_OK) {
     state->detail = (uint32_t)device_result;
@@ -146,7 +146,8 @@ static usb_enum_result_t address_device( usb_enum_info_t *state) {
   state->stage = USB_ENUM_STAGE_ADDRESS;
   state->address_attempted = true;
   xhci_address_info_t address = {0};
-  xhci_address_result_t address_result = xhci_address_downstream(&address);
+  xhci_address_result_t address_result =
+    xhci_address_downstream(state->slot_id, &address);
 
   if (address_result != XHCI_ADDRESS_OK) {
     state->detail = (uint32_t)address_result;
@@ -176,7 +177,7 @@ static usb_enum_result_t read_device(usb_enum_info_t *state) {
 
   xhci_ep0_update_info_t update;
   xhci_ep0_update_result_t result =
-      xhci_downstream_ep0_update(info.data[7], &update);
+    xhci_downstream_ep0_update(state->slot_id, info.data[7], &update);
 
   if (result != XHCI_EP0_UPDATE_OK) {
     state->detail = (uint32_t)result;
