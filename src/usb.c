@@ -598,6 +598,19 @@ static void usb_lifecycle_service(void) {
     return;
   }
 
+  // Receiver teardown must operate on the slot
+  // originally owned by this lifecycle executor.
+  //
+  // The slot remains valid through reconciliation
+  // and retirement. It is cleared from the USB
+  // device record only after cleanup and detach.
+  if ((info.next == USB_LIFECYCLE_RECONCILE_IN ||
+       info.next == USB_LIFECYCLE_RETIRE_IN) &&
+      (info.slot_id == 0U || info.slot_id != lifecycle_run.slot_id)) {
+    usb_lifecycle_fail(USB_LIFECYCLE_FAULT_BLOCKED);
+    return;
+  }
+
   // No teardown is needed while the device
   // remains active.
   if (info.next == USB_LIFECYCLE_IDLE)
@@ -612,7 +625,8 @@ static void usb_lifecycle_service(void) {
 
   switch (info.next) {
     case USB_LIFECYCLE_RECONCILE_IN: {
-      xhci_in_reconcile_result_t result = xhci_bulk_in_quiesced_reconcile();
+      xhci_in_reconcile_result_t result =
+          xhci_bulk_in_quiesced_reconcile(lifecycle_run.slot_id);
       lifecycle_run.last_result = (uint32_t)result;
       succeeded = result == XHCI_IN_RECONCILE_OK ||
           result == XHCI_IN_RECONCILE_RESOLVED;
@@ -637,7 +651,8 @@ static void usb_lifecycle_service(void) {
       break;
     }
     case USB_LIFECYCLE_RETIRE_IN: {
-      xhci_bulk_in_retire_result_t status = xhci_bulk_in_stream_retire();
+      xhci_bulk_in_retire_result_t status =
+          xhci_bulk_in_stream_retire(lifecycle_run.slot_id);
       lifecycle_run.last_result = (uint32_t)status;
       succeeded = status == XHCI_BULK_IN_RETIRE_OK;
       break;

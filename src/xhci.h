@@ -576,7 +576,7 @@ typedef enum {
   XHCI_BULK_IN_RETIRE_NOT_STARTED
 } xhci_bulk_in_retire_result_t;
 
-xhci_bulk_in_retire_result_t xhci_bulk_in_stream_retire(void);
+xhci_bulk_in_retire_result_t xhci_bulk_in_stream_retire(uint8_t slot_id);
 
 typedef enum {
   XHCI_IN_RECONCILE_OK,
@@ -587,7 +587,7 @@ typedef enum {
   XHCI_IN_RECONCILE_FAILED
 } xhci_in_reconcile_result_t;
 
-xhci_in_reconcile_result_t xhci_bulk_in_quiesced_reconcile(void);
+xhci_in_reconcile_result_t xhci_bulk_in_quiesced_reconcile(uint8_t slot_id);
 
 typedef enum {
   XHCI_CONTROL_OK,

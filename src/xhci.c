@@ -3264,8 +3264,9 @@ static xhci_bulk_in_retire_result_t xhci_bulk_in_stream_retire_device(
 // Device selection will move into the USB core
 // once multiple device contexts are admitted.
 
-xhci_in_reconcile_result_t xhci_bulk_in_quiesced_reconcile(void) {
-  return xhci_bulk_in_quiesced_reconcile_device(&devices[1]);
+xhci_in_reconcile_result_t xhci_bulk_in_quiesced_reconcile( uint8_t slot_id) {
+  xhci_device_t *device = xhci_downstream_by_slot(slot_id);
+  return xhci_bulk_in_quiesced_reconcile_device(device);
 }
 
 xhci_bulk_in_arm_result_t xhci_bulk_in_stream_start(uint8_t slot_id) {
@@ -3299,8 +3300,9 @@ bool xhci_bulk_in_stream_read(uint8_t slot_id, xhci_bulk_in_info_t *result) {
   return xhci_bulk_in_stream_read_device(device, result);
 }
 
-xhci_bulk_in_retire_result_t xhci_bulk_in_stream_retire(void) {
-  return xhci_bulk_in_stream_retire_device(&devices[1]);
+xhci_bulk_in_retire_result_t xhci_bulk_in_stream_retire( uint8_t slot_id) {
+  xhci_device_t *device = xhci_downstream_by_slot(slot_id);
+  return xhci_bulk_in_stream_retire_device(device);
 }
 
 xhci_hub_result_t xhci_hub_configure(
