@@ -491,15 +491,15 @@ bool usb_enumeration_recovery_inspect(usb_recovery_info_t *info) {
     return true;
   }
 
-  if (xhci_downstream_is_quiesced() || xhci_downstream_is_slot_disabled() ||
-      xhci_downstream_is_cleaned()) {
+  if (xhci_downstream_is_quiesced(current_device.slot_id) ||
+      xhci_downstream_is_slot_disabled() || xhci_downstream_is_cleaned()) {
     info->result = USB_RECOVERY_ALREADY_QUIESCED;
     return true;
   }
 
   xhci_downstream_transfer_state_t transfers = {0};
 
-  if (!xhci_downstream_transfer_state(&transfers)) {
+  if (!xhci_downstream_transfer_state(current_device.slot_id, &transfers)) {
     info->result = USB_RECOVERY_TRANSFER_STATE_UNAVAILABLE;
     return true;
   }
@@ -568,7 +568,8 @@ bool usb_enumeration_recovery_begin(void) {
 
   // The old xHCI slot must not accept further
   // transfers while recovery dismantles it.
-  xhci_downstream_quiesce();
+  if (!xhci_downstream_quiesce(current_device.slot_id))
+    return false;
   current_device.state = USB_DEVICE_DISCONNECTING;
 
   return true;
@@ -576,11 +577,12 @@ bool usb_enumeration_recovery_begin(void) {
 
 bool usb_device_test_quiesce(void) {
   if (!device_record_valid || current_device.state != USB_DEVICE_ACTIVE ||
-      current_device.slot_id == 0U || xhci_downstream_is_quiesced())
+      current_device.slot_id == 0U ||
+      xhci_downstream_is_quiesced(current_device.slot_id))
     return false;
 
   xhci_downstream_transfer_state_t state = {0};
-  if (!xhci_downstream_transfer_state(&state))
+  if (!xhci_downstream_transfer_state(current_device.slot_id, &state))
     return false;
 
   // Require exactly one outstanding Bulk IN
@@ -598,7 +600,8 @@ bool usb_device_test_quiesce(void) {
 
   // This is an irreversible transition for
   // the current device generation.
-  xhci_downstream_quiesce();
+  if (!xhci_downstream_quiesce(current_device.slot_id))
+    return false;
 
   // Present the same software lifecycle state
   // as an actual downstream disconnection.
@@ -629,7 +632,8 @@ void usb_device_port_changed(uint8_t port, uint16_t status, uint16_t change) {
 
   // Prevent new transfers through this device's
   // existing xHCI slot before declaring it stale.
-  xhci_downstream_quiesce();
+  if (!xhci_downstream_quiesce(current_device.slot_id))
+    return;
 
   // Retain the slot and address for teardown.
   // They are not yet safe to reuse.
@@ -639,7 +643,8 @@ void usb_device_port_changed(uint8_t port, uint16_t status, uint16_t change) {
 bool usb_device_finalize_disconnect(void) {
   if (!device_record_valid ||
       current_device.state != USB_DEVICE_DISCONNECTING ||
-      !xhci_downstream_is_quiesced() || !xhci_downstream_is_cleaned())
+      !xhci_downstream_is_quiesced(current_device.slot_id) ||
+      !xhci_downstream_is_cleaned())
     return false;
 
   // Controller teardown is complete.
@@ -660,7 +665,8 @@ bool usb_device_finalize_disconnect(void) {
 bool usb_enumeration_rearm(void) {
   if (!device_record_valid || !enumeration_attempted ||
       current_device.state != USB_DEVICE_DETACHED ||
-      xhci_downstream_is_quiesced() || xhci_downstream_is_cleaned())
+      xhci_downstream_is_quiesced(current_device.slot_id) ||
+      xhci_downstream_is_cleaned())
     return false;
 
   // The old device has been detached and
@@ -684,8 +690,8 @@ bool usb_enumeration_rearm_rejected(uint8_t port) {
 
   // There must be no outstanding downstream
   // controller resources awaiting reclamation.
-  if (xhci_downstream_is_quiesced() || xhci_downstream_is_slot_disabled() ||
-      xhci_downstream_is_cleaned())
+  if (xhci_downstream_is_quiesced(current_device.slot_id) ||
+      xhci_downstream_is_slot_disabled() || xhci_downstream_is_cleaned())
     return false;
 
   // Confirm that the rejected port is now empty

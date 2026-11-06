@@ -4454,23 +4454,35 @@ xhci_hub_notify_result_t xhci_hub_notify_resume(void) {
   return xhci_hub_notify_arm();
 }
 
-void xhci_downstream_quiesce(void) {
-  devices[1].lifecycle.quiesced = true;
+bool xhci_downstream_quiesce(uint8_t slot_id) {
+  xhci_device_t *device = xhci_downstream_by_slot(slot_id);
+
+  if (!device)
+    return false;
+
+  // Quiescing is idempotent. Once set, the
+  // device must not accept new transfers.
+  device->lifecycle.quiesced = true;
+  return true;
 }
 
-bool xhci_downstream_is_quiesced(void) {
-  return devices[1].lifecycle.quiesced;
+bool xhci_downstream_is_quiesced(uint8_t slot_id) {
+  xhci_device_t *device = xhci_downstream_by_slot(slot_id);
+
+  if (!device)
+    return false;
+
+  return device->lifecycle.quiesced;
 }
 
 bool xhci_downstream_is_slot_disabled(void) {
   return devices[1].lifecycle.slot_disabled;
 }
 
-static bool xhci_downstream_ep0_state(uint8_t *state) {
-  if (!state)
-    return false;
+static bool xhci_downstream_ep0_state(xhci_device_t *device, uint8_t *state) {
 
-  xhci_device_t *device = &devices[1];
+  if (!device || !state)
+    return false;
 
   if (!device->addressed || device->slot_id == 0U ||
       device->lifecycle.slot_disabled || device->output.owner != DMA_OWNER_DEVICE ||
@@ -4516,7 +4528,7 @@ bool xhci_downstream_ep0_fault_reclaimable(void) {
 
   uint8_t state = 0U;
 
-  if (!xhci_downstream_ep0_state(&state))
+  if (!xhci_downstream_ep0_state(device, &state))
     return false;
 
   // Halted and Error endpoints are not executing
@@ -4526,12 +4538,11 @@ bool xhci_downstream_ep0_fault_reclaimable(void) {
 }
 
 static bool xhci_downstream_endpoint_states(
-    uint8_t *in_state, uint8_t *out_state) {
+    xhci_device_t *device, uint8_t *in_state, uint8_t *out_state) {
 
-  if (!in_state || !out_state)
+  if (!device || !in_state || !out_state)
     return false;
 
-  xhci_device_t *device = &devices[1];
   if (!device->addressed || device->slot_id == 0U ||
       device->lifecycle.slot_disabled || device->output.owner != DMA_OWNER_DEVICE ||
       (device->context_size != 32U && device->context_size != 64U))
@@ -4556,12 +4567,18 @@ static bool xhci_downstream_endpoint_states(
   return true;
 }
 
-bool xhci_downstream_transfer_state(xhci_downstream_transfer_state_t *state) {
+bool xhci_downstream_transfer_state(
+    uint8_t slot_id, xhci_downstream_transfer_state_t *state) {
+
   if (!state)
     return false;
 
   *state = (xhci_downstream_transfer_state_t){0};
-  xhci_device_t *device = &devices[1];
+
+  xhci_device_t *device = xhci_downstream_by_slot(slot_id);
+  if (!device)
+    return false;
+
   state->slot_id = device->slot_id;
   state->quiesced = device->lifecycle.quiesced;
   state->ep0_active = device->ep0_active;
@@ -4569,7 +4586,7 @@ bool xhci_downstream_transfer_state(xhci_downstream_transfer_state_t *state) {
   state->ep0_submitted = device->ep0_submitted;
   state->ep0_completion_seen = device->ep0_completion_seen;
   state->ep0_completion_code = device->ep0_completion_code;
-  state->ep0_state_valid = xhci_downstream_ep0_state(&state->ep0_state);
+  state->ep0_state_valid = xhci_downstream_ep0_state(device, &state->ep0_state);
   state->bulk_out_active = device->bulk_out_active;
   state->bulk_in_started = device->receiver.started;
   state->bulk_in_pending = device->receiver.state == XHCI_BULK_IN_PENDING;
@@ -4577,7 +4594,7 @@ bool xhci_downstream_transfer_state(xhci_downstream_transfer_state_t *state) {
   state->bulk_in_failed = device->receiver.state == XHCI_BULK_IN_FAILED;
   state->bulk_in_completion_code = device->receiver.info.completion_code;
   state->endpoint_states_valid = xhci_downstream_endpoint_states(
-          &state->bulk_in_ep_state, &state->bulk_out_ep_state);
+          device, &state->bulk_in_ep_state, &state->bulk_out_ep_state);
 
   for (unsigned int i = 0U; i < XHCI_EVENT_WAITERS; i++) {
     const xhci_event_waiter_t *waiter = &event_waiters[i];
@@ -4722,7 +4739,7 @@ xhci_stop_result_t xhci_downstream_stop_bulk_out( xhci_stop_info_t *info) {
   uint8_t in_state = 0U;
   uint8_t out_state = 0U;
 
-  if (!xhci_downstream_endpoint_states(&in_state, &out_state))
+  if (!xhci_downstream_endpoint_states(device, &in_state, &out_state))
     return XHCI_STOP_NOT_READY;
 
   info->slot_id = device->slot_id;
@@ -4767,7 +4784,7 @@ xhci_stop_result_t xhci_downstream_stop_bulk_out( xhci_stop_info_t *info) {
   if (!stop->received)
     return XHCI_STOP_VERIFY_FAILED;
 
-  if (!xhci_downstream_endpoint_states(&in_state, &out_state))
+  if (!xhci_downstream_endpoint_states(device, &in_state, &out_state))
     return XHCI_STOP_VERIFY_FAILED;
 
   info->after_state = out_state;
@@ -4819,7 +4836,7 @@ xhci_stop_result_t xhci_downstream_stop_bulk_in(xhci_stop_info_t *info) {
   uint8_t in_state = 0U;
   uint8_t out_state = 0U;
 
-  if (!xhci_downstream_endpoint_states(&in_state, &out_state))
+  if (!xhci_downstream_endpoint_states(device, &in_state, &out_state))
     return XHCI_STOP_NOT_READY;
 
   info->slot_id = device->slot_id;
@@ -4863,7 +4880,7 @@ xhci_stop_result_t xhci_downstream_stop_bulk_in(xhci_stop_info_t *info) {
   if (!stop->received)
     return XHCI_STOP_VERIFY_FAILED;
 
-  if (!xhci_downstream_endpoint_states(&in_state, &out_state))
+  if (!xhci_downstream_endpoint_states(device, &in_state, &out_state))
     return XHCI_STOP_VERIFY_FAILED;
 
   info->after_state = in_state;

@@ -1114,7 +1114,7 @@ static void cmd_usb_devices(void) {
       usb_device_state_name(device.state));
   console_printf("  Generation     : %u\n", (unsigned int)device.generation);
   console_printf("  xHCI quiesced  : %s\n",
-      xhci_downstream_is_quiesced() ? "Yes" : "No");
+      xhci_downstream_is_quiesced(device.slot_id) ? "Yes" : "No");
   if (device.state == USB_DEVICE_DETACHED) {
     console_printf("  Previous port  : %u\n",
         (unsigned int)device.parent_port);
@@ -1239,7 +1239,7 @@ static void cmd_usb_enumstate(void) {
       info.ep0_operation_failed ? "Yes" : "No");
   console_printf("  EP0 result   : %u\n", (unsigned int)info.ep0_result);
   xhci_downstream_transfer_state_t transfers = {0};
-  if (xhci_downstream_transfer_state(&transfers) &&
+  if (xhci_downstream_transfer_state(info.slot_id, &transfers) &&
       transfers.slot_id == info.slot_id && info.slot_id != 0U) {
     if (transfers.ep0_state_valid) {
       console_printf("  EP0 endpoint : %s (%u)\n",
@@ -1337,8 +1337,11 @@ static void cmd_usb_recover(void) {
 }
 
 static void cmd_usb_transfers(void) {
+  usb_device_t device = {0};
   xhci_downstream_transfer_state_t state = {0};
-  if (!xhci_downstream_transfer_state(&state)) {
+
+  if (!usb_get_device(&device) || device.slot_id == 0U ||
+      !xhci_downstream_transfer_state(device.slot_id, &state)) {
     console_puts("Transfer state unavailable.\n");
     return;
   }

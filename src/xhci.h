@@ -764,8 +764,8 @@ xhci_hub_notify_result_t xhci_hub_notify_start(void);
 void xhci_hub_notify_service(void);
 bool xhci_hub_notify_get_info(xhci_hub_notify_info_t *info);
 xhci_hub_notify_result_t xhci_hub_notify_resume(void);
-void xhci_downstream_quiesce(void);
-bool xhci_downstream_is_quiesced(void);
+bool xhci_downstream_quiesce(uint8_t slot_id);
+bool xhci_downstream_is_quiesced(uint8_t slot_id);
 bool xhci_downstream_is_slot_disabled(void);
 
 typedef struct {
@@ -790,4 +790,5 @@ typedef struct {
   uint8_t bulk_out_ep_state;
 } xhci_downstream_transfer_state_t;
 
-bool xhci_downstream_transfer_state(xhci_downstream_transfer_state_t *state);
+bool xhci_downstream_transfer_state(
+    uint8_t slot_id, xhci_downstream_transfer_state_t *state);

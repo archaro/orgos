@@ -439,7 +439,23 @@ bool usb_lifecycle_inspect(usb_lifecycle_info_t *info) {
 
   info->generation = device.generation;
   info->slot_id = device.slot_id;
-  info->quiesced = xhci_downstream_is_quiesced();
+
+  // Detachment clears the USB device's slot ID,
+  // but the xHCI context remains owned until
+  // recycling has completed.
+  //
+  // While this lifecycle executor is armed for
+  // the same generation, retain its original
+  // slot identity for xHCI state inspection.
+  uint8_t inspection_slot = device.slot_id;
+
+  if (device.state == USB_DEVICE_DETACHED &&
+      lifecycle_run.state == USB_LIFECYCLE_RUN_ARMED &&
+      lifecycle_run.generation == device.generation &&
+      lifecycle_run.slot_id != 0U)
+    inspection_slot = lifecycle_run.slot_id;
+
+  info->quiesced = xhci_downstream_is_quiesced(inspection_slot);
   info->slot_disabled = xhci_downstream_is_slot_disabled();
   info->cleaned = xhci_downstream_is_cleaned();
 
@@ -469,7 +485,7 @@ bool usb_lifecycle_inspect(usb_lifecycle_info_t *info) {
   }
 
   xhci_downstream_transfer_state_t transfers = {0};
-  if (!xhci_downstream_transfer_state(&transfers)) {
+  if (!xhci_downstream_transfer_state(device.slot_id, &transfers)) {
     info->next = USB_LIFECYCLE_BLOCKED;
     return true;
   }
@@ -556,7 +572,7 @@ static void usb_lifecycle_auto_arm(void) {
   usb_enum_info_t enumeration = {0};
 
   if (!usb_get_device(&device) || device.state != USB_DEVICE_DISCONNECTING ||
-      device.slot_id == 0U || !xhci_downstream_is_quiesced() ||
+      device.slot_id == 0U || !xhci_downstream_is_quiesced(device.slot_id) ||
       !usb_get_enumeration(&enumeration) ||
       enumeration.result != USB_ENUM_OK ||
       enumeration.slot_id != device.slot_id)
@@ -1044,7 +1060,7 @@ bool usb_reenum_inspect(usb_reenum_info_t *info) {
     return true;
   }
 
-  if (xhci_downstream_is_quiesced() || xhci_downstream_is_slot_disabled() ||
+  if (xhci_downstream_is_quiesced(device.slot_id) || xhci_downstream_is_slot_disabled() ||
       xhci_downstream_is_cleaned()) {
     info->result = USB_REENUM_XHCI_BUSY;
     return true;
@@ -1153,8 +1169,8 @@ bool usb_enum_admission_inspect(usb_enum_admission_info_t *info) {
 
   // Initial enumeration has no previous device
   // generation or downstream slot to reclaim.
-  if (xhci_downstream_is_quiesced() || xhci_downstream_is_slot_disabled() ||
-      xhci_downstream_is_cleaned()) {
+  if (xhci_downstream_is_quiesced(device.slot_id) ||
+      xhci_downstream_is_slot_disabled() || xhci_downstream_is_cleaned()) {
     info->result = USB_ENUM_ADMIT_XHCI_BUSY;
     return true;
   }
