@@ -624,13 +624,14 @@ static void usb_lifecycle_service(void) {
     return;
   }
 
-  // Receiver teardown must operate on the slot
-  // originally owned by this lifecycle executor.
+  // Receiver teardown and Stop Endpoint must
+  // operate on the hardware slot originally
+  // owned by this lifecycle executor.
   //
-  // The slot remains valid through reconciliation
-  // and retirement. It is cleared from the USB
-  // device record only after cleanup and detach.
+  // A change of slot identity is not permission
+  // to issue a command against another device.
   if ((info.next == USB_LIFECYCLE_RECONCILE_IN ||
+       info.next == USB_LIFECYCLE_STOP_IN ||
        info.next == USB_LIFECYCLE_RETIRE_IN) &&
       (info.slot_id == 0U || info.slot_id != lifecycle_run.slot_id)) {
     usb_lifecycle_fail(USB_LIFECYCLE_FAULT_BLOCKED);
@@ -660,7 +661,8 @@ static void usb_lifecycle_service(void) {
     }
     case USB_LIFECYCLE_STOP_IN: {
       xhci_stop_info_t result = {0};
-      xhci_stop_result_t status = xhci_downstream_stop_bulk_in(&result);
+      xhci_stop_result_t status =
+          xhci_downstream_stop_bulk_in(lifecycle_run.slot_id, &result);
       lifecycle_run.last_result = (uint32_t)status;
       lifecycle_run.command_result = (uint8_t)result.command_result;
       lifecycle_run.completion_code = result.completion_code;

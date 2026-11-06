@@ -326,8 +326,10 @@ typedef struct {
   uint64_t stop_event_trb;
 } xhci_stop_info_t;
 
-xhci_stop_result_t xhci_downstream_stop_bulk_out(xhci_stop_info_t *info);
-xhci_stop_result_t xhci_downstream_stop_bulk_in(xhci_stop_info_t *info);
+xhci_stop_result_t xhci_downstream_stop_bulk_out(
+    uint8_t slot_id, xhci_stop_info_t *info);
+xhci_stop_result_t xhci_downstream_stop_bulk_in(
+    uint8_t slot_id, xhci_stop_info_t *info);
 
 typedef enum {
   XHCI_CLEANUP_OK,

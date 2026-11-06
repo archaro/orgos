@@ -4724,7 +4724,9 @@ xhci_cleanup_result_t xhci_downstream_cleanup(xhci_cleanup_info_t *info) {
   return XHCI_CLEANUP_OK;
 }
 
-xhci_stop_result_t xhci_downstream_stop_bulk_out( xhci_stop_info_t *info) {
+xhci_stop_result_t xhci_downstream_stop_bulk_out(
+    uint8_t slot_id, xhci_stop_info_t *info) {
+
   if (!info)
     return XHCI_STOP_NOT_READY;
 
@@ -4732,13 +4734,18 @@ xhci_stop_result_t xhci_downstream_stop_bulk_out( xhci_stop_info_t *info) {
     .command_result = XHCI_COMMAND_UNAVAILABLE
   };
 
-  xhci_device_t *device = &devices[1];
+  // Stop Endpoint may only operate on a known,
+  // uniquely owned downstream hardware slot.
+  xhci_device_t *device = xhci_downstream_by_slot(slot_id);
+
+    return XHCI_STOP_NOT_READY;
+
   xhci_stop_event_state_t *stop = &device->stop_out;
 
   if (device->lifecycle.stop_out_attempted)
     return XHCI_STOP_ALREADY_ATTEMPTED;
 
-  if (!devices[1].lifecycle.quiesced || devices[1].lifecycle.slot_disabled ||
+  if (!device->lifecycle.quiesced || device->lifecycle.slot_disabled ||
       !device->addressed || !device->bulk_out_ready ||
       device->slot_id == 0U || !controller_running ||
       !controller_verified || command_outstanding ||
@@ -4816,7 +4823,9 @@ xhci_stop_result_t xhci_downstream_stop_bulk_out( xhci_stop_info_t *info) {
   return XHCI_STOP_OK;
 }
 
-xhci_stop_result_t xhci_downstream_stop_bulk_in(xhci_stop_info_t *info) {
+xhci_stop_result_t xhci_downstream_stop_bulk_in(
+    uint8_t slot_id, xhci_stop_info_t *info) {
+
   if (!info)
     return XHCI_STOP_NOT_READY;
 
@@ -4824,7 +4833,10 @@ xhci_stop_result_t xhci_downstream_stop_bulk_in(xhci_stop_info_t *info) {
     .command_result = XHCI_COMMAND_UNAVAILABLE
   };
 
-  xhci_device_t *device = &devices[1];
+  xhci_device_t *device = xhci_downstream_by_slot(slot_id);
+  if (!device)
+    return XHCI_STOP_NOT_READY;
+
   xhci_stop_event_state_t *stop = &device->stop_in;
 
   if (device->lifecycle.stop_in_attempted)
