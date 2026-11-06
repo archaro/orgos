@@ -1415,6 +1415,8 @@ static const char *usb_reenum_result_name(usb_reenum_result_t result) {
       return "Hub changes pending";
     case USB_REENUM_MULTIPLE_DEVICES:
       return "Multiple connected devices";
+    case USB_REENUM_UNMANAGED_ROOT:
+      return "Only unmanaged root-port devices connected";
     default:
       return "Unknown";
   }
@@ -1462,6 +1464,8 @@ static const char *usb_enum_admission_name(usb_enum_admission_result_t result) {
       return "Hub change pending";
     case USB_ENUM_ADMIT_RECONNECT_BLOCKED:
       return "Re-enumeration blocked";
+    case USB_ENUM_ADMIT_UNMANAGED_ROOT:
+      return "No managed device; unmanaged root device present";
     default:
       return "Unknown";
   }
@@ -1493,21 +1497,27 @@ static void cmd_usb_lifecycle_admission(void) {
   if (info.result == USB_ENUM_ADMIT_INITIAL ||
       info.result == USB_ENUM_ADMIT_RECONNECT) {
     console_printf("  Candidate port : %u\n", (unsigned int)info.port);
-    console_printf("  Connected      : %u\n",
-        (unsigned int)info.connected_count);
   }
-  if (info.result == USB_ENUM_ADMIT_NO_DEVICE ||
-      info.result == USB_ENUM_ADMIT_MULTIPLE_DEVICES) {
-    console_printf("  Connected      : %u\n",
+  if (info.result == USB_ENUM_ADMIT_INITIAL ||
+      info.result == USB_ENUM_ADMIT_RECONNECT ||
+      info.result == USB_ENUM_ADMIT_NO_DEVICE ||
+      info.result == USB_ENUM_ADMIT_MULTIPLE_DEVICES ||
+      info.result == USB_ENUM_ADMIT_UNMANAGED_ROOT) {
+    console_printf("  Hub devices    : %u\n",
         (unsigned int)info.connected_count);
+    console_printf("  Other roots    : %u\n",
+        (unsigned int)info.unmanaged_root_count);
   }
   if (info.result == USB_ENUM_ADMIT_RECONNECT_BLOCKED) {
     console_printf("  Reason         : %s\n",
         usb_reenum_result_name(info.reconnect_reason));
     if (info.reconnect_reason == USB_REENUM_MULTIPLE_DEVICES ||
-        info.reconnect_reason == USB_REENUM_DISCONNECTED) {
-      console_printf("  Connected      : %u\n",
+        info.reconnect_reason == USB_REENUM_DISCONNECTED ||
+        info.reconnect_reason == USB_REENUM_UNMANAGED_ROOT) {
+      console_printf("  Hub devices    : %u\n",
           (unsigned int)info.connected_count);
+      console_printf("  Other roots    : %u\n",
+          (unsigned int)info.unmanaged_root_count);
     }
   }
 }

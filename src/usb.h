@@ -171,7 +171,8 @@ typedef enum {
   USB_REENUM_DISCONNECTED,
   USB_REENUM_NOT_POWERED,
   USB_REENUM_CHANGE_PENDING,
-  USB_REENUM_MULTIPLE_DEVICES
+  USB_REENUM_MULTIPLE_DEVICES,
+  USB_REENUM_UNMANAGED_ROOT
 } usb_reenum_result_t;
 
 typedef struct {
@@ -184,6 +185,7 @@ typedef struct {
   uint16_t port_status;
   uint16_t port_change;
   bool enumeration_attempted;
+  uint8_t unmanaged_root_count;
 } usb_reenum_info_t;
 
 bool usb_reenum_inspect(usb_reenum_info_t *info);
@@ -200,7 +202,8 @@ typedef enum {
   USB_ENUM_ADMIT_MULTIPLE_DEVICES,
   USB_ENUM_ADMIT_PORT_FAILED,
   USB_ENUM_ADMIT_CHANGE_PENDING,
-  USB_ENUM_ADMIT_RECONNECT_BLOCKED
+  USB_ENUM_ADMIT_RECONNECT_BLOCKED,
+  USB_ENUM_ADMIT_UNMANAGED_ROOT
 } usb_enum_admission_result_t;
 
 typedef struct {
@@ -209,6 +212,7 @@ typedef struct {
   uint32_t generation;
   uint8_t port;
   uint8_t connected_count;
+  uint8_t unmanaged_root_count;
 } usb_enum_admission_info_t;
 
 bool usb_enum_admission_inspect(usb_enum_admission_info_t *info);

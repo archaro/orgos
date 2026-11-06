@@ -844,26 +844,114 @@ typedef struct {
   uint8_t port;
   uint16_t status;
   uint16_t change;
+  uint8_t unmanaged_root_count;
   bool change_pending;
-} usb_hub_inventory_t;
+} usb_topology_inventory_t;
 
-static bool usb_hub_inventory_read(uint8_t ports,
-    usb_hub_inventory_t *inventory) {
+// Inspect controller root ports which are not
+// occupied by the internal USB 2.0 hub.
+//
+// Supported Protocol capabilities identify the
+// root-port ranges. The controller has already
+// supplied these through xhci_protocol_get().
+static bool usb_unmanaged_root_inventory_read(
+    usb_topology_inventory_t *inventory) {
+
+  uint8_t total_ports = 0U;
+
+  if (!xhci_port_count(&total_ports))
+    return false;
+
+  // Verify that every root port belongs to
+  // exactly one Supported Protocol capability.
+  bool covered[256] = {false};
+
+  for (unsigned int index = 0U;; index++) {
+    xhci_protocol_t protocol = {0};
+    bool found = false;
+
+    if (!xhci_protocol_get(index, &protocol, &found))
+      return false;
+
+    if (!found)
+      break;
+
+    unsigned int first = protocol.first_port;
+    unsigned int count = protocol.port_count;
+
+    // "USB " is the standard protocol name.
+    // Reject malformed or unsupported mappings.
+    if (protocol.name != 0x20425355U ||
+        protocol.major < 2U ||
+        first == 0U || count == 0U ||
+        first + count - 1U > total_ports)
+      return false;
+
+    for (unsigned int number = first;
+        number < first + count; number++) {
+
+      if (covered[number])
+        return false;
+
+      covered[number] = true;
+
+      // Root port 1 contains our internal hub.
+      // Its downstream devices are counted
+      // separately by the hub inventory.
+      if (number == USB_ROOT_PORT) {
+        if (protocol.major != 2U)
+          return false;
+        continue;
+      }
+
+      xhci_port_t root = {0};
+
+      if (!xhci_port_read((uint8_t)number, &root))
+        return false;
+
+      // An unsettled root-port change must not
+      // be mistaken for a stable topology.
+      if (root.connect_change || root.enable_change ||
+          root.warm_reset_change || root.overcurrent_change ||
+          root.reset_change || root.link_change ||
+          root.config_error_change)
+        inventory->change_pending = true;
+
+      // Count the connection even if it has not
+      // acquired a slot or negotiated its final
+      // operational link state.
+      if (root.connected)
+        inventory->unmanaged_root_count++;
+    }
+  }
+
+  // A missing protocol mapping makes the
+  // controller-wide inventory incomplete.
+  for (unsigned int number = 1U;
+      number <= total_ports; number++) {
+    if (!covered[number])
+      return false;
+  }
+
+  return true;
+}
+
+static bool usb_topology_inventory_read(uint8_t ports,
+    usb_topology_inventory_t *inventory) {
 
   if (!inventory || ports == 0U || ports >= 16U)
     return false;
 
-  *inventory = (usb_hub_inventory_t){0};
+  *inventory = (usb_topology_inventory_t){0};
   inventory->change_pending = change_pending_mask != 0U;
 
+  // Inspect devices connected to the internal hub.
   for (uint8_t port = 1U; port <= ports; port++) {
     usb_hub_port_t observed = {0};
 
     if (usb_hub_port_status(port, &observed) != USB_HUB_OK)
       return false;
 
-    // A pending change on any port invalidates
-    // the current enumeration admission snapshot.
     if (observed.change != 0U)
       inventory->change_pending = true;
 
@@ -871,8 +959,6 @@ static bool usb_hub_inventory_read(uint8_t ports,
       continue;
 
     inventory->connected_count++;
-    // A candidate is meaningful only when exactly
-    // one device has been found.
     if (inventory->connected_count == 1U) {
       inventory->port = port;
       inventory->status = observed.status;
@@ -880,13 +966,17 @@ static bool usb_hub_inventory_read(uint8_t ports,
     }
   }
 
+  // A hub candidate is meaningful only when
+  // exactly one device occupies the hub.
   if (inventory->connected_count != 1U) {
     inventory->port = 0U;
     inventory->status = 0U;
     inventory->change = 0U;
   }
 
-  return true;
+  // Complete the observation with the remaining
+  // controller root ports.
+  return usb_unmanaged_root_inventory_read(inventory);
 }
 
 bool usb_reenum_inspect(usb_reenum_info_t *info) {
@@ -955,16 +1045,16 @@ bool usb_reenum_inspect(usb_reenum_info_t *info) {
     return true;
   }
 
-  usb_hub_inventory_t inventory = {0};
-
   // Do not inspect a topology whose notifications
   // have not yet been completely processed.
-  if (!usb_hub_inventory_read(hub.ports, &inventory)) {
+  usb_topology_inventory_t inventory = {0};
+  if (!usb_topology_inventory_read(hub.ports, &inventory)) {
     info->result = USB_REENUM_PORT_UNAVAILABLE;
     return true;
   }
 
   info->connected_count = inventory.connected_count;
+  info->unmanaged_root_count = inventory.unmanaged_root_count;
   info->port = inventory.port;
   info->port_status = inventory.status;
   info->port_change = inventory.change;
@@ -975,7 +1065,8 @@ bool usb_reenum_inspect(usb_reenum_info_t *info) {
   }
 
   if (inventory.connected_count == 0U) {
-    info->result = USB_REENUM_DISCONNECTED;
+    info->result = inventory.unmanaged_root_count != 0U ?
+        USB_REENUM_UNMANAGED_ROOT : USB_REENUM_DISCONNECTED;
     return true;
   }
 
@@ -993,18 +1084,11 @@ bool usb_reenum_inspect(usb_reenum_info_t *info) {
   return true;
 }
 
-// TODO: Implement USB 3.x SuperSpeed topology discovery.
-//
-// Enumeration admission currently considers only the
-// downstream ports of the internal USB 2.0 hub. USB 3.x
-// devices operating at SuperSpeed on the VL805's separate
-// root ports are invisible to this check.
-//
-// Consequently, the single-device restriction applies
-// only to the USB 2.0 topology, not the entire controller.
-//
-// Revisit when implementing SuperSpeed root-port
-// discovery, enumeration and lifecycle management.
+// Root-port connections outside the internal
+// USB 2.0 hub are visible to admission.
+// TODO: They are not yet eligible for enumeration.
+// Device ownership and lifecycle management must
+// be generalised before admitting those devices.
 bool usb_enum_admission_inspect(usb_enum_admission_info_t *info) {
   if (!info)
     return false;
@@ -1045,6 +1129,7 @@ bool usb_enum_admission_inspect(usb_enum_admission_info_t *info) {
 
     info->port = reconnect.port;
     info->connected_count = reconnect.connected_count;
+    info->unmanaged_root_count = reconnect.unmanaged_root_count;
     info->reconnect_reason = reconnect.result;
     info->result = reconnect.result == USB_REENUM_READY ?
         USB_ENUM_ADMIT_RECONNECT : USB_ENUM_ADMIT_RECONNECT_BLOCKED;
@@ -1059,13 +1144,14 @@ bool usb_enum_admission_inspect(usb_enum_admission_info_t *info) {
     return true;
   }
 
-  usb_hub_inventory_t inventory = {0};
-  if (!usb_hub_inventory_read(hub.ports, &inventory)) {
+  usb_topology_inventory_t inventory = {0};
+  if (!usb_topology_inventory_read(hub.ports, &inventory)) {
     info->result = USB_ENUM_ADMIT_PORT_FAILED;
     return true;
   }
 
   info->connected_count = inventory.connected_count;
+  info->unmanaged_root_count = inventory.unmanaged_root_count;
   info->port = inventory.port;
 
   if (inventory.change_pending) {
@@ -1074,7 +1160,8 @@ bool usb_enum_admission_inspect(usb_enum_admission_info_t *info) {
   }
 
   if (inventory.connected_count == 0U) {
-    info->result = USB_ENUM_ADMIT_NO_DEVICE;
+    info->result = inventory.unmanaged_root_count != 0U ?
+        USB_ENUM_ADMIT_UNMANAGED_ROOT : USB_ENUM_ADMIT_NO_DEVICE;
     return true;
   }
 
