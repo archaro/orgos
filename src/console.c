@@ -1740,8 +1740,8 @@ static void cmd_usb_test_midiout(void) {
   const uint8_t note_off[4] = {0x08U, 0x80U, 0x3cU, 0x00U};
   xhci_bulk_out_info_t info = {0};
   console_puts("USB-MIDI Note On...\n");
-  xhci_bulk_out_result_t result =
-      xhci_downstream_bulk_out(note_on, sizeof(note_on), &info);
+  xhci_bulk_out_result_t result = xhci_downstream_bulk_out(
+      device.slot_id, note_on, sizeof(note_on), &info);
   console_printf("  Result          : %u\n", (unsigned int)result);
   console_printf("  Completion code : %u\n",
       (unsigned int)info.completion_code);
@@ -1754,7 +1754,8 @@ static void cmd_usb_test_midiout(void) {
   usb_test_delay_ms(250U);
   console_puts("USB-MIDI Note Off...\n");
   info = (xhci_bulk_out_info_t){0};
-  result = xhci_downstream_bulk_out( note_off, sizeof(note_off), &info);
+  result = xhci_downstream_bulk_out(
+      device.slot_id, note_off, sizeof(note_off), &info);
   console_printf("  Result          : %u\n", (unsigned int)result);
   console_printf("  Completion code : %u\n",
       (unsigned int)info.completion_code);
@@ -1931,9 +1932,12 @@ static void cmd_usb_test_midiin(const char *args) {
 
 static void cmd_usb_test_midiwrap(void) {
   usb_enum_info_t enumeration = {0};
+  usb_device_t device = {0};
   if (!usb_get_enumeration(&enumeration) ||
-      enumeration.result != USB_ENUM_OK) {
-    console_puts("USB-MIDI device not enumerated.\n");
+      enumeration.result != USB_ENUM_OK || !usb_get_device(&device) ||
+      device.state != USB_DEVICE_ACTIVE || device.slot_id == 0U ||
+      device.slot_id != enumeration.slot_id) {
+    console_puts("No active USB-MIDI device.\n");
     return;
   }
   const unsigned int transfers = 520U;
@@ -1952,8 +1956,8 @@ static void cmd_usb_test_midiwrap(void) {
     // Cable 0, Control Change, channel 16, controller 102.
     uint8_t packet[4] = { 0x0bU, 0xbfU, 0x66U, (uint8_t)(i & 0x7fU) };
     xhci_bulk_out_info_t info = {0};
-    xhci_bulk_out_result_t result =
-        xhci_downstream_bulk_out(packet, sizeof(packet), &info);
+    xhci_bulk_out_result_t result = xhci_downstream_bulk_out(
+        device.slot_id, packet, sizeof(packet), &info);
     if (result != XHCI_BULK_OUT_OK) {
       console_printf("Transfer %u failed: %u, completion %u\n",
           i + 1U, (unsigned int)result, info.completion_code);

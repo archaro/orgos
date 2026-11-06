@@ -433,7 +433,7 @@ usb_enum_result_t usb_enumerate(usb_enum_info_t *info) {
 
   current_device.state = USB_DEVICE_CONFIGURED;
   state.stage = USB_ENUM_STAGE_MIDI_QUIRK;
-  if (!usb_midi_quirks_apply(state.quirks, &state.detail))
+  if (!usb_midi_quirks_apply(state.slot_id, state.quirks, &state.detail))
     result = USB_ENUM_MIDI_QUIRK_FAILED;
 
   if (result == USB_ENUM_OK) {

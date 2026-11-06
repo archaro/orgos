@@ -516,7 +516,7 @@ typedef struct {
   uint32_t length;
 } xhci_bulk_out_info_t;
 
-xhci_bulk_out_result_t xhci_downstream_bulk_out(
+xhci_bulk_out_result_t xhci_downstream_bulk_out(uint8_t slot_id,
     const uint8_t *data, uint32_t length, xhci_bulk_out_info_t *result);
 
 typedef enum {

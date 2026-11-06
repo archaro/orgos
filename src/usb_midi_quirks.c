@@ -26,7 +26,8 @@ uint32_t usb_midi_quirks_lookup(uint16_t vendor_id, uint16_t product_id) {
   return 0U;
 }
 
-bool usb_midi_quirks_apply(uint32_t quirks, uint32_t *detail) {
+bool usb_midi_quirks_apply(uint8_t slot_id,
+    uint32_t quirks, uint32_t *detail) {
 
   if (detail)
     *detail = 0U;
@@ -38,7 +39,7 @@ bool usb_midi_quirks_apply(uint32_t quirks, uint32_t *detail) {
     static const uint8_t eox[4] = {0x05U, 0xf7U, 0x00U, 0x00U};
     xhci_bulk_out_info_t info = {0};
     xhci_bulk_out_result_t result =
-        xhci_downstream_bulk_out(eox, sizeof(eox), &info);
+        xhci_downstream_bulk_out(slot_id, eox, sizeof(eox), &info);
 
     if (result != XHCI_BULK_OUT_OK || info.completion_code != 1U) {
       if (detail)

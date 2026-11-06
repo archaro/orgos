@@ -2675,15 +2675,20 @@ static bool xhci_bulk_out_publish(xhci_device_t *device,
   return cache_clean((const void *)address, line);
 }
 
-xhci_bulk_out_result_t xhci_downstream_bulk_out(
-    const uint8_t *data, uint32_t length,
-    xhci_bulk_out_info_t *result) {
+xhci_bulk_out_result_t xhci_downstream_bulk_out(uint8_t slot_id,
+    const uint8_t *data, uint32_t length, xhci_bulk_out_info_t *result) {
 
   if (!result)
     return XHCI_BULK_OUT_NOT_READY;
 
   *result = (xhci_bulk_out_info_t){0};
-  xhci_device_t *device = &devices[1];
+
+  // Resolve the slot before accessing any device-owned
+  // transfer state or DMA resources.
+  xhci_device_t *device = xhci_downstream_by_slot(slot_id);
+  if (!device)
+    return XHCI_BULK_OUT_NOT_READY;
+
   if (!data || device->lifecycle.quiesced || !device->bulk_out_ready ||
       device->bulk_out_active || device->bulk_out_failed ||
       !controller_running || !controller_verified ||
