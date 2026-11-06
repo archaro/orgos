@@ -42,8 +42,8 @@ static bool control_in(usb_enum_info_t *state, bool downstream,
   };
 
   xhci_control_result_t result = downstream ?
-      xhci_downstream_control_in(&setup, info) :
-      xhci_control_in(&setup, info);
+    xhci_downstream_control_in(state->slot_id, &setup, info) :
+    xhci_control_in(&setup, info);
 
   if (result != XHCI_CONTROL_OK) {
     state->ep0_operation_failed = true;
@@ -230,7 +230,7 @@ static usb_enum_result_t read_configuration( usb_enum_info_t *state) {
   return USB_ENUM_OK;
 }
 
-static usb_enum_result_t select_configuration( usb_enum_info_t *state) {
+static usb_enum_result_t select_configuration(usb_enum_info_t *state) {
 
   uint8_t configuration = state->midi.configuration;
   if (configuration == 0U) {
@@ -248,7 +248,7 @@ static usb_enum_result_t select_configuration( usb_enum_info_t *state) {
 
   xhci_control_info_t info = {0};
   xhci_control_result_t result =
-      xhci_downstream_control_no_data(&setup, &info);
+    xhci_downstream_control_no_data(state->slot_id, &setup, &info);
   if (result != XHCI_CONTROL_OK) {
     state->detail = (uint32_t)result;
     state->ep0_operation_failed = true;
@@ -281,7 +281,7 @@ static usb_enum_result_t select_configuration( usb_enum_info_t *state) {
 
   xhci_control_info_t interface_info = {0};
   xhci_control_result_t interface_result = xhci_downstream_control_no_data(
-          &interface_setup, &interface_info);
+        state->slot_id, &interface_setup, &interface_info);
 
   if (interface_result != XHCI_CONTROL_OK) {
     state->detail = (uint32_t)interface_result |

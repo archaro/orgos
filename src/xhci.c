@@ -4020,23 +4020,34 @@ xhci_control_result_t xhci_control_no_data(
   return xhci_control_transfer(&internal_hub, setup, result);
 }
 
-xhci_control_result_t xhci_downstream_control_in(
+xhci_control_result_t xhci_downstream_control_in(uint8_t slot_id,
     const xhci_setup_packet_t *setup, xhci_control_info_t *result) {
 
-  if (devices[1].lifecycle.quiesced || !setup ||
-      !(setup->request_type & 0x80U) || setup->length == 0U)
+  if (!setup || !(setup->request_type & 0x80U) || setup->length == 0U)
     return XHCI_CONTROL_NOT_READY;
 
-  return xhci_control_transfer(&devices[1], setup, result);
+  // Only a known downstream slot may issue
+  // transfers through its EP0 endpoint.
+  xhci_device_t *device = xhci_downstream_by_slot(slot_id);
+
+  if (!device || device->lifecycle.quiesced)
+    return XHCI_CONTROL_NOT_READY;
+
+  return xhci_control_transfer(device, setup, result);
 }
 
-xhci_control_result_t xhci_downstream_control_no_data(
+xhci_control_result_t xhci_downstream_control_no_data(uint8_t slot_id,
     const xhci_setup_packet_t *setup, xhci_control_info_t *result) {
 
-  if (devices[1].lifecycle.quiesced || !setup || setup->length != 0U)
+  if (!setup || setup->length != 0U)
     return XHCI_CONTROL_NOT_READY;
 
-  return xhci_control_transfer(&devices[1], setup, result);
+  xhci_device_t *device = xhci_downstream_by_slot(slot_id);
+
+  if (!device || device->lifecycle.quiesced)
+    return XHCI_CONTROL_NOT_READY;
+
+  return xhci_control_transfer(device, setup, result);
 }
 
 xhci_noop_result_t xhci_noop(xhci_noop_info_t *result) {
