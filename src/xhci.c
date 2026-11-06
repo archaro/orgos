@@ -239,6 +239,24 @@ static bool hub_notify_started;
 static bool slot_requested;
 static uint8_t internal_hub_slot;
 
+static xhci_device_t *xhci_device_by_slot(uint8_t slot_id) {
+  if (slot_id == 0U)
+    return NULL;
+
+  xhci_device_t *found = NULL;
+  for (unsigned int i = 0U; i < XHCI_MAX_DEVICES; i++) {
+    if (devices[i].slot_id != slot_id)
+      continue;
+    // Slot identity must be unique. An ambiguous
+    // owner must never receive a hardware event.
+    if (found != NULL)
+      return NULL;
+    found = &devices[i];
+  }
+
+  return found;
+}
+
 static uint32_t xhci_read(uint32_t offset) {
   return mmio_read((uintptr_t)(XHCI_BASE + offset));
 }
@@ -1627,9 +1645,11 @@ static xhci_dispatch_result_t xhci_dispatch_one(void) {
       endpoint_id == stop_in_event.endpoint_id &&
       event.completion_code >= 26U && event.completion_code <= 28U) {
 
-    xhci_device_t *device = &devices[1];
-    uint64_t base = device->bulk_in_ring.bus;
+    xhci_device_t *device = xhci_device_by_slot(event.slot_id);
+    if (!device || device->bulk_in_ring.pages == 0U)
+      return xhci_dispatch_unhandled(&event);
 
+    uint64_t base = device->bulk_in_ring.bus;
     if (event.parameter < base || event.parameter - base >= PAGE_SIZE ||
         ((event.parameter - base) % sizeof(xhci_trb_t)) != 0U)
       return xhci_dispatch_unhandled(&event);
@@ -1650,7 +1670,10 @@ static xhci_dispatch_result_t xhci_dispatch_one(void) {
       endpoint_id == stop_out_event.endpoint_id &&
       event.completion_code >= 26U && event.completion_code <= 28U) {
 
-    xhci_device_t *device = &devices[1];
+    xhci_device_t *device = xhci_device_by_slot(event.slot_id);
+    if (!device || device->bulk_out_ring.pages == 0U)
+      return xhci_dispatch_unhandled(&event);
+
     uint64_t base = device->bulk_out_ring.bus;
     uint64_t offset = event.parameter - base;
     // Accept only a TRB address belonging to
