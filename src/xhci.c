@@ -251,6 +251,9 @@ static bool hub_notify_started;
 static bool slot_requested;
 static uint8_t internal_hub_slot;
 
+// Forward-reference
+static void xhci_bulk_in_stream_service_device(xhci_device_t *device);
+
 static xhci_device_t *xhci_device_by_slot(uint8_t slot_id) {
   if (slot_id == 0U)
     return NULL;
@@ -1710,16 +1713,24 @@ static xhci_dispatch_result_t xhci_dispatch_one(void) {
 
 static xhci_dispatch_result_t xhci_dispatch_wait_step(void) {
   xhci_dispatch_result_t status = xhci_dispatch_one();
-
-  // A synchronous operation may dispatch a Bulk IN
-  // completion belonging to the continuous receiver.
-  // Finalise and rearm it without recursively
+  // A synchronous controller operation may also
+  // dispatch a completion for an active Bulk IN
+  // receiver on any managed device.
+  // Service completed receivers without recursively
   // entering the hardware event dispatcher.
-  if (status == XHCI_DISPATCH_OK &&
-      devices[1].receiver.started && !devices[1].receiver.failed &&
-      devices[1].receiver.waiter && devices[1].receiver.waiter->completed) {
-    xhci_bulk_in_stream_service();
-    event_stats.sync_in_services++;
+  if (status == XHCI_DISPATCH_OK) {
+    for (unsigned int i = 0U; i < XHCI_MAX_DEVICES; i++) {
+      xhci_device_t *device = &devices[i];
+      xhci_bulk_in_receiver_t *receiver = &device->receiver;
+      if (device->slot_id == 0U ||
+          !receiver->started || receiver->failed ||
+          !receiver->waiter || !receiver->waiter->completed ||
+          receiver->waiter->slot_id != device->slot_id)
+        continue;
+
+      xhci_bulk_in_stream_service_device(device);
+      event_stats.sync_in_services++;
+    }
   }
 
   return status;
@@ -2444,8 +2455,7 @@ xhci_bulk_config_result_t xhci_downstream_bulk_configure(
 
   // EP1 IN: type 6, error count 3, MPS 64.
   in[0] = 0U;
-  in[1] = ((uint32_t)in_mps << 16) |
-      (XHCI_EP_TYPE_IN << 3) | (3U << 1);
+  in[1] = ((uint32_t)in_mps << 16) | (XHCI_EP_TYPE_IN << 3) | (3U << 1);
   in[2] = (uint32_t)in_dequeue;
   in[3] = (uint32_t)(in_dequeue >> 32);
   in[4] = in_mps;
@@ -2541,7 +2551,7 @@ xhci_bulk_out_result_t xhci_downstream_bulk_out(
 
   *result = (xhci_bulk_out_info_t){0};
   xhci_device_t *device = &devices[1];
-  if (!data || devices[1].lifecycle.quiesced || !device->bulk_out_ready ||
+  if (!data || device->lifecycle.quiesced || !device->bulk_out_ready ||
       device->bulk_out_active || device->bulk_out_failed ||
       !controller_running || !controller_verified ||
       command_outstanding || command_ring_failed ||
@@ -2746,13 +2756,17 @@ static bool xhci_bulk_in_advance(xhci_device_t *device, size_t line) {
   return true;
 }
 
-static xhci_bulk_in_arm_result_t xhci_bulk_in_arm_one(void) {
-  if (devices[1].receiver.state != XHCI_BULK_IN_IDLE &&
-      devices[1].receiver.state != XHCI_BULK_IN_COMPLETE)
+static xhci_bulk_in_arm_result_t xhci_bulk_in_arm_one(
+    xhci_device_t *device) {
+  if (!device)
+    return XHCI_BULK_IN_ARM_NOT_READY;
+
+  xhci_bulk_in_receiver_t *receiver = &device->receiver;
+  if (receiver->state != XHCI_BULK_IN_IDLE &&
+      receiver->state != XHCI_BULK_IN_COMPLETE)
     return XHCI_BULK_IN_ARM_ALREADY_STARTED;
 
-  xhci_device_t *device = &devices[1];
-  if (devices[1].lifecycle.quiesced || !device->bulk_in_ready || !device->addressed ||
+  if (device->lifecycle.quiesced || !device->bulk_in_ready || !device->addressed ||
       !controller_running || !controller_verified ||
       command_ring_failed || dispatch_fault != XHCI_DISPATCH_NONE ||
       device->bulk_in_ring.owner != DMA_OWNER_DEVICE)
@@ -2792,28 +2806,28 @@ static xhci_bulk_in_arm_result_t xhci_bulk_in_arm_one(void) {
   uint64_t trb_address = device->bulk_in_ring.bus +
       (uint64_t)index * sizeof(xhci_trb_t);
   if (!xhci_bulk_in_publish(device, index, cache.data_line_size)) {
-    devices[1].receiver.state = XHCI_BULK_IN_FAILED;
+    receiver->state = XHCI_BULK_IN_FAILED;
     return XHCI_BULK_IN_ARM_RING_FAILED;
   }
 
   // A completion may arrive immediately after
   // the doorbell, so register its owner first.
-  devices[1].receiver.waiter = xhci_waiter_register(
+  receiver->waiter = xhci_waiter_register(
       XHCI_TRB_TRANSFER_EVENT, device->slot_id,
       XHCI_BULK_IN_DCI, trb_address);
 
-  if (!devices[1].receiver.waiter) {
-    devices[1].receiver.state = XHCI_BULK_IN_FAILED;
+  if (!receiver->waiter) {
+    receiver->state = XHCI_BULK_IN_FAILED;
     return XHCI_BULK_IN_ARM_WAITER_FAILED;
   }
 
-  devices[1].receiver.info = (xhci_bulk_in_info_t){
+  receiver->info = (xhci_bulk_in_info_t){
     .transfer_trb = trb_address,
     .requested = XHCI_BULK_IN_MAX_DATA,
     .slot_id = device->slot_id,
     .endpoint_id = XHCI_BULK_IN_DCI
   };
-  devices[1].receiver.state = XHCI_BULK_IN_PENDING;
+  receiver->state = XHCI_BULK_IN_PENDING;
 
   __asm__ volatile("dsb sy" ::: "memory");
 
@@ -2825,126 +2839,147 @@ static xhci_bulk_in_arm_result_t xhci_bulk_in_arm_one(void) {
 }
 
 static xhci_bulk_in_state_t xhci_downstream_bulk_in_status(
-    xhci_bulk_in_info_t *result) {
+    xhci_device_t *device, xhci_bulk_in_info_t *result) {
+  if (!device || !result)
+    return XHCI_BULK_IN_FAILED;
+
+  xhci_bulk_in_receiver_t *receiver = &device->receiver;
 
   if (!result)
     return XHCI_BULK_IN_FAILED;
 
-  if (devices[1].receiver.state == XHCI_BULK_IN_PENDING) {
+  if (receiver->state == XHCI_BULK_IN_PENDING) {
     // An event-stream failure makes completion
     // uncertain. Do not inspect device-owned DMA.
     if (dispatch_fault != XHCI_DISPATCH_NONE) {
-      devices[1].receiver.state = XHCI_BULK_IN_FAILED;
-    } else if (devices[1].receiver.waiter && devices[1].receiver.waiter->completed) {
-      xhci_event_t event = devices[1].receiver.waiter->event;
-      xhci_waiter_release(devices[1].receiver.waiter);
-      devices[1].receiver.waiter = NULL;
-      devices[1].receiver.info.completion_code = event.completion_code;
-      devices[1].receiver.info.event_parameter = event.parameter;
-      devices[1].receiver.info.event_status = event.status;
+      receiver->state = XHCI_BULK_IN_FAILED;
+    } else if (receiver->waiter && devices[1].receiver.waiter->completed) {
+      xhci_event_t event = receiver->waiter->event;
+      xhci_waiter_release(receiver->waiter);
+      receiver->waiter = NULL;
+      receiver->info.completion_code = event.completion_code;
+      receiver->info.event_parameter = event.parameter;
+      receiver->info.event_status = event.status;
 
       // For this single-TRB TD, the low 24 bits
       // represent the number of bytes not received.
       uint32_t residual = event.status & 0x00ffffffU;
-      devices[1].receiver.info.residual = residual;
+      receiver->info.residual = residual;
       bool successful = event.completion_code == XHCI_COMPLETION_SUCCESS ||
           event.completion_code == XHCI_COMPLETION_SHORT_PACKET;
       if (!successful || residual > XHCI_BULK_IN_MAX_DATA ||
           (event.completion_code == XHCI_COMPLETION_SUCCESS &&
            residual != 0U)) {
-        devices[1].receiver.state = XHCI_BULK_IN_FAILED;
+        receiver->state = XHCI_BULK_IN_FAILED;
       } else {
-        dma_buffer_t *buffer = &devices[1].bulk_in_buffer;
+        dma_buffer_t *buffer = &device->bulk_in_buffer;
         if (!dma_end_device(buffer)) {
-          devices[1].receiver.state = XHCI_BULK_IN_FAILED;
+          receiver->state = XHCI_BULK_IN_FAILED;
         } else {
           uint32_t received = XHCI_BULK_IN_MAX_DATA - residual;
           const uint8_t *bytes = buffer->virtual;
           for (uint32_t i = 0U; i < received; i++)
-            devices[1].receiver.info.data[i] = bytes[i];
+            receiver->info.data[i] = bytes[i];
 
-          devices[1].receiver.info.received = received;
+          receiver->info.received = received;
           // The completed TD has been consumed.
           // Advance the producer before another arm.
           cache_info_t cache;
           if (!cache_get_info(&cache) || cache.data_line_size == 0U ||
               cache.data_line_size > PAGE_SIZE ||
               (cache.data_line_size & (cache.data_line_size - 1U)) ||
-              !xhci_bulk_in_advance(&devices[1], cache.data_line_size)) {
-            devices[1].receiver.state = XHCI_BULK_IN_FAILED;
+              !xhci_bulk_in_advance(device, cache.data_line_size)) {
+            receiver->state = XHCI_BULK_IN_FAILED;
           } else {
-            devices[1].receiver.state = XHCI_BULK_IN_COMPLETE;
+            receiver->state = XHCI_BULK_IN_COMPLETE;
           }
         }
       }
     }
   }
 
-  *result = devices[1].receiver.info;
-  return devices[1].receiver.state;
+  *result = receiver->info;
+  return receiver->state;
 }
 
-xhci_in_reconcile_result_t xhci_bulk_in_quiesced_reconcile(void) {
-  if (!devices[1].receiver.started)
+static xhci_in_reconcile_result_t
+xhci_bulk_in_quiesced_reconcile_device(xhci_device_t *device) {
+  if (!device)
+    return XHCI_IN_RECONCILE_NOT_READY;
+
+  xhci_bulk_in_receiver_t *receiver = &device->receiver;
+
+  if (!receiver->started)
     return XHCI_IN_RECONCILE_NOT_STARTED;
 
   // Never inspect an active stream or a controller
   // whose event-dispatch state is uncertain.
-  if (!devices[1].lifecycle.quiesced || devices[1].lifecycle.slot_disabled ||
+  if (!device->lifecycle.quiesced || device->lifecycle.slot_disabled ||
       dispatch_fault != XHCI_DISPATCH_NONE)
     return XHCI_IN_RECONCILE_NOT_READY;
 
-  if (devices[1].receiver.state == XHCI_BULK_IN_FAILED ||
-      devices[1].receiver.state == XHCI_BULK_IN_COMPLETE)
+  if (receiver->state == XHCI_BULK_IN_FAILED ||
+      receiver->state == XHCI_BULK_IN_COMPLETE)
     return XHCI_IN_RECONCILE_RESOLVED;
 
-  if (devices[1].receiver.state != XHCI_BULK_IN_PENDING)
+  if (receiver->state != XHCI_BULK_IN_PENDING)
     return XHCI_IN_RECONCILE_FAILED;
 
   // A registered waiter must remain intact until
   // its completion has been delivered and consumed.
-  if (!devices[1].receiver.waiter)
+  if (!receiver->waiter)
     return XHCI_IN_RECONCILE_FAILED;
 
-  if (!devices[1].receiver.waiter->completed)
+  if (!receiver->waiter->completed)
     return XHCI_IN_RECONCILE_PENDING;
 
   xhci_bulk_in_info_t info = {0};
-  xhci_bulk_in_state_t state = xhci_downstream_bulk_in_status(&info);
+  xhci_bulk_in_state_t state = xhci_downstream_bulk_in_status(device, &info);
   if (state != XHCI_BULK_IN_FAILED && state != XHCI_BULK_IN_COMPLETE)
     return XHCI_IN_RECONCILE_FAILED;
 
   // The stream is no longer operational. Preserve
   // its transfer result for diagnostics, and do
   // not submit another transfer after disconnection.
-  devices[1].receiver.failed = true;
+  receiver->failed = true;
 
   return XHCI_IN_RECONCILE_OK;
 }
 
-xhci_bulk_in_arm_result_t xhci_bulk_in_stream_start(void) {
-  if (devices[1].receiver.started)
+static xhci_bulk_in_arm_result_t xhci_bulk_in_stream_start_device(
+    xhci_device_t *device) {
+  if (!device)
+    return XHCI_BULK_IN_ARM_NOT_READY;
+
+  xhci_bulk_in_receiver_t *receiver = &device->receiver;
+
+  if (receiver->started)
     return XHCI_BULK_IN_ARM_ALREADY_STARTED;
 
-  xhci_bulk_in_arm_result_t result = xhci_bulk_in_arm_one();
-  devices[1].receiver.stats.last_arm_result = result;
+  xhci_bulk_in_arm_result_t result = xhci_bulk_in_arm_one(device);
+  receiver->stats.last_arm_result = result;
   if (result != XHCI_BULK_IN_ARM_OK)
     return result;
 
-  devices[1].receiver.started = true;
-  devices[1].receiver.queued = false;
+  receiver->started = true;
+  receiver->queued = false;
 
   return XHCI_BULK_IN_ARM_OK;
 }
 
-void xhci_bulk_in_stream_service(void) {
-  if (!devices[1].receiver.started || devices[1].receiver.failed || devices[1].lifecycle.quiesced)
+static void xhci_bulk_in_stream_service_device(xhci_device_t *device) {
+  if (!device)
+    return;
+
+  xhci_bulk_in_receiver_t *receiver = &device->receiver;
+
+  if (!receiver->started || receiver->failed || device->lifecycle.quiesced)
     return;
 
   xhci_bulk_in_info_t info;
-  xhci_bulk_in_state_t state = xhci_downstream_bulk_in_status(&info);
+  xhci_bulk_in_state_t state = xhci_downstream_bulk_in_status(device, &info);
   if (state == XHCI_BULK_IN_FAILED) {
-    devices[1].receiver.failed = true;
+    receiver->failed = true;
     return;
   }
 
@@ -2953,98 +2988,114 @@ void xhci_bulk_in_stream_service(void) {
     return;
 
   if (state != XHCI_BULK_IN_COMPLETE) {
-    devices[1].receiver.failed = true;
+    receiver->failed = true;
     return;
   }
 
-  if (!devices[1].receiver.queued) {
+  if (!receiver->queued) {
     // With one outstanding TD and arming disabled
     // at capacity, this must never be reached.
-    if (devices[1].receiver.queue_count == XHCI_BULK_IN_QUEUE_CAPACITY) {
-      devices[1].receiver.failed = true;
+    if (receiver->queue_count == XHCI_BULK_IN_QUEUE_CAPACITY) {
+      receiver->failed = true;
       return;
     }
 
-    unsigned int tail = (devices[1].receiver.queue_head +
-        devices[1].receiver.queue_count) % XHCI_BULK_IN_QUEUE_CAPACITY;
-    devices[1].receiver.queue[tail] = info;
-    devices[1].receiver.queue_count++;
-    devices[1].receiver.queued = true;
-    devices[1].receiver.stats.transfers++;
-    devices[1].receiver.stats.bytes += info.received;
-    devices[1].receiver.stats.last_completion_code = info.completion_code;
+    unsigned int tail = (receiver->queue_head +
+        receiver->queue_count) % XHCI_BULK_IN_QUEUE_CAPACITY;
+    receiver->queue[tail] = info;
+    receiver->queue_count++;
+    receiver->queued = true;
+    receiver->stats.transfers++;
+    receiver->stats.bytes += info.received;
+    receiver->stats.last_completion_code = info.completion_code;
 
-    if (devices[1].receiver.queue_count > devices[1].receiver.stats.queue_peak)
-      devices[1].receiver.stats.queue_peak = devices[1].receiver.queue_count;
+    if (receiver->queue_count > receiver->stats.queue_peak)
+      receiver->stats.queue_peak = receiver->queue_count;
 
     // Count transitions past the final data TRB.
-    uint64_t last_trb = devices[1].bulk_in_ring.bus +
+    uint64_t last_trb = device->bulk_in_ring.bus +
         (uint64_t)(XHCI_RING_TRBS - 2U) * sizeof(xhci_trb_t);
     if (info.transfer_trb == last_trb)
-      devices[1].receiver.stats.ring_wraps++;
-    if (devices[1].receiver.queue_count == XHCI_BULK_IN_QUEUE_CAPACITY)
-      devices[1].receiver.stats.pauses++;
+      receiver->stats.ring_wraps++;
+    if (receiver->queue_count == XHCI_BULK_IN_QUEUE_CAPACITY)
+      receiver->stats.pauses++;
   }
 
   // Do not submit another transfer until there is
   // space to retain its eventual completion.
-  if (devices[1].receiver.queue_count == XHCI_BULK_IN_QUEUE_CAPACITY)
+  if (receiver->queue_count == XHCI_BULK_IN_QUEUE_CAPACITY)
     return;
 
-  xhci_bulk_in_arm_result_t result = xhci_bulk_in_arm_one();
-  devices[1].receiver.stats.last_arm_result = result;
+  xhci_bulk_in_arm_result_t result = xhci_bulk_in_arm_one(device);
+  receiver->stats.last_arm_result = result;
   if (result != XHCI_BULK_IN_ARM_OK) {
-    devices[1].receiver.failed = true;
+    receiver->failed = true;
     return;
   }
 
-  devices[1].receiver.queued = false;
+  receiver->queued = false;
 }
 
-bool xhci_bulk_in_stream_get_stats(xhci_bulk_in_stream_stats_t *result) {
+static bool xhci_bulk_in_stream_get_stats_device( xhci_device_t *device,
+    xhci_bulk_in_stream_stats_t *result) {
+  if (!device || !result)
+    return false;
+
+  xhci_bulk_in_receiver_t *receiver = &device->receiver;
+
   if (!result)
     return false;
 
-  *result = devices[1].receiver.stats;
-  result->started = devices[1].receiver.started;
-  result->failed = devices[1].receiver.failed;
-  result->queue_depth = devices[1].receiver.queue_count;
-  result->paused = devices[1].receiver.started && !devices[1].receiver.failed &&
-      devices[1].receiver.queued &&
-      devices[1].receiver.queue_count == XHCI_BULK_IN_QUEUE_CAPACITY;
+  *result = receiver->stats;
+  result->started = receiver->started;
+  result->failed = receiver->failed;
+  result->queue_depth = receiver->queue_count;
+  result->paused = receiver->started && receiver->failed &&
+      receiver->queued &&
+      receiver->queue_count == XHCI_BULK_IN_QUEUE_CAPACITY;
 
   return true;
 }
 
-bool xhci_bulk_in_stream_read(xhci_bulk_in_info_t *result) {
-  if (!result || devices[1].receiver.queue_count == 0U)
+static bool xhci_bulk_in_stream_read_device(xhci_device_t *device,
+    xhci_bulk_in_info_t *result) {
+  if (!device || !result)
     return false;
 
-  *result = devices[1].receiver.queue[devices[1].receiver.queue_head];
-  devices[1].receiver.queue_head = (devices[1].receiver.queue_head + 1U) %
+  xhci_bulk_in_receiver_t *receiver = &device->receiver;
+
+  if (!result || receiver->queue_count == 0U)
+    return false;
+
+  *result = receiver->queue[device->receiver.queue_head];
+  receiver->queue_head = (device->receiver.queue_head + 1U) %
       XHCI_BULK_IN_QUEUE_CAPACITY;
 
-  devices[1].receiver.queue_count--;
+  receiver->queue_count--;
   return true;
 }
 
-xhci_bulk_in_retire_result_t xhci_bulk_in_stream_retire(void) {
-  xhci_device_t *device = &devices[1];
+static xhci_bulk_in_retire_result_t xhci_bulk_in_stream_retire_device(
+    xhci_device_t *device) {
+  if (!device)
+    return XHCI_BULK_IN_RETIRE_NOT_READY;
 
-  if (!devices[1].receiver.started)
+  xhci_bulk_in_receiver_t *receiver = &device->receiver;
+
+  if (!receiver->started)
     return XHCI_BULK_IN_RETIRE_NOT_STARTED;
 
   // The controller must have relinquished
   // the slot before retiring receiver state.
-  if (!devices[1].lifecycle.quiesced || !devices[1].lifecycle.slot_disabled ||
-      devices[1].lifecycle.cleaned || !controller_running ||
+  if (!device->lifecycle.quiesced || !device->lifecycle.slot_disabled ||
+      device->lifecycle.cleaned || !controller_running ||
       !controller_verified || command_outstanding ||
       command_ring_failed || dispatch_fault != XHCI_DISPATCH_NONE)
     return XHCI_BULK_IN_RETIRE_NOT_READY;
 
   // The event dispatcher must no longer have
   // any outstanding owner for this device.
-  if (devices[1].receiver.waiter || devices[1].receiver.state == XHCI_BULK_IN_PENDING ||
+  if (receiver->waiter || receiver->state == XHCI_BULK_IN_PENDING ||
       device->ep0_active || device->bulk_out_active)
     return XHCI_BULK_IN_RETIRE_BUSY;
 
@@ -3056,23 +3107,54 @@ xhci_bulk_in_retire_result_t xhci_bulk_in_stream_retire(void) {
 
   // The receiver must have reached a terminal
   // transfer state before we discard its state.
-  if (devices[1].receiver.state != XHCI_BULK_IN_FAILED &&
-      devices[1].receiver.state != XHCI_BULK_IN_COMPLETE)
+  if (receiver->state != XHCI_BULK_IN_FAILED &&
+      receiver->state != XHCI_BULK_IN_COMPLETE)
     return XHCI_BULK_IN_RETIRE_BUSY;
 
   // Disable Slot has completed. The controller
   // no longer owns this endpoint's execution.
-  devices[1].receiver.started = false;
-  devices[1].receiver.failed = false;
-  devices[1].receiver.queued = false;
-  devices[1].receiver.state = XHCI_BULK_IN_IDLE;
-  devices[1].receiver.waiter = NULL;
-  devices[1].receiver.queue_head = 0U;
-  devices[1].receiver.queue_count = 0U;
+  receiver->started = false;
+  receiver->failed = false;
+  receiver->queued = false;
+  receiver->state = XHCI_BULK_IN_IDLE;
+  receiver->waiter = NULL;
+  receiver->queue_head = 0U;
+  receiver->queue_count = 0U;
 
   // Preserve the last transfer information and
   // statistics until downstream recycling.
   return XHCI_BULK_IN_RETIRE_OK;
+}
+
+// Compatibility entry points for the current
+// single managed downstream device.
+//
+// Device selection will move into the USB core
+// once multiple device contexts are admitted.
+
+xhci_in_reconcile_result_t xhci_bulk_in_quiesced_reconcile(void) {
+  return xhci_bulk_in_quiesced_reconcile_device(&devices[1]);
+}
+
+xhci_bulk_in_arm_result_t xhci_bulk_in_stream_start(void) {
+  return xhci_bulk_in_stream_start_device(&devices[1]);
+}
+
+void xhci_bulk_in_stream_service(void) {
+  xhci_bulk_in_stream_service_device(&devices[1]);
+}
+
+bool xhci_bulk_in_stream_get_stats(
+    xhci_bulk_in_stream_stats_t *result) {
+  return xhci_bulk_in_stream_get_stats_device(&devices[1], result);
+}
+
+bool xhci_bulk_in_stream_read(xhci_bulk_in_info_t *result) {
+  return xhci_bulk_in_stream_read_device(&devices[1], result);
+}
+
+xhci_bulk_in_retire_result_t xhci_bulk_in_stream_retire(void) {
+  return xhci_bulk_in_stream_retire_device(&devices[1]);
 }
 
 xhci_hub_result_t xhci_hub_configure(
@@ -3277,7 +3359,7 @@ xhci_address_result_t xhci_address_downstream(xhci_address_info_t *result) {
   *result = (xhci_address_info_t){0};
   xhci_device_t *device = &devices[1];
   // Never repeat Address Device after an uncertain completion.
-  if (devices[1].lifecycle.address_attempted)
+  if (device->lifecycle.address_attempted)
     return XHCI_ADDRESS_ALREADY_ATTEMPTED;
 
   // The parent hub must already be registered as a hub
@@ -3344,7 +3426,7 @@ xhci_address_result_t xhci_address_downstream(xhci_address_info_t *result) {
         ((uint32_t)device->slot_id << 24)
   };
 
-  devices[1].lifecycle.address_attempted = true;
+  device->lifecycle.address_attempted = true;
   xhci_command_completion_t completion = {0};
   xhci_command_result_t status = xhci_command_submit(&command, &completion);
   result->command_result = status;
@@ -3396,7 +3478,7 @@ xhci_ep0_update_result_t xhci_downstream_ep0_update(
   *result = (xhci_ep0_update_info_t){0};
 
   xhci_device_t *device = &devices[1];
-  if (devices[1].lifecycle.ep0_update_attempted)
+  if (device->lifecycle.ep0_update_attempted)
     return XHCI_EP0_UPDATE_ALREADY_ATTEMPTED;
 
   if (!device->prepared || !device->addressed ||
@@ -3473,7 +3555,7 @@ xhci_ep0_update_result_t xhci_downstream_ep0_update(
   };
 
   // An uncertain command completion must not be retried.
-  devices[1].lifecycle.ep0_update_attempted = true;
+  device->lifecycle.ep0_update_attempted = true;
   xhci_command_completion_t completion = {0};
   xhci_command_result_t status = xhci_command_submit(&command, &completion);
   result->command_result = status;
@@ -4220,7 +4302,7 @@ static bool xhci_downstream_ep0_state(uint8_t *state) {
   xhci_device_t *device = &devices[1];
 
   if (!device->addressed || device->slot_id == 0U ||
-      devices[1].lifecycle.slot_disabled || device->output.owner != DMA_OWNER_DEVICE ||
+      device->lifecycle.slot_disabled || device->output.owner != DMA_OWNER_DEVICE ||
       (device->context_size != 32U && device->context_size != 64U))
     return false;
 
@@ -4245,7 +4327,7 @@ bool xhci_downstream_ep0_fault_reclaimable(void) {
   if (device->slot_id == 0U || !device->addressed ||
       !controller_running || !controller_verified ||
       command_outstanding || command_ring_failed ||
-      dispatch_fault != XHCI_DISPATCH_NONE || devices[1].lifecycle.slot_disabled ||
+      dispatch_fault != XHCI_DISPATCH_NONE || device->lifecycle.slot_disabled ||
       device->ep0_active || !device->ep0_failed ||
       !device->ep0_submitted || !device->ep0_completion_seen ||
       device->ep0_completion_code == 0U ||
@@ -4280,7 +4362,7 @@ static bool xhci_downstream_endpoint_states(
 
   xhci_device_t *device = &devices[1];
   if (!device->addressed || device->slot_id == 0U ||
-      devices[1].lifecycle.slot_disabled || device->output.owner != DMA_OWNER_DEVICE ||
+      device->lifecycle.slot_disabled || device->output.owner != DMA_OWNER_DEVICE ||
       (device->context_size != 32U && device->context_size != 64U))
     return false;
 
@@ -4310,7 +4392,7 @@ bool xhci_downstream_transfer_state(xhci_downstream_transfer_state_t *state) {
   *state = (xhci_downstream_transfer_state_t){0};
   xhci_device_t *device = &devices[1];
   state->slot_id = device->slot_id;
-  state->quiesced = devices[1].lifecycle.quiesced;
+  state->quiesced = device->lifecycle.quiesced;
   state->ep0_active = device->ep0_active;
   state->ep0_failed = device->ep0_failed;
   state->ep0_submitted = device->ep0_submitted;
@@ -4318,11 +4400,11 @@ bool xhci_downstream_transfer_state(xhci_downstream_transfer_state_t *state) {
   state->ep0_completion_code = device->ep0_completion_code;
   state->ep0_state_valid = xhci_downstream_ep0_state(&state->ep0_state);
   state->bulk_out_active = device->bulk_out_active;
-  state->bulk_in_started = devices[1].receiver.started;
-  state->bulk_in_pending = devices[1].receiver.state == XHCI_BULK_IN_PENDING;
-  state->bulk_in_completed = devices[1].receiver.waiter && devices[1].receiver.waiter->completed;
-  state->bulk_in_failed = devices[1].receiver.state == XHCI_BULK_IN_FAILED;
-  state->bulk_in_completion_code = devices[1].receiver.info.completion_code;
+  state->bulk_in_started = device->receiver.started;
+  state->bulk_in_pending = device->receiver.state == XHCI_BULK_IN_PENDING;
+  state->bulk_in_completed = device->receiver.waiter && device->receiver.waiter->completed;
+  state->bulk_in_failed = device->receiver.state == XHCI_BULK_IN_FAILED;
+  state->bulk_in_completion_code = device->receiver.info.completion_code;
   state->endpoint_states_valid = xhci_downstream_endpoint_states(
           &state->bulk_in_ep_state, &state->bulk_out_ep_state);
 
@@ -4382,8 +4464,8 @@ xhci_cleanup_result_t xhci_downstream_cleanup(xhci_cleanup_info_t *info) {
 
   // A continuous receiver must be retired
   // before its buffers can be reclaimed.
-  if (devices[1].receiver.started || devices[1].receiver.waiter ||
-      devices[1].receiver.state == XHCI_BULK_IN_PENDING)
+  if (device->receiver.started || device->receiver.waiter ||
+      device->receiver.state == XHCI_BULK_IN_PENDING)
     return XHCI_CLEANUP_BUSY;
 
   // Never destroy the state belonging
@@ -4427,7 +4509,7 @@ xhci_cleanup_result_t xhci_downstream_cleanup(xhci_cleanup_info_t *info) {
   device->prepared = false;
   device->addressed = false;
 
-  devices[1].lifecycle.cleaned = true;
+  device->lifecycle.cleaned = true;
   return XHCI_CLEANUP_OK;
 }
 
@@ -4536,7 +4618,7 @@ xhci_stop_result_t xhci_downstream_stop_bulk_in(xhci_stop_info_t *info) {
   xhci_device_t *device = &devices[1];
   if (!devices[1].lifecycle.quiesced || devices[1].lifecycle.slot_disabled ||
       !device->addressed || !device->bulk_in_ready ||
-      !devices[1].receiver.started || device->slot_id == 0U ||
+      !device->receiver.started || device->slot_id == 0U ||
       !controller_running || !controller_verified ||
       command_outstanding || command_ring_failed ||
       dispatch_fault != XHCI_DISPATCH_NONE)
@@ -4544,8 +4626,8 @@ xhci_stop_result_t xhci_downstream_stop_bulk_in(xhci_stop_info_t *info) {
 
   // A completed waiter should be reconciled,
   // not cancelled.
-  if (devices[1].receiver.state != XHCI_BULK_IN_PENDING ||
-      !devices[1].receiver.waiter || devices[1].receiver.waiter->completed ||
+  if (device->receiver.state != XHCI_BULK_IN_PENDING ||
+      !device->receiver.waiter || device->receiver.waiter->completed ||
       device->ep0_active || device->bulk_out_active)
     return XHCI_STOP_BUSY;
 
@@ -4553,7 +4635,7 @@ xhci_stop_result_t xhci_downstream_stop_bulk_in(xhci_stop_info_t *info) {
   // interfere with this cancellation.
   for (unsigned int i = 0U; i < XHCI_EVENT_WAITERS; i++) {
     xhci_event_waiter_t *waiter = &event_waiters[i];
-    if (!waiter->active || waiter == devices[1].receiver.waiter)
+    if (!waiter->active || waiter == device->receiver.waiter)
       continue;
     if (waiter->slot_id == device->slot_id)
       return XHCI_STOP_BUSY;
@@ -4581,7 +4663,7 @@ xhci_stop_result_t xhci_downstream_stop_bulk_in(xhci_stop_info_t *info) {
         ((uint32_t)device->slot_id << 24)
   };
 
-  devices[1].lifecycle.stop_in_attempted = true;
+  device->lifecycle.stop_in_attempted = true;
 
   stop_in_event = (xhci_stop_event_state_t){
     .armed = true,
@@ -4615,21 +4697,21 @@ xhci_stop_result_t xhci_downstream_stop_bulk_in(xhci_stop_info_t *info) {
 
   // The controller has stopped executing this
   // endpoint. Reconcile its software owner.
-  if (devices[1].receiver.waiter && devices[1].receiver.waiter->completed) {
-    xhci_in_reconcile_result_t result = xhci_bulk_in_quiesced_reconcile();
+  if (device->receiver.waiter && device->receiver.waiter->completed) {
+    xhci_in_reconcile_result_t result = xhci_bulk_in_quiesced_reconcile_device(device);
     if (result != XHCI_IN_RECONCILE_OK)
       return XHCI_STOP_VERIFY_FAILED;
-  } else if (devices[1].receiver.waiter && devices[1].receiver.state == XHCI_BULK_IN_PENDING) {
+  } else if (device->receiver.waiter && device->receiver.state == XHCI_BULK_IN_PENDING) {
     // The stopped event described the dequeue
     // position, not the pending receive TD.
     // Stop Endpoint completed successfully,
     // so this TD can no longer execute.
-    xhci_waiter_release(devices[1].receiver.waiter);
-    devices[1].receiver.waiter = NULL;
-    devices[1].receiver.info.completion_code = stop_in_event.completion_code;
-    devices[1].receiver.info.event_parameter = stop_in_event.trb_address;
-    devices[1].receiver.state = XHCI_BULK_IN_FAILED;
-    devices[1].receiver.failed = true;
+    xhci_waiter_release(device->receiver.waiter);
+    device->receiver.waiter = NULL;
+    device->receiver.info.completion_code = stop_in_event.completion_code;
+    device->receiver.info.event_parameter = stop_in_event.trb_address;
+    device->receiver.state = XHCI_BULK_IN_FAILED;
+    device->receiver.failed = true;
   } else {
     return XHCI_STOP_VERIFY_FAILED;
   }
@@ -4690,19 +4772,19 @@ xhci_disable_result_t xhci_downstream_disable(xhci_disable_info_t *info) {
   if (status != XHCI_COMMAND_OK || completion.slot_id != device->slot_id)
     return XHCI_DISABLE_COMMAND_FAILED;
 
-  devices[1].lifecycle.slot_disabled = true;
+  device->lifecycle.slot_disabled = true;
   return XHCI_DISABLE_OK;
 }
 
 xhci_recycle_result_t xhci_downstream_recycle(void) {
   xhci_device_t *device = &devices[1];
 
-  if (!devices[1].lifecycle.slot_disabled || !devices[1].lifecycle.cleaned ||
-      !devices[1].lifecycle.quiesced || !controller_running || !controller_verified ||
+  if (!device->lifecycle.slot_disabled || !device->lifecycle.cleaned ||
+      !device->lifecycle.quiesced || !controller_running || !controller_verified ||
       command_outstanding || command_ring_failed || device->slot_id == 0U)
     return XHCI_RECYCLE_NOT_READY;
 
-  if (devices[1].receiver.started || devices[1].receiver.waiter || device->ep0_active ||
+  if (device->receiver.started || device->receiver.waiter || device->ep0_active ||
       device->bulk_out_active)
     return XHCI_RECYCLE_BUSY;
 
