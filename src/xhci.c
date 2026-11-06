@@ -126,6 +126,15 @@ typedef struct {
 } xhci_bulk_in_receiver_t;
 
 typedef struct {
+  bool armed;
+  bool received;
+  uint8_t slot_id;
+  uint8_t endpoint_id;
+  uint8_t completion_code;
+  uint64_t trb_address;
+} xhci_stop_event_state_t;
+
+typedef struct {
   dma_buffer_t input;
   dma_buffer_t output;
   dma_buffer_t ep0_ring;
@@ -174,6 +183,8 @@ typedef struct {
   bool interrupt_wrap_pending;
   xhci_device_lifecycle_t lifecycle;
   xhci_bulk_in_receiver_t receiver;
+  xhci_stop_event_state_t stop_in;
+  xhci_stop_event_state_t stop_out;
 } xhci_device_t;
 
 typedef enum {
@@ -232,17 +243,6 @@ struct xhci_event_waiter {
   xhci_event_t event;
 };
 static xhci_event_waiter_t event_waiters[XHCI_EVENT_WAITERS];
-
-typedef struct {
-  bool armed;
-  bool received;
-  uint8_t slot_id;
-  uint8_t endpoint_id;
-  uint8_t completion_code;
-  uint64_t trb_address;
-} xhci_stop_event_state_t;
-static xhci_stop_event_state_t stop_out_event;
-static xhci_stop_event_state_t stop_in_event;
 
 static xhci_hub_notify_info_t hub_notify_info;
 static xhci_event_waiter_t *hub_notify_waiter;
@@ -1617,9 +1617,17 @@ static xhci_dispatch_result_t xhci_dispatch_one(void) {
   }
 
   uint8_t endpoint_id = 0U;
-
-  if (event.type == XHCI_TRB_TRANSFER_EVENT)
+  xhci_device_t *device = NULL;
+  xhci_stop_event_state_t *in_stop = NULL;
+  xhci_stop_event_state_t *out_stop = NULL;
+  if (event.type == XHCI_TRB_TRANSFER_EVENT) {
     endpoint_id = (uint8_t)((event.control >> 16) & 0x1fU);
+    device = xhci_device_by_slot(event.slot_id);
+    if (device) {
+      in_stop = &device->stop_in;
+      out_stop = &device->stop_out;
+    }
+  }
 
   for (unsigned int i = 0; i < XHCI_EVENT_WAITERS; i++) {
     xhci_event_waiter_t *waiter = &event_waiters[i];
@@ -1637,14 +1645,14 @@ static xhci_dispatch_result_t xhci_dispatch_one(void) {
     waiter->completed = true;
     // A stopped Bulk IN event may belong to
     // the outstanding receive TD itself.
-    if (stop_in_event.armed && !stop_in_event.received &&
-        event.type == XHCI_TRB_TRANSFER_EVENT &&
-        event.slot_id == stop_in_event.slot_id &&
-        endpoint_id == stop_in_event.endpoint_id &&
-        event.completion_code >= 26U && event.completion_code <= 28U) {
-      stop_in_event.received = true;
-      stop_in_event.completion_code = event.completion_code;
-      stop_in_event.trb_address = event.parameter;
+    if (in_stop && in_stop->armed && !in_stop->received &&
+        event.slot_id == in_stop->slot_id &&
+        endpoint_id == in_stop->endpoint_id &&
+        event.completion_code >= 26U &&
+        event.completion_code <= 28U) {
+      in_stop->received = true;
+      in_stop->completion_code = event.completion_code;
+      in_stop->trb_address = event.parameter;
     }
     if (event.type == XHCI_TRB_COMMAND_EVENT)
       event_stats.command_events++;
@@ -1655,13 +1663,12 @@ static xhci_dispatch_result_t xhci_dispatch_one(void) {
 
   // Stop Endpoint may report a dequeue position
   // rather than the outstanding Bulk IN TD.
-  if (event.type == XHCI_TRB_TRANSFER_EVENT && stop_in_event.armed &&
-      !stop_in_event.received && event.slot_id == stop_in_event.slot_id &&
-      endpoint_id == stop_in_event.endpoint_id &&
+  if (in_stop && in_stop->armed && !in_stop->received &&
+      event.slot_id == in_stop->slot_id &&
+      endpoint_id == in_stop->endpoint_id &&
       event.completion_code >= 26U && event.completion_code <= 28U) {
 
-    xhci_device_t *device = xhci_device_by_slot(event.slot_id);
-    if (!device || device->bulk_in_ring.pages == 0U)
+    if (device->bulk_in_ring.pages == 0U)
       return xhci_dispatch_unhandled(&event);
 
     uint64_t base = device->bulk_in_ring.bus;
@@ -1669,9 +1676,9 @@ static xhci_dispatch_result_t xhci_dispatch_one(void) {
         ((event.parameter - base) % sizeof(xhci_trb_t)) != 0U)
       return xhci_dispatch_unhandled(&event);
 
-    stop_in_event.received = true;
-    stop_in_event.completion_code = event.completion_code;
-    stop_in_event.trb_address = event.parameter;
+    in_stop->received = true;
+    in_stop->completion_code = event.completion_code;
+    in_stop->trb_address = event.parameter;
 
     event_stats.transfer_events++;
     return XHCI_DISPATCH_OK;
@@ -1680,26 +1687,23 @@ static xhci_dispatch_result_t xhci_dispatch_one(void) {
   // Stop Endpoint can force a Transfer Event for
   // the endpoint's current dequeue position.
   // It need not correspond to an outstanding TD.
-  if (event.type == XHCI_TRB_TRANSFER_EVENT && stop_out_event.armed &&
-      !stop_out_event.received && event.slot_id == stop_out_event.slot_id &&
-      endpoint_id == stop_out_event.endpoint_id &&
+  if (out_stop && out_stop->armed && !out_stop->received &&
+      event.slot_id == out_stop->slot_id &&
+      endpoint_id == out_stop->endpoint_id &&
       event.completion_code >= 26U && event.completion_code <= 28U) {
 
-    xhci_device_t *device = xhci_device_by_slot(event.slot_id);
-    if (!device || device->bulk_out_ring.pages == 0U)
+    if (device->bulk_out_ring.pages == 0U)
       return xhci_dispatch_unhandled(&event);
 
     uint64_t base = device->bulk_out_ring.bus;
     uint64_t offset = event.parameter - base;
-    // Accept only a TRB address belonging to
-    // this endpoint's existing transfer ring.
     if (event.parameter < base || offset >= PAGE_SIZE ||
         (offset % sizeof(xhci_trb_t)) != 0U)
       return xhci_dispatch_unhandled(&event);
 
-    stop_out_event.received = true;
-    stop_out_event.completion_code = event.completion_code;
-    stop_out_event.trb_address = event.parameter;
+    out_stop->received = true;
+    out_stop->completion_code = event.completion_code;
+    out_stop->trb_address = event.parameter;
 
     event_stats.transfer_events++;
     return XHCI_DISPATCH_OK;
@@ -2845,15 +2849,12 @@ static xhci_bulk_in_state_t xhci_downstream_bulk_in_status(
 
   xhci_bulk_in_receiver_t *receiver = &device->receiver;
 
-  if (!result)
-    return XHCI_BULK_IN_FAILED;
-
   if (receiver->state == XHCI_BULK_IN_PENDING) {
     // An event-stream failure makes completion
     // uncertain. Do not inspect device-owned DMA.
     if (dispatch_fault != XHCI_DISPATCH_NONE) {
       receiver->state = XHCI_BULK_IN_FAILED;
-    } else if (receiver->waiter && devices[1].receiver.waiter->completed) {
+    } else if (receiver->waiter && receiver->waiter->completed) {
       xhci_event_t event = receiver->waiter->event;
       xhci_waiter_release(receiver->waiter);
       receiver->waiter = NULL;
@@ -3043,14 +3044,11 @@ static bool xhci_bulk_in_stream_get_stats_device( xhci_device_t *device,
 
   xhci_bulk_in_receiver_t *receiver = &device->receiver;
 
-  if (!result)
-    return false;
-
   *result = receiver->stats;
   result->started = receiver->started;
   result->failed = receiver->failed;
   result->queue_depth = receiver->queue_count;
-  result->paused = receiver->started && receiver->failed &&
+  result->paused = receiver->started && !receiver->failed &&
       receiver->queued &&
       receiver->queue_count == XHCI_BULK_IN_QUEUE_CAPACITY;
 
@@ -3064,11 +3062,11 @@ static bool xhci_bulk_in_stream_read_device(xhci_device_t *device,
 
   xhci_bulk_in_receiver_t *receiver = &device->receiver;
 
-  if (!result || receiver->queue_count == 0U)
+  if (receiver->queue_count == 0U)
     return false;
 
-  *result = receiver->queue[device->receiver.queue_head];
-  receiver->queue_head = (device->receiver.queue_head + 1U) %
+  *result = receiver->queue[receiver->queue_head];
+  receiver->queue_head = (receiver->queue_head + 1U) %
       XHCI_BULK_IN_QUEUE_CAPACITY;
 
   receiver->queue_count--;
@@ -4521,10 +4519,12 @@ xhci_stop_result_t xhci_downstream_stop_bulk_out( xhci_stop_info_t *info) {
     .command_result = XHCI_COMMAND_UNAVAILABLE
   };
 
-  if (devices[1].lifecycle.stop_out_attempted)
+  xhci_device_t *device = &devices[1];
+  xhci_stop_event_state_t *stop = &device->stop_out;
+
+  if (device->lifecycle.stop_out_attempted)
     return XHCI_STOP_ALREADY_ATTEMPTED;
 
-  xhci_device_t *device = &devices[1];
   if (!devices[1].lifecycle.quiesced || devices[1].lifecycle.slot_disabled ||
       !device->addressed || !device->bulk_out_ready ||
       device->slot_id == 0U || !controller_running ||
@@ -4568,8 +4568,8 @@ xhci_stop_result_t xhci_downstream_stop_bulk_out( xhci_stop_info_t *info) {
         ((uint32_t)device->slot_id << 24)
   };
 
-  devices[1].lifecycle.stop_out_attempted = true;
-  stop_out_event = (xhci_stop_event_state_t){
+  device->lifecycle.stop_out_attempted = true;
+  *stop = (xhci_stop_event_state_t){
     .armed = true,
     .slot_id = device->slot_id,
     .endpoint_id = XHCI_BULK_OUT_DCI
@@ -4580,17 +4580,17 @@ xhci_stop_result_t xhci_downstream_stop_bulk_out( xhci_stop_info_t *info) {
 
   info->command_result = status;
   info->completion_code = completion.completion_code;
-  stop_out_event.armed = false;
-  info->stop_event_received = stop_out_event.received;
-  info->stop_event_code = stop_out_event.completion_code;
-  info->stop_event_trb = stop_out_event.trb_address;
+  stop->armed = false;
+  info->stop_event_received = stop->received;
+  info->stop_event_code = stop->completion_code;
+  info->stop_event_trb = stop->trb_address;
 
   if (status != XHCI_COMMAND_OK || completion.slot_id != device->slot_id)
     return XHCI_STOP_COMMAND_FAILED;
 
   // A successful Stop Endpoint command must have
   // generated its stopped Transfer Event.
-  if (!stop_out_event.received)
+  if (!stop->received)
     return XHCI_STOP_VERIFY_FAILED;
 
   if (!xhci_downstream_endpoint_states(&in_state, &out_state))
@@ -4604,7 +4604,6 @@ xhci_stop_result_t xhci_downstream_stop_bulk_out( xhci_stop_info_t *info) {
 }
 
 xhci_stop_result_t xhci_downstream_stop_bulk_in(xhci_stop_info_t *info) {
-
   if (!info)
     return XHCI_STOP_NOT_READY;
 
@@ -4612,11 +4611,13 @@ xhci_stop_result_t xhci_downstream_stop_bulk_in(xhci_stop_info_t *info) {
     .command_result = XHCI_COMMAND_UNAVAILABLE
   };
 
-  if (devices[1].lifecycle.stop_in_attempted)
+  xhci_device_t *device = &devices[1];
+  xhci_stop_event_state_t *stop = &device->stop_in;
+
+  if (device->lifecycle.stop_in_attempted)
     return XHCI_STOP_ALREADY_ATTEMPTED;
 
-  xhci_device_t *device = &devices[1];
-  if (!devices[1].lifecycle.quiesced || devices[1].lifecycle.slot_disabled ||
+  if (!device->lifecycle.quiesced || device->lifecycle.slot_disabled ||
       !device->addressed || !device->bulk_in_ready ||
       !device->receiver.started || device->slot_id == 0U ||
       !controller_running || !controller_verified ||
@@ -4665,7 +4666,7 @@ xhci_stop_result_t xhci_downstream_stop_bulk_in(xhci_stop_info_t *info) {
 
   device->lifecycle.stop_in_attempted = true;
 
-  stop_in_event = (xhci_stop_event_state_t){
+  *stop = (xhci_stop_event_state_t){
     .armed = true,
     .slot_id = device->slot_id,
     .endpoint_id = XHCI_BULK_IN_DCI
@@ -4674,18 +4675,18 @@ xhci_stop_result_t xhci_downstream_stop_bulk_in(xhci_stop_info_t *info) {
   xhci_command_completion_t completion = {0};
   xhci_command_result_t status = xhci_command_submit(&command, &completion);
 
-  stop_in_event.armed = false;
+  stop->armed = false;
 
   info->command_result = status;
   info->completion_code = completion.completion_code;
-  info->stop_event_received = stop_in_event.received;
-  info->stop_event_code = stop_in_event.completion_code;
-  info->stop_event_trb = stop_in_event.trb_address;
+  info->stop_event_received = stop->received;
+  info->stop_event_code = stop->completion_code;
+  info->stop_event_trb = stop->trb_address;
 
   if (status != XHCI_COMMAND_OK || completion.slot_id != device->slot_id)
     return XHCI_STOP_COMMAND_FAILED;
 
-  if (!stop_in_event.received)
+  if (!stop->received)
     return XHCI_STOP_VERIFY_FAILED;
 
   if (!xhci_downstream_endpoint_states(&in_state, &out_state))
@@ -4708,8 +4709,8 @@ xhci_stop_result_t xhci_downstream_stop_bulk_in(xhci_stop_info_t *info) {
     // so this TD can no longer execute.
     xhci_waiter_release(device->receiver.waiter);
     device->receiver.waiter = NULL;
-    device->receiver.info.completion_code = stop_in_event.completion_code;
-    device->receiver.info.event_parameter = stop_in_event.trb_address;
+    device->receiver.info.completion_code = stop->completion_code;
+    device->receiver.info.event_parameter = stop->trb_address;
     device->receiver.state = XHCI_BULK_IN_FAILED;
     device->receiver.failed = true;
   } else {
@@ -4825,11 +4826,10 @@ xhci_recycle_result_t xhci_downstream_recycle(void) {
   __asm__ volatile("dsb sy" ::: "memory");
 
   // All downstream allocations have been freed.
-  // Discard the old software device context.
+  // Discard the old software device context,
+  // including its receiver, lifecycle and
+  // Stop Endpoint observations.
   *device = (xhci_device_t){0};
-
-  stop_out_event = (xhci_stop_event_state_t){0};
-  stop_in_event = (xhci_stop_event_state_t){0};
 
   return XHCI_RECYCLE_OK;
 }
