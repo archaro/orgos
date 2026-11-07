@@ -411,16 +411,28 @@ static xhci_device_t *xhci_downstream_context_reserve(uint8_t root_port,
   if (root_port == 0U || hub_slot == 0U || hub_port == 0U)
     return NULL;
 
-  // Reject a connection already owned by another
-  // context, including an uncertain slot allocation.
-  for (unsigned int i = 1U; i < XHCI_MAX_DEVICES; i++) {
-    xhci_device_t *device = &devices[i];
-    if (device->lifecycle.slot_requested && device->root_port == root_port &&
-        device->hub_slot == hub_slot && device->hub_port == hub_port) {
-      *failure = XHCI_SLOT_ALREADY_REQUESTED;
-      return NULL;
-    }
+  // Use the same ownership assessment as the USB
+  // admission and lifecycle layers.
+  //
+  // An occupied context may retain resources even
+  // if it has no confirmed controller slot.
+  xhci_connection_ownership_t ownership = XHCI_CONNECTION_UNCERTAIN;
+  if (!xhci_downstream_connection_ownership(
+      root_port, hub_slot, hub_port, &ownership))
+    return NULL;
+
+  // A software context already owns this
+  // physical connection. Never submit another
+  // Enable Slot command for it.
+  if (ownership == XHCI_CONNECTION_OWNED) {
+    *failure = XHCI_SLOT_ALREADY_REQUESTED;
+    return NULL;
   }
+
+  // An unidentifiable or ambiguous owner prevents
+  // further allocation until explicitly resolved.
+  if (ownership != XHCI_CONNECTION_UNOWNED)
+    return NULL;
 
   // First-fit allocation is sufficient while all
   // device contexts have identical capabilities.
