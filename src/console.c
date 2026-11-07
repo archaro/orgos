@@ -2202,6 +2202,42 @@ static void cmd_usb_auto_status(void) {
         (unsigned int)info.last_result);
 }
 
+static void cmd_usb_resources(void) {
+  xhci_resource_info_t info = {0};
+  if (!xhci_resource_get_info(&info)) {
+    console_puts("xHCI resource census unavailable.\n");
+    return;
+  }
+  console_puts("xHCI resource census:\n");
+  console_printf("  Downstream contexts : %u / %u owned\n",
+      info.downstream_owned, info.downstream_capacity);
+  console_printf("  Free contexts       : %u\n", info.downstream_free);
+  console_printf("  Assigned slots      : %u\n", info.assigned_slots);
+  console_printf("  Pending slots       : %u\n", info.pending_slots);
+  console_puts("  DMA allocations (pages):\n");
+  console_printf("    Controller        : %u\n",
+      (unsigned int)info.controller_dma_pages);
+  console_printf("    Internal hub      : %u\n",
+      (unsigned int)info.hub_dma_pages);
+  console_printf("    Downstream        : %u\n",
+      (unsigned int)info.downstream_dma_pages);
+  console_printf("  Active waiters      : %u / %u\n",
+      info.active_waiters, info.waiter_capacity);
+  console_printf("    Completed         : %u\n", info.completed_waiters);
+  console_printf("    Command           : %u\n", info.command_waiters);
+  console_printf("    Internal hub      : %u\n", info.hub_waiters);
+  console_printf("    Downstream        : %u\n", info.downstream_waiters);
+  console_printf("    Orphaned          : %u\n", info.orphan_waiters);
+  console_printf("  Controller running  : %s\n",
+      info.controller_running ? "Yes" : "No");
+  console_printf("  Command outstanding : %s\n",
+      info.command_outstanding ? "Yes" : "No");
+  console_printf("  Command ring failed : %s\n",
+      info.command_ring_failed ? "Yes" : "No");
+  console_printf("  Event dispatch fault: %s\n",
+      info.dispatch_failed ? "Yes" : "No");
+}
+
 static void cmd_usb_auto(const char *args) {
   if (end_of_args(args)) {
     cmd_usb_auto_status();
@@ -2281,6 +2317,10 @@ static void cmd_usb(const char *args) {
       return;
     }
     console_puts( "Usage: usb lifecycle [status | admission | candidates | port]\n");
+    return;
+  }
+  if (next_word_is(&args, "resources") && end_of_args(args)) {
+    cmd_usb_resources();
     return;
   }
   if (next_word_is(&args, "transfers") && end_of_args(args)) {
@@ -2379,7 +2419,7 @@ static void cmd_usb(const char *args) {
   if (!end_of_args(args)) {
     console_puts(
         "Usage: usb [state | ports | events | changes | devices | tolopogy | "
-        "test | recover | transfers | auto | hubirq | "
+        "test | recover | transfers | resources | auto | hubirq | "
         "lifecycle | hubports | enumerate | enumstate]\n");
     return;
   }

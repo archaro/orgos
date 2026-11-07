@@ -137,6 +137,33 @@ typedef struct {
 
 bool xhci_event_get_stats(xhci_event_stats_t *stats);
 
+// Read-only snapshot of software-owned xHCI
+// resources. Counts reflect current driver
+// bookkeeping, not a hardware register census.
+typedef struct {
+  unsigned int downstream_capacity;
+  unsigned int downstream_free;
+  unsigned int downstream_owned;
+  unsigned int assigned_slots;
+  unsigned int pending_slots;
+  uint32_t controller_dma_pages;
+  uint32_t hub_dma_pages;
+  uint32_t downstream_dma_pages;
+  unsigned int waiter_capacity;
+  unsigned int active_waiters;
+  unsigned int completed_waiters;
+  unsigned int command_waiters;
+  unsigned int hub_waiters;
+  unsigned int downstream_waiters;
+  unsigned int orphan_waiters;
+  bool controller_running;
+  bool command_outstanding;
+  bool command_ring_failed;
+  bool dispatch_failed;
+} xhci_resource_info_t;
+
+bool xhci_resource_get_info(xhci_resource_info_t *info);
+
 bool xhci_ep0_match_selftest(void);
 
 typedef enum {

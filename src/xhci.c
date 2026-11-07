@@ -5144,3 +5144,90 @@ xhci_recycle_result_t xhci_downstream_recycle(uint8_t slot_id) {
   return XHCI_RECYCLE_OK;
 }
 
+static uint32_t xhci_device_dma_pages(const xhci_device_t *device) {
+  return device->input.pages + device->output.pages + device->ep0_ring.pages +
+      device->control_buffer.pages + device->bulk_in_ring.pages +
+      device->bulk_out_ring.pages + device->bulk_in_buffer.pages +
+      device->bulk_out_buffer.pages + device->interrupt_ring.pages +
+      device->interrupt_buffer.pages;
+}
+
+static uint32_t xhci_controller_dma_pages(void) {
+  uint32_t pages = controller_dma.command_ring.pages +
+      controller_dma.event_ring.pages + controller_dma.erst.pages +
+      controller_dma.dcbaa.pages + controller_dma.scratchpad_array.pages;
+
+  for (unsigned int i = 0U; i < XHCI_MAX_SCRATCHPADS; i++) {
+    pages += controller_dma.scratchpads[i].pages;
+  }
+
+  return pages;
+}
+
+bool xhci_resource_get_info(xhci_resource_info_t *info) {
+  if (!info)
+    return false;
+
+  *info = (xhci_resource_info_t){0};
+  info->controller_running = controller_running;
+  info->command_outstanding = command_outstanding;
+  info->command_ring_failed = command_ring_failed;
+  info->dispatch_failed = dispatch_fault != XHCI_DISPATCH_NONE;
+  info->downstream_capacity = XHCI_MAX_DEVICES - 1U;
+  info->waiter_capacity = XHCI_EVENT_WAITERS;
+  info->controller_dma_pages = xhci_controller_dma_pages();
+  info->hub_dma_pages = xhci_device_dma_pages(&internal_hub);
+
+  // Entry zero is the permanent internal hub.
+  // Account for downstream contexts separately.
+  for (unsigned int i = 1U; i < XHCI_MAX_DEVICES; i++) {
+    const xhci_device_t *device = &devices[i];
+    if (xhci_device_context_available(device))
+      info->downstream_free++;
+    else
+      info->downstream_owned++;
+
+    if (device->slot_id != 0U)
+      info->assigned_slots++;
+    else if (device->lifecycle.slot_requested)
+      info->pending_slots++;
+
+    info->downstream_dma_pages += xhci_device_dma_pages(device);
+  }
+
+  // Event waiters live in a shared pool.
+  // Attribute transfer waiters to the context
+  // owning their recorded hardware slot.
+  for (unsigned int i = 0U; i < XHCI_EVENT_WAITERS; i++) {
+    const xhci_event_waiter_t *waiter = &event_waiters[i];
+
+    if (!waiter->active)
+      continue;
+
+    info->active_waiters++;
+
+    if (waiter->completed)
+      info->completed_waiters++;
+
+    if (waiter->type == XHCI_TRB_COMMAND_EVENT) {
+      info->command_waiters++;
+      continue;
+    }
+
+    if (waiter->type != XHCI_TRB_TRANSFER_EVENT) {
+      info->orphan_waiters++;
+      continue;
+    }
+
+    xhci_device_t *owner = xhci_device_by_slot(waiter->slot_id);
+    if (owner == &internal_hub)
+      info->hub_waiters++;
+    else if (owner)
+      info->downstream_waiters++;
+    else
+      info->orphan_waiters++;
+  }
+
+  return true;
+}
+
