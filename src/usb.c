@@ -71,6 +71,37 @@ static usb_lifecycle_run_info_t *usb_lifecycle_by_generation(
   return found;
 }
 
+static usb_lifecycle_run_info_t *usb_lifecycle_select_for_arm(
+    uint32_t generation) {
+
+  if (generation == 0U)
+    return NULL;
+
+  // There must be no other armed executor, and
+  // failed executor records must never be reused.
+  for (unsigned int i = 0U; i < USB_LIFECYCLE_RUN_CAPACITY; i++) {
+    usb_lifecycle_run_info_t *run = &lifecycle_runs[i];
+    if (run->state == USB_LIFECYCLE_RUN_ARMED ||
+        run->state == USB_LIFECYCLE_RUN_FAILED)
+      return NULL;
+
+    // Never arm another executor for an incarnation
+    // whose lifecycle has already been recorded.
+    if (run->state != USB_LIFECYCLE_RUN_DISARMED &&
+        run->generation == generation)
+      return NULL;
+  }
+
+  // Only entry zero is executable at present.
+  // Other entries will become allocatable when
+  // lifecycle execution accepts a selected run.
+  if (lifecycle_run->state != USB_LIFECYCLE_RUN_DISARMED &&
+      lifecycle_run->state != USB_LIFECYCLE_RUN_COMPLETE)
+    return NULL;
+
+  return lifecycle_run;
+}
+
 static bool usb_port_valid(const xhci_port_t *port) {
   return port->connected && port->enabled && port->powered &&
       !port->overcurrent && !port->resetting &&
@@ -634,32 +665,51 @@ bool usb_lifecycle_get_run_info_generation(
   return true;
 }
 
-bool usb_lifecycle_arm(void) {
-  usb_device_t device = {0};
+bool usb_lifecycle_arm_generation(uint32_t generation) {
+  if (!usb_service_available() || change_stats.failed || generation == 0U)
+    return false;
 
-  if (!usb_service_available() || change_stats.failed ||
-      !usb_get_device(&device) ||
-      (device.state != USB_DEVICE_ACTIVE &&
+  usb_device_t device = {0};
+  usb_device_t current = {0};
+  if (!usb_get_device_by_generation(generation, &device) ||
+      !usb_get_device(&current))
+    return false;
+
+  // Until lifecycle execution is record-selectable,
+  // only the current compatibility device may be
+  // assigned to the compatibility executor.
+  if (current.generation != generation || current.slot_id != device.slot_id)
+    return false;
+
+  if (device.slot_id == 0U || (device.state != USB_DEVICE_ACTIVE &&
        device.state != USB_DEVICE_DISCONNECTING))
     return false;
 
-  if (lifecycle_run->state == USB_LIFECYCLE_RUN_ARMED)
+  usb_lifecycle_run_info_t *run = usb_lifecycle_select_for_arm(generation);
+  if (!run)
     return false;
 
-  // Never retry a failed teardown or start another
-  // one for the same generation.
-  if (lifecycle_run->state != USB_LIFECYCLE_RUN_DISARMED &&
-      lifecycle_run->generation == device.generation)
-    return false;
-
-  *lifecycle_run = (usb_lifecycle_run_info_t){
+  // The selected record now owns this incarnation.
+  // Initialise the entire record so no result or
+  // fault from an earlier generation is retained.
+  *run = (usb_lifecycle_run_info_t){
     .state = USB_LIFECYCLE_RUN_ARMED,
-    .generation = device.generation,
-    .observed_generation = device.generation,
+    .generation = generation,
+    .observed_generation = generation,
     .slot_id = device.slot_id
   };
 
   return true;
+}
+
+bool usb_lifecycle_arm(void) {
+  usb_device_t device = {0};
+  if (!usb_get_device(&device))
+    return false;
+
+  // Compatibility interface: select the current
+  // device, then use the generation-specific path.
+  return usb_lifecycle_arm_generation(device.generation);
 }
 
 static void usb_lifecycle_auto_arm(void) {
@@ -681,7 +731,7 @@ static void usb_lifecycle_auto_arm(void) {
 
   // All controller operations remain the
   // responsibility of the existing executor.
-  (void)usb_lifecycle_arm();
+  usb_lifecycle_arm_generation(device.generation);
 }
 
 static void usb_lifecycle_fail(usb_lifecycle_fault_t fault) {

@@ -1335,7 +1335,7 @@ static void cmd_usb_recover(void) {
     console_puts("USB recovery: FAILED\n");
     return;
   }
-  if (!usb_lifecycle_arm()) {
+  if (!usb_lifecycle_arm_generation(device.generation)) {
     console_puts("USB recovery: QUIESCED, NOT ARMED\n");
     return;
   }
