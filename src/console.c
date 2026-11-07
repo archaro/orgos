@@ -1912,26 +1912,21 @@ static void cmd_usb_test_midiin_stress(const char *args) {
         break;
     }
     console_printf("USB-MIDI IN stress: %s\n", state);
-    console_printf("  Transfers : %u\n",
-        (unsigned int)info.transfers);
+    console_printf("  Transfers : %u\n", (unsigned int)info.transfers);
+    console_printf("  Generation: %u\n", (unsigned int)info.generation);
+    console_printf("  Slot      : %u\n", (unsigned int)info.slot_id);
     console_printf("  Packets   : %u / %u\n",
-        (unsigned int)info.packets,
-        USB_MIDI_IN_STRESS_PACKETS);
-    console_printf("  Bytes     : %u\n",
-        (unsigned int)info.bytes);
-    console_printf("  Wraps     : %u\n",
-        (unsigned int)info.wraps);
+        (unsigned int)info.packets, USB_MIDI_IN_STRESS_PACKETS);
+    console_printf("  Bytes     : %u\n", (unsigned int)info.bytes);
+    console_printf("  Wraps     : %u\n", (unsigned int)info.wraps);
     console_printf("  Elapsed   : %llu ms\n",
         (unsigned long long)(info.elapsed_us / 1000ULL));
     console_printf("  Discarded : %llu transfers\n",
         (unsigned long long)info.discarded_transfers);
     if (info.state == USB_MIDI_IN_STRESS_FAILED) {
-      console_printf("  Error     : %u\n",
-          (unsigned int)info.error);
-      console_printf("  Transfer  : %u\n",
-          (unsigned int)info.fault_transfer);
-      console_printf("  Packet    : %u\n",
-          (unsigned int)info.fault_packet);
+      console_printf("  Error     : %u\n", (unsigned int)info.error);
+      console_printf("  Transfer  : %u\n", (unsigned int)info.fault_transfer);
+      console_printf("  Packet    : %u\n", (unsigned int)info.fault_packet);
       console_printf("  Expected TRB: %016llx\n",
           (unsigned long long)info.expected_trb);
       console_printf("  Actual TRB  : %016llx\n",

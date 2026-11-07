@@ -36,9 +36,16 @@ typedef struct {
   uint64_t actual_trb;
   uint64_t elapsed_us;
   uint64_t discarded_transfers;
+  uint32_t generation;
+  uint8_t slot_id;
 } usb_midi_in_stress_info_t;
 
 bool usb_midi_in_stress_reset(void);
 bool usb_midi_in_stress_start(void);
+// Start the single MIDI IN stress diagnostic
+// against an explicitly identified device
+// incarnation. Unknown or ambiguous ownership
+// is rejected.
+bool usb_midi_in_stress_start_generation(uint32_t generation);
 bool usb_midi_in_stress_get_info(usb_midi_in_stress_info_t *result);
 void usb_midi_in_stress_service(void);
