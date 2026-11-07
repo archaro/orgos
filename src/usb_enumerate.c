@@ -32,10 +32,12 @@ typedef struct {
 static usb_managed_device_t managed_devices[USB_MANAGED_DEVICE_CAPACITY];
 
 // Compatibility owner for the existing single-
-// device enumeration and lifecycle interfaces.
+// device inspection, recovery and lifecycle
+// interfaces.
 //
-// Explicit record selection will replace this
-// pointer in B2.2d.2c.
+// Enumeration selects its record explicitly.
+// Remaining consumers will be migrated before
+// multiple-device admission is enabled.
 static usb_managed_device_t *const managed_device = &managed_devices[0];
 
 static bool test_abort_after_address;
@@ -106,6 +108,45 @@ static usb_managed_device_t *usb_managed_by_generation(uint32_t generation) {
   }
 
   return found;
+}
+
+static usb_managed_device_t *usb_managed_select_for_enumeration(
+    uint8_t root_port, uint8_t parent_slot, uint8_t parent_port) {
+
+  if (root_port == 0U || parent_slot == 0U || parent_port == 0U)
+    return NULL;
+
+  // Multiple records are not yet supported by
+  // the USB enumeration and lifecycle layers.
+  for (unsigned int i = 1U; i < USB_MANAGED_DEVICE_CAPACITY; i++) {
+    if (managed_devices[i].valid || managed_devices[i].attempted)
+      return NULL;
+  }
+
+  // Reuse the record already associated with
+  // this physical connection, if one exists.
+  usb_managed_device_t *record = usb_managed_by_connection(
+      root_port, parent_slot, parent_port);
+
+  // The compatibility interfaces still expose
+  // only entry zero. Other records cannot yet
+  // participate in enumeration.
+  if (record && record != managed_device)
+    return NULL;
+
+  if (!record)
+    record = managed_device;
+
+  // A detached and rearmed record may be reused,
+  // including on a different physical port.
+  //
+  // An active or uncertain device incarnation
+  // must never be overwritten.
+  if (record->attempted ||
+      (record->valid && record->device.state != USB_DEVICE_DETACHED))
+    return NULL;
+
+  return record;
 }
 
 static uint16_t read_u16(const uint8_t *p) {
@@ -212,7 +253,9 @@ static usb_enum_result_t discover_port(
   return USB_ENUM_OK;
 }
 
-static usb_enum_result_t address_device( usb_enum_info_t *state) {
+static usb_enum_result_t address_device(
+    usb_managed_device_t *record, usb_enum_info_t *state) {
+
   xhci_slot_info_t slot = {0};
   state->stage = USB_ENUM_STAGE_ENABLE_SLOT;
   state->slot_attempted = true;
@@ -229,7 +272,7 @@ static usb_enum_result_t address_device( usb_enum_info_t *state) {
 
   // Preserve identity immediately, not after
   // the later preparation/addressing operations.
-  managed_device->device.slot_id = slot.slot_id;
+  record->device.slot_id = slot.slot_id;
 
   state->stage = USB_ENUM_STAGE_PREPARE;
   state->prepare_attempted = true;
@@ -447,16 +490,23 @@ usb_enum_result_t usb_enumerate(usb_enum_info_t *info) {
   if (!usb_hub_get_init_info(&hub) || hub.result != USB_HUB_INIT_OK)
     return USB_ENUM_NOT_READY;
 
+  // Bind this enumeration attempt to the record
+  // representing the admitted physical connection.
+  usb_managed_device_t *record = usb_managed_select_for_enumeration(
+      root.root_port, root.slot_id, admission.port);
+  if (!record)
+    return USB_ENUM_NOT_READY;
+
   // Some enumeration operations are not safe to retry
   // following an uncertain command completion.
-  managed_device->attempted = true;
+  record->attempted = true;
   usb_enum_info_t state = {0};
   state.stage = USB_ENUM_STAGE_DISCOVER;
 
   // Start with no downstream device identified.
-  managed_device->device = (usb_device_t){0};
-  managed_device->device.state = USB_DEVICE_DETACHED;
-  managed_device->valid = true;
+  record->device = (usb_device_t){0};
+  record->device.state = USB_DEVICE_DETACHED;
+  record->valid = true;
   state.hub_ports = hub.ports;
   usb_enum_result_t result = USB_ENUM_OK;
 
@@ -464,11 +514,11 @@ usb_enum_result_t usb_enumerate(usb_enum_info_t *info) {
   if (result != USB_ENUM_OK)
     goto complete;
   // A device has been detected and its port reset.
-  managed_device->device.root_port = root.root_port;
-  managed_device->device.parent_slot = root.slot_id;
-  managed_device->device.parent_port = state.hub_port;
-  managed_device->device.speed = (usb_speed_t)state.speed;
-  managed_device->device.state = USB_DEVICE_DETECTED;
+  record->device.root_port = root.root_port;
+  record->device.parent_slot = root.slot_id;
+  record->device.parent_port = state.hub_port;
+  record->device.speed = (usb_speed_t)state.speed;
+  record->device.state = USB_DEVICE_DETECTED;
   // Each new device incarnation receives
   // a distinct generation identifier.
   if (device_generation == UINT32_MAX) {
@@ -476,17 +526,17 @@ usb_enum_result_t usb_enumerate(usb_enum_info_t *info) {
     goto complete;
   }
   device_generation++;
-  managed_device->device.generation = device_generation;
+  record->device.generation = device_generation;
   // Enumeration will now assign a controller slot
   // and USB address to the detected device.
-  managed_device->device.state = USB_DEVICE_ENUMERATING;
+  record->device.state = USB_DEVICE_ENUMERATING;
 
-  result = address_device(&state);
+  result = address_device(record, &state);
   if (result != USB_ENUM_OK)
     goto complete;
 
-  managed_device->device.slot_id = state.slot_id;
-  managed_device->device.address = state.address;
+  record->device.slot_id = state.slot_id;
+  record->device.address = state.address;
 
   state.stage = USB_ENUM_STAGE_DEVICE_DESCRIPTOR;
 
@@ -502,8 +552,8 @@ usb_enum_result_t usb_enumerate(usb_enum_info_t *info) {
   if (result != USB_ENUM_OK)
     goto complete;
 
-  managed_device->device.vendor_id = state.vendor_id;
-  managed_device->device.product_id = state.product_id;
+  record->device.vendor_id = state.vendor_id;
+  record->device.product_id = state.product_id;
   state.quirks = usb_midi_quirks_lookup(state.vendor_id, state.product_id);
 
   state.stage = USB_ENUM_STAGE_CONFIGURATION_DESCRIPTOR;
@@ -530,21 +580,21 @@ usb_enum_result_t usb_enumerate(usb_enum_info_t *info) {
   if (result != USB_ENUM_OK)
     goto complete;
 
-  managed_device->device.state = USB_DEVICE_CONFIGURED;
+  record->device.state = USB_DEVICE_CONFIGURED;
   state.stage = USB_ENUM_STAGE_MIDI_QUIRK;
   if (!usb_midi_quirks_apply(state.slot_id, state.quirks, &state.detail))
     result = USB_ENUM_MIDI_QUIRK_FAILED;
 
   if (result == USB_ENUM_OK) {
-    managed_device->device.state = USB_DEVICE_ACTIVE;
+    record->device.state = USB_DEVICE_ACTIVE;
     state.stage = USB_ENUM_STAGE_COMPLETE;
   }
 
 complete:
-  if (result != USB_ENUM_OK && managed_device->device.state != USB_DEVICE_DETACHED)
-    managed_device->device.state = USB_DEVICE_FAILED;
+  if (result != USB_ENUM_OK && record->device.state != USB_DEVICE_DETACHED)
+    record->device.state = USB_DEVICE_FAILED;
   state.result = result;
-  managed_device->enumeration = state;
+  record->enumeration = state;
   *info = state;
 
   return result;
