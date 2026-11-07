@@ -740,28 +740,42 @@ bool usb_lifecycle_arm_generation(uint32_t generation) {
     return false;
 
   usb_device_t device = {0};
-  usb_device_t current = {0};
-  if (!usb_get_device_by_generation(generation, &device) ||
-      !usb_get_device(&current))
-    return false;
-
-  // Until lifecycle execution is record-selectable,
-  // only the current compatibility device may be
-  // assigned to the compatibility executor.
-  if (current.generation != generation || current.slot_id != device.slot_id)
+  // The requested generation must identify
+  // exactly one managed USB device.
+  if (!usb_get_device_by_generation(generation, &device))
     return false;
 
   if (device.slot_id == 0U || (device.state != USB_DEVICE_ACTIVE &&
        device.state != USB_DEVICE_DISCONNECTING))
     return false;
 
+  // Confirm that the hardware slot is uniquely
+  // associated with the selected incarnation.
+  usb_device_t slot_owner = {0};
+  if (!usb_get_device_by_slot(device.slot_id, &slot_owner) ||
+      slot_owner.generation != generation ||
+      slot_owner.root_port != device.root_port ||
+      slot_owner.parent_slot != device.parent_slot ||
+      slot_owner.parent_port != device.parent_port)
+    return false;
+
+  // The physical connection must also resolve
+  // uniquely to the same device incarnation.
+  usb_device_t connection_owner = {0};
+  if (!usb_get_device_by_connection(device.root_port,
+      device.parent_slot, device.parent_port, &connection_owner))
+    return false;
+
+  if (connection_owner.generation != generation ||
+      connection_owner.slot_id != device.slot_id)
+    return false;
+
   usb_lifecycle_run_info_t *run = usb_lifecycle_select_for_arm(generation);
   if (!run)
     return false;
 
-  // The selected record now owns this incarnation.
-  // Initialise the entire record so no result or
-  // fault from an earlier generation is retained.
+  // The selected lifecycle record now owns
+  // this specific device incarnation.
   *run = (usb_lifecycle_run_info_t){
     .state = USB_LIFECYCLE_RUN_ARMED,
     .generation = generation,
@@ -769,8 +783,6 @@ bool usb_lifecycle_arm_generation(uint32_t generation) {
     .slot_id = device.slot_id
   };
 
-  // Compatibility diagnostics follow the executor
-  // most recently selected for a new lifecycle.
   lifecycle_last_run = run;
 
   return true;
@@ -787,24 +799,51 @@ bool usb_lifecycle_arm(void) {
 }
 
 static void usb_lifecycle_auto_arm(void) {
-  usb_device_t device = {0};
-  usb_enum_info_t enumeration = {0};
-
-  if (!usb_get_device(&device) || device.state != USB_DEVICE_DISCONNECTING ||
-      device.slot_id == 0U || !xhci_downstream_is_quiesced(device.slot_id) ||
-      !usb_get_enumeration(&enumeration) ||
-      enumeration.result != USB_ENUM_OK ||
-      enumeration.slot_id != device.slot_id)
+  // Only one executor may be armed at a time
+  // until concurrent lifecycle admission is
+  // explicitly enabled.
+  if (usb_lifecycle_any_armed() || usb_lifecycle_any_failed())
     return;
 
-  // An incarnation which already owns a lifecycle
-  // record must not be armed again.
-  if (usb_lifecycle_by_generation(device.generation))
-    return;
+  for (unsigned int i = 0U; i < USB_MANAGED_DEVICE_CAPACITY; i++) {
+    usb_device_t device = {0};
+    if (!usb_get_device_at(i, &device))
+      continue;
 
-  // All controller operations remain the
-  // responsibility of the existing executor.
-  usb_lifecycle_arm_generation(device.generation);
+    // Pre-generation enumeration failures
+    // cannot be handled by this lifecycle path.
+    if (device.generation == 0U || device.state != USB_DEVICE_DISCONNECTING ||
+        device.slot_id == 0U)
+      continue;
+
+    // Automatic teardown requires an explicitly
+    // quiesced hardware slot.
+    if (!xhci_downstream_is_quiesced(device.slot_id))
+      continue;
+
+    // Only a successfully enumerated incarnation
+    // may enter automatic lifecycle teardown.
+    //
+    // Failed enumeration continues to use the
+    // separately controlled recovery path.
+    usb_enum_info_t enumeration = {0};
+    if (!usb_get_enumeration_generation(device.generation, &enumeration))
+      continue;
+
+    if (enumeration.result != USB_ENUM_OK ||
+        enumeration.slot_id != device.slot_id)
+      continue;
+
+    // Never create a second executor for the
+    // same device incarnation.
+    if (usb_lifecycle_by_generation(device.generation))
+      continue;
+
+    // Arming performs the final generation,
+    // slot, connection and allocation checks.
+    if (usb_lifecycle_arm_generation(device.generation))
+      return;
+  }
 }
 
 static void usb_lifecycle_fail_run(

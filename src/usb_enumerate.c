@@ -25,10 +25,9 @@ typedef struct {
   bool attempted;
 } usb_managed_device_t;
 
-// The internal USB 2.0 hub has four downstream
+// The Raspberry Pi 4b internal USB 2.0 hub has four downstream
 // ports. This is a storage limit, not permission
 // to enumerate four devices yet.
-#define USB_MANAGED_DEVICE_CAPACITY 4U
 static usb_managed_device_t managed_devices[USB_MANAGED_DEVICE_CAPACITY];
 
 // Compatibility owner for the existing single-
@@ -676,6 +675,23 @@ bool usb_get_device(usb_device_t *device) {
     return false;
 
   *device = managed_device->device;
+  return true;
+}
+
+bool usb_get_device_at( unsigned int index, usb_device_t *device) {
+  if (!device)
+    return false;
+
+  *device = (usb_device_t){0};
+
+  if (index >= USB_MANAGED_DEVICE_CAPACITY)
+    return false;
+
+  const usb_managed_device_t *record = &managed_devices[index];
+  if (!record->valid)
+    return false;
+
+  *device = record->device;
   return true;
 }
 

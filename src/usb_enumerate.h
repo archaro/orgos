@@ -8,6 +8,11 @@
 #include "usb_midi.h"
 #include "usb_midi_quirks.h"
 
+// Maximum number of managed downstream device
+// records. This is storage capacity, not an
+// enumeration admission limit.
+#define USB_MANAGED_DEVICE_CAPACITY 4U
+
 typedef enum {
   USB_ENUM_OK,
   USB_ENUM_NOT_READY,
@@ -79,6 +84,11 @@ bool usb_get_enumeration(usb_enum_info_t *info);
 bool usb_get_enumeration_generation(
     uint32_t generation, usb_enum_info_t *info);
 bool usb_get_device(usb_device_t *device);
+// Read a managed device by table index.
+// Returns false for an unused or out-of-range
+// entry. Never falls back to the compatibility
+// record and never exposes mutable state.
+bool usb_get_device_at(unsigned int index, usb_device_t *device);
 // Read-only lookup of managed USB device records.
 // Unknown or ambiguous identities are rejected.
 bool usb_get_device_by_connection(uint8_t root_port, uint8_t parent_slot,
