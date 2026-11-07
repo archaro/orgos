@@ -563,25 +563,57 @@ static bool usb_lifecycle_inspect_record(const usb_device_t *device,
     return true;
 
   if (device->state == USB_DEVICE_DETACHED) {
-    if (xhci_downstream_any_owned()) {
-      // Recycling requires the executor which
-      // owns this exact device incarnation,
-      // together with completed hardware teardown.
-      if (run &&
-          run->state == USB_LIFECYCLE_RUN_ARMED &&
+    xhci_connection_ownership_t ownership = XHCI_CONNECTION_UNCERTAIN;
+    // Determine whether the selected physical
+    // connection still owns an xHCI context.
+    if (!xhci_downstream_connection_ownership( device->root_port,
+        device->parent_slot, device->parent_port, &ownership)) {
+      info->next = USB_LIFECYCLE_BLOCKED;
+      return true;
+    }
+
+    // Ambiguous ownership must never authorise
+    // recycling or rearm.
+    if (ownership == XHCI_CONNECTION_UNCERTAIN) {
+      info->next = USB_LIFECYCLE_BLOCKED;
+      return true;
+    }
+
+    if (ownership == XHCI_CONNECTION_OWNED) {
+      // The context remains allocated.
+      // Only its original executor may recycle it,
+      // after the complete teardown sequence.
+      if (run && run->state == USB_LIFECYCLE_RUN_ARMED &&
           run->generation == device->generation && run->slot_id != 0U &&
-          info->quiesced && info->slot_disabled && info->cleaned) {
+          device->slot_id == 0U && info->quiesced &&
+          info->slot_disabled && info->cleaned) {
         info->next = USB_LIFECYCLE_RECYCLE;
       } else {
         info->next = USB_LIFECYCLE_BLOCKED;
       }
-    } else {
-      // No downstream xHCI context remains owned.
-      // The previous enumeration may now be rearmed.
-      if (enumeration_attempted)
-        info->next = USB_LIFECYCLE_REARM;
+
+      return true;
     }
 
+    // The selected connection is now unowned.
+    // An unrelated device may still own another
+    // downstream controller context.
+    if (!enumeration_attempted)
+      return true;
+
+    // An unowned connection alone is insufficient.
+    // The original executor must have successfully
+    // recycled its retained hardware slot.
+    if (!run || run->state != USB_LIFECYCLE_RUN_ARMED ||
+        run->generation != device->generation || run->slot_id == 0U ||
+        device->slot_id != 0U || run->last_action != USB_LIFECYCLE_RECYCLE ||
+        !run->last_succeeded ||
+        run->last_result != (uint32_t)XHCI_RECYCLE_OK) {
+      info->next = USB_LIFECYCLE_BLOCKED;
+      return true;
+    }
+
+    info->next = USB_LIFECYCLE_REARM;
     return true;
   }
 

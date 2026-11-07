@@ -950,14 +950,37 @@ bool usb_device_finalize_disconnect(void) {
 
 bool usb_enumeration_rearm_generation(uint32_t generation) {
   usb_managed_device_t *record = usb_managed_by_generation(generation);
+
   if (!record || !record->attempted ||
       record->device.state != USB_DEVICE_DETACHED ||
-      record->device.slot_id != 0U || xhci_downstream_any_owned())
+      record->device.slot_id != 0U)
     return false;
 
-  // The previous incarnation no longer owns
-  // controller resources. Clear its enumeration
-  // attempt, but retain its device history.
+  // The retained topology must uniquely identify
+  // this managed record. An ambiguous connection
+  // cannot be considered safe for rearm.
+  if (usb_managed_by_connection(record->device.root_port,
+      record->device.parent_slot, record->device.parent_port) != record)
+    return false;
+
+  // Only this connection must be unowned.
+  // Other downstream devices may legitimately
+  // retain their own controller resources.
+  xhci_connection_ownership_t ownership = XHCI_CONNECTION_UNCERTAIN;
+
+  if (!xhci_downstream_connection_ownership(record->device.root_port,
+      record->device.parent_slot, record->device.parent_port, &ownership))
+    return false;
+
+  if (ownership != XHCI_CONNECTION_UNOWNED)
+    return false;
+
+  // The lifecycle executor has established
+  // successful recycling before requesting
+  // this operation.
+  //
+  // Clear the attempt, retaining the previous
+  // generation and physical connection.
   record->attempted = false;
   record->enumeration = (usb_enum_info_t){0};
 
