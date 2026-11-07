@@ -109,6 +109,10 @@ typedef struct {
 
 bool usb_lifecycle_arm(void);
 bool usb_lifecycle_get_run_info(usb_lifecycle_run_info_t *info);
+// Read-only inspection of a lifecycle executor
+// belonging to a specific device incarnation.
+bool usb_lifecycle_get_run_info_generation(
+    uint32_t generation, usb_lifecycle_run_info_t *info);
 
 typedef struct {
   uint32_t processed;

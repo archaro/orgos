@@ -1,3 +1,4 @@
+#include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -24,7 +25,17 @@ static unsigned int change_head;
 static unsigned int change_count;
 static usb_change_stats_t change_stats;
 static usb_change_event_t last_port_change[16];
-static usb_lifecycle_run_info_t lifecycle_run;
+// Lifecycle storage for the four downstream
+// ports of the internal USB 2.0 hub.
+//
+// Capacity does not imply permission to run
+// multiple lifecycle executors yet.
+#define USB_LIFECYCLE_RUN_CAPACITY 4U
+static usb_lifecycle_run_info_t lifecycle_runs[USB_LIFECYCLE_RUN_CAPACITY];
+// Compatibility executor. Until per-device
+// scheduling is implemented, all lifecycle
+// operations continue to use entry zero.
+static usb_lifecycle_run_info_t *const lifecycle_run = &lifecycle_runs[0];
 static uint64_t auto_enum_next_check_us;
 static usb_auto_enum_info_t auto_enum = {
   .enabled = true,
@@ -35,6 +46,30 @@ static usb_auto_enum_info_t auto_enum = {
 // Retain progress until all have been processed.
 static uint16_t change_pending_mask;
 static uint8_t change_next_port = 1U;
+
+static usb_lifecycle_run_info_t *usb_lifecycle_by_generation(
+    uint32_t generation) {
+
+  if (generation == 0U)
+    return NULL;
+
+  usb_lifecycle_run_info_t *found = NULL;
+  for (unsigned int i = 0U; i < USB_LIFECYCLE_RUN_CAPACITY; i++) {
+    usb_lifecycle_run_info_t *run = &lifecycle_runs[i];
+    if (run->state == USB_LIFECYCLE_RUN_DISARMED ||
+        run->generation != generation)
+      continue;
+
+    // A device incarnation must never have two
+    // lifecycle executors claiming ownership.
+    if (found)
+      return NULL;
+
+    found = run;
+  }
+
+  return found;
+}
 
 static bool usb_port_valid(const xhci_port_t *port) {
   return port->connected && port->enabled && port->powered &&
@@ -450,10 +485,10 @@ bool usb_lifecycle_inspect(usb_lifecycle_info_t *info) {
   uint8_t inspection_slot = device.slot_id;
 
   if (device.state == USB_DEVICE_DETACHED &&
-      lifecycle_run.state == USB_LIFECYCLE_RUN_ARMED &&
-      lifecycle_run.generation == device.generation &&
-      lifecycle_run.slot_id != 0U)
-    inspection_slot = lifecycle_run.slot_id;
+      lifecycle_run->state == USB_LIFECYCLE_RUN_ARMED &&
+      lifecycle_run->generation == device.generation &&
+      lifecycle_run->slot_id != 0U)
+    inspection_slot = lifecycle_run->slot_id;
 
   info->quiesced = xhci_downstream_is_quiesced(inspection_slot);
   info->slot_disabled = xhci_downstream_is_slot_disabled(inspection_slot);
@@ -545,7 +580,22 @@ bool usb_lifecycle_get_run_info(
   if (!info)
     return false;
 
-  *info = lifecycle_run;
+  *info = *lifecycle_run;
+  return true;
+}
+
+bool usb_lifecycle_get_run_info_generation(
+    uint32_t generation, usb_lifecycle_run_info_t *info) {
+
+  if (!info)
+    return false;
+
+  *info = (usb_lifecycle_run_info_t){0};
+  usb_lifecycle_run_info_t *run = usb_lifecycle_by_generation(generation);
+  if (!run)
+    return false;
+
+  *info = *run;
   return true;
 }
 
@@ -558,16 +608,16 @@ bool usb_lifecycle_arm(void) {
        device.state != USB_DEVICE_DISCONNECTING))
     return false;
 
-  if (lifecycle_run.state == USB_LIFECYCLE_RUN_ARMED)
+  if (lifecycle_run->state == USB_LIFECYCLE_RUN_ARMED)
     return false;
 
   // Never retry a failed teardown or start another
   // one for the same generation.
-  if (lifecycle_run.state != USB_LIFECYCLE_RUN_DISARMED &&
-      lifecycle_run.generation == device.generation)
+  if (lifecycle_run->state != USB_LIFECYCLE_RUN_DISARMED &&
+      lifecycle_run->generation == device.generation)
     return false;
 
-  lifecycle_run = (usb_lifecycle_run_info_t){
+  *lifecycle_run = (usb_lifecycle_run_info_t){
     .state = USB_LIFECYCLE_RUN_ARMED,
     .generation = device.generation,
     .observed_generation = device.generation,
@@ -590,8 +640,8 @@ static void usb_lifecycle_auto_arm(void) {
 
   // Never restart teardown for a generation whose
   // executor is already armed, complete or failed.
-  if (lifecycle_run.generation == device.generation &&
-      lifecycle_run.state != USB_LIFECYCLE_RUN_DISARMED)
+  if (lifecycle_run->generation == device.generation &&
+      lifecycle_run->state != USB_LIFECYCLE_RUN_DISARMED)
     return;
 
   // All controller operations remain the
@@ -600,16 +650,16 @@ static void usb_lifecycle_auto_arm(void) {
 }
 
 static void usb_lifecycle_fail(usb_lifecycle_fault_t fault) {
-  if (lifecycle_run.state != USB_LIFECYCLE_RUN_ARMED)
+  if (lifecycle_run->state != USB_LIFECYCLE_RUN_ARMED)
     return;
 
-  lifecycle_run.fault = fault;
-  lifecycle_run.state = USB_LIFECYCLE_RUN_FAILED;
-  lifecycle_run.last_succeeded = false;
+  lifecycle_run->fault = fault;
+  lifecycle_run->state = USB_LIFECYCLE_RUN_FAILED;
+  lifecycle_run->last_succeeded = false;
 }
 
 static void usb_lifecycle_service(void) {
-  if (lifecycle_run.state != USB_LIFECYCLE_RUN_ARMED)
+  if (lifecycle_run->state != USB_LIFECYCLE_RUN_ARMED)
     return;
 
   usb_lifecycle_info_t info = {0};
@@ -618,8 +668,8 @@ static void usb_lifecycle_service(void) {
     return;
   }
 
-  lifecycle_run.observed_generation = info.generation;
-  if (info.generation != lifecycle_run.generation) {
+  lifecycle_run->observed_generation = info.generation;
+  if (info.generation != lifecycle_run->generation) {
     usb_lifecycle_fail(USB_LIFECYCLE_FAULT_GENERATION);
     return;
   }
@@ -633,7 +683,7 @@ static void usb_lifecycle_service(void) {
        info.next == USB_LIFECYCLE_RETIRE_IN ||
        info.next == USB_LIFECYCLE_CLEANUP) &&
       (info.slot_id == 0U ||
-       info.slot_id != lifecycle_run.slot_id)) {
+       info.slot_id != lifecycle_run->slot_id)) {
     usb_lifecycle_fail(USB_LIFECYCLE_FAULT_BLOCKED);
     return;
   }
@@ -644,7 +694,7 @@ static void usb_lifecycle_service(void) {
   // The lifecycle executor must still retain
   // the original hardware slot identity.
   if (info.next == USB_LIFECYCLE_RECYCLE && (info.slot_id != 0U ||
-       lifecycle_run.slot_id == 0U || !info.quiesced ||
+       lifecycle_run->slot_id == 0U || !info.quiesced ||
        !info.slot_disabled || !info.cleaned)) {
     usb_lifecycle_fail(USB_LIFECYCLE_FAULT_BLOCKED);
     return;
@@ -655,18 +705,18 @@ static void usb_lifecycle_service(void) {
   if (info.next == USB_LIFECYCLE_IDLE)
     return;
 
-  lifecycle_run.last_action = info.next;
-  lifecycle_run.last_succeeded = false;
-  lifecycle_run.last_result = 0U;
-  lifecycle_run.command_result = 0U;
-  lifecycle_run.completion_code = 0U;
+  lifecycle_run->last_action = info.next;
+  lifecycle_run->last_succeeded = false;
+  lifecycle_run->last_result = 0U;
+  lifecycle_run->command_result = 0U;
+  lifecycle_run->completion_code = 0U;
   bool succeeded = false;
 
   switch (info.next) {
     case USB_LIFECYCLE_RECONCILE_IN: {
       xhci_in_reconcile_result_t result =
-          xhci_bulk_in_quiesced_reconcile(lifecycle_run.slot_id);
-      lifecycle_run.last_result = (uint32_t)result;
+          xhci_bulk_in_quiesced_reconcile(lifecycle_run->slot_id);
+      lifecycle_run->last_result = (uint32_t)result;
       succeeded = result == XHCI_IN_RECONCILE_OK ||
           result == XHCI_IN_RECONCILE_RESOLVED;
       break;
@@ -674,54 +724,54 @@ static void usb_lifecycle_service(void) {
     case USB_LIFECYCLE_STOP_IN: {
       xhci_stop_info_t result = {0};
       xhci_stop_result_t status =
-          xhci_downstream_stop_bulk_in(lifecycle_run.slot_id, &result);
-      lifecycle_run.last_result = (uint32_t)status;
-      lifecycle_run.command_result = (uint8_t)result.command_result;
-      lifecycle_run.completion_code = result.completion_code;
+          xhci_downstream_stop_bulk_in(lifecycle_run->slot_id, &result);
+      lifecycle_run->last_result = (uint32_t)status;
+      lifecycle_run->command_result = (uint8_t)result.command_result;
+      lifecycle_run->completion_code = result.completion_code;
       succeeded = status == XHCI_STOP_OK;
       break;
     }
     case USB_LIFECYCLE_DISABLE: {
       xhci_disable_info_t result = {0};
       xhci_disable_result_t status =
-          xhci_downstream_disable(lifecycle_run.slot_id, &result);
-      lifecycle_run.last_result = (uint32_t)status;
-      lifecycle_run.command_result = (uint8_t)result.command_result;
-      lifecycle_run.completion_code = result.completion_code;
+          xhci_downstream_disable(lifecycle_run->slot_id, &result);
+      lifecycle_run->last_result = (uint32_t)status;
+      lifecycle_run->command_result = (uint8_t)result.command_result;
+      lifecycle_run->completion_code = result.completion_code;
       succeeded = status == XHCI_DISABLE_OK;
       break;
     }
     case USB_LIFECYCLE_RETIRE_IN: {
       xhci_bulk_in_retire_result_t status =
-          xhci_bulk_in_stream_retire(lifecycle_run.slot_id);
-      lifecycle_run.last_result = (uint32_t)status;
+          xhci_bulk_in_stream_retire(lifecycle_run->slot_id);
+      lifecycle_run->last_result = (uint32_t)status;
       succeeded = status == XHCI_BULK_IN_RETIRE_OK;
       break;
     }
     case USB_LIFECYCLE_CLEANUP: {
       xhci_cleanup_info_t result = {0};
       xhci_cleanup_result_t status =
-          xhci_downstream_cleanup(lifecycle_run.slot_id, &result);
-      lifecycle_run.last_result = (uint32_t)status;
+          xhci_downstream_cleanup(lifecycle_run->slot_id, &result);
+      lifecycle_run->last_result = (uint32_t)status;
       succeeded = status == XHCI_CLEANUP_OK;
       break;
     }
     case USB_LIFECYCLE_DETACH: {
       succeeded = usb_device_finalize_disconnect_generation(
-          lifecycle_run.generation, lifecycle_run.slot_id);
-      lifecycle_run.last_result = succeeded ? 0U : 1U;
+          lifecycle_run->generation, lifecycle_run->slot_id);
+      lifecycle_run->last_result = succeeded ? 0U : 1U;
       break;
     }
     case USB_LIFECYCLE_RECYCLE: {
       xhci_recycle_result_t status =
-          xhci_downstream_recycle(lifecycle_run.slot_id);
-      lifecycle_run.last_result = (uint32_t)status;
+          xhci_downstream_recycle(lifecycle_run->slot_id);
+      lifecycle_run->last_result = (uint32_t)status;
       succeeded = status == XHCI_RECYCLE_OK;
       break;
     }
     case USB_LIFECYCLE_REARM: {
-      succeeded = usb_enumeration_rearm_generation(lifecycle_run.generation);
-      lifecycle_run.last_result = succeeded ? 0U : 1U;
+      succeeded = usb_enumeration_rearm_generation(lifecycle_run->generation);
+      lifecycle_run->last_result = succeeded ? 0U : 1U;
       break;
     }
     default: {
@@ -732,15 +782,15 @@ static void usb_lifecycle_service(void) {
     }
   }
 
-  lifecycle_run.steps++;
-  lifecycle_run.last_succeeded = succeeded;
+  lifecycle_run->steps++;
+  lifecycle_run->last_succeeded = succeeded;
   if (!succeeded) {
     usb_lifecycle_fail(USB_LIFECYCLE_FAULT_OPERATION);
     return;
   }
 
   if (info.next == USB_LIFECYCLE_REARM) {
-    lifecycle_run.state = USB_LIFECYCLE_RUN_COMPLETE;
+    lifecycle_run->state = USB_LIFECYCLE_RUN_COMPLETE;
 
     // The previous generation no longer owns
     // the downstream controller resources.
@@ -751,7 +801,7 @@ static void usb_lifecycle_service(void) {
 
 static void usb_auto_enum_service(void) {
   if (!auto_enum.enabled || !auto_enum.pending ||
-      lifecycle_run.state == USB_LIFECYCLE_RUN_ARMED)
+      lifecycle_run->state == USB_LIFECYCLE_RUN_ARMED)
     return;
 
   // Deferred hub-change inspections are rate-limited.
@@ -1071,13 +1121,13 @@ bool usb_reenum_inspect(usb_reenum_info_t *info) {
     return true;
   }
 
-  if (lifecycle_run.generation == device.generation) {
-    if (lifecycle_run.state == USB_LIFECYCLE_RUN_ARMED) {
+  if (lifecycle_run->generation == device.generation) {
+    if (lifecycle_run->state == USB_LIFECYCLE_RUN_ARMED) {
       info->result = USB_REENUM_EXECUTOR_ACTIVE;
       return true;
     }
 
-    if (lifecycle_run.state == USB_LIFECYCLE_RUN_FAILED) {
+    if (lifecycle_run->state == USB_LIFECYCLE_RUN_FAILED) {
       info->result = USB_REENUM_EXECUTOR_FAILED;
       return true;
     }
