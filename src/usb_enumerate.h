@@ -83,12 +83,22 @@ usb_enum_result_t usb_enumerate(usb_enum_info_t *info);
 bool usb_get_enumeration(usb_enum_info_t *info);
 bool usb_get_enumeration_generation(
     uint32_t generation, usb_enum_info_t *info);
+// Inspect an enumeration attempt by managed
+// record index, including attempts which failed
+// before generation or slot assignment.
+bool usb_get_enumeration_at(unsigned int index, usb_enum_info_t *info);
 bool usb_get_device(usb_device_t *device);
 // Read a managed device by table index.
 // Returns false for an unused or out-of-range
 // entry. Never falls back to the compatibility
 // record and never exposes mutable state.
 bool usb_get_device_at(unsigned int index, usb_device_t *device);
+// Inspect the enumeration attempt associated
+// with one physical downstream connection.
+// Unknown or ambiguous connections are rejected.
+// A generation or confirmed slot is not required.
+bool usb_get_enumeration_by_connection(uint8_t root_port, uint8_t parent_slot,
+    uint8_t parent_port, usb_enum_info_t *info);
 // Read-only lookup of managed USB device records.
 // Unknown or ambiguous identities are rejected.
 bool usb_get_device_by_connection(uint8_t root_port, uint8_t parent_slot,

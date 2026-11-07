@@ -530,6 +530,41 @@ bool usb_get_enumeration_generation(
   return true;
 }
 
+bool usb_get_enumeration_at(unsigned int index, usb_enum_info_t *info) {
+  if (!info)
+    return false;
+
+  *info = (usb_enum_info_t){0};
+
+  if (index >= USB_MANAGED_DEVICE_CAPACITY)
+    return false;
+
+  const usb_managed_device_t *record = &managed_devices[index];
+  if (!record->valid || !record->attempted)
+    return false;
+
+  *info = record->enumeration;
+  return true;
+}
+
+bool usb_get_enumeration_by_connection(uint8_t root_port, uint8_t parent_slot,
+    uint8_t parent_port, usb_enum_info_t *info) {
+
+  if (!info)
+    return false;
+
+  *info = (usb_enum_info_t){0};
+
+  usb_managed_device_t *record = usb_managed_by_connection(
+      root_port, parent_slot, parent_port);
+
+  if (!record || !record->attempted)
+    return false;
+
+  *info = record->enumeration;
+  return true;
+}
+
 usb_enum_result_t usb_enumerate(usb_enum_info_t *info) {
   if (!info)
     return USB_ENUM_NOT_READY;
@@ -573,9 +608,20 @@ usb_enum_result_t usb_enumerate(usb_enum_info_t *info) {
   usb_enum_info_t state = {0};
   state.stage = USB_ENUM_STAGE_DISCOVER;
 
-  // Start with no downstream device identified.
-  record->device = (usb_device_t){0};
-  record->device.state = USB_DEVICE_DETACHED;
+  // Record physical ownership before performing
+  // any fallible hub-port operation.
+  //
+  // Discovery may fail before a device generation
+  // or xHCI slot has been assigned. The attempt
+  // must nevertheless remain attributable to its
+  // admitted physical connection.
+  record->device = (usb_device_t){
+    .root_port = root.root_port,
+    .parent_slot = root.slot_id,
+    .parent_port = admission.port,
+    .state = USB_DEVICE_DETACHED
+  };
+
   record->valid = true;
   state.hub_ports = hub.ports;
   usb_enum_result_t result = USB_ENUM_OK;
@@ -584,9 +630,6 @@ usb_enum_result_t usb_enumerate(usb_enum_info_t *info) {
   if (result != USB_ENUM_OK)
     goto complete;
   // A device has been detected and its port reset.
-  record->device.root_port = root.root_port;
-  record->device.parent_slot = root.slot_id;
-  record->device.parent_port = state.hub_port;
   record->device.speed = (usb_speed_t)state.speed;
   record->device.state = USB_DEVICE_DETECTED;
   // Each new device incarnation receives
@@ -1065,40 +1108,56 @@ bool usb_enumeration_rearm(void) {
 }
 
 bool usb_enumeration_rearm_rejected(uint8_t port) {
-  usb_managed_device_t *record = NULL;
+  // Rejection recovery is associated with a
+  // physical connection, not a device generation.
+  usb_init_info_t root = {0};
 
-  // A rejected enumeration may have no generation
-  // or hardware slot. Select it by its recorded
-  // enumeration port and failure state.
-  for (unsigned int i = 0U; i < USB_MANAGED_DEVICE_CAPACITY; i++) {
-    usb_managed_device_t *candidate = &managed_devices[i];
-    if (!candidate->valid || !candidate->attempted ||
-        candidate->enumeration.slot_attempted ||
-        candidate->enumeration.result != USB_ENUM_UNSUPPORTED_SPEED ||
-        candidate->enumeration.hub_port != port ||
-        candidate->device.state != USB_DEVICE_DETACHED)
-      continue;
-
-    // Ambiguous ownership is not permission
-    // to discard either record.
-    if (record)
-      return false;
-
-    record = candidate;
-  }
-
-  if (!record || xhci_downstream_any_owned())
+  if (!usb_get_init_info(&root) || root.result != USB_INIT_OK ||
+      root.root_port == 0U || root.slot_id == 0U || port == 0U)
     return false;
 
-  // The rejected port must now be empty, with
-  // all associated change flags acknowledged.
+  usb_managed_device_t *record =
+      usb_managed_by_connection(root.root_port, root.slot_id, port);
+
+  if (!record || !record->attempted ||
+      record->device.state != USB_DEVICE_DETACHED ||
+      record->device.generation != 0U || record->device.slot_id != 0U)
+    return false;
+
+  // This recovery path is exclusively for an
+  // unsupported-speed rejection before Enable
+  // Slot was attempted.
+  //
+  // An uncertain Enable Slot command outcome
+  // must never be discarded by this mechanism.
+  if (record->enumeration.result != USB_ENUM_UNSUPPORTED_SPEED ||
+      record->enumeration.hub_port != port ||
+      record->enumeration.slot_attempted ||
+      record->enumeration.slot_confirmed ||
+      record->enumeration.stage != USB_ENUM_STAGE_DISCOVER)
+    return false;
+
+  // Confirm that this particular connection
+  // owns no xHCI resources.
+  xhci_connection_ownership_t ownership = XHCI_CONNECTION_UNCERTAIN;
+
+  if (!xhci_downstream_connection_ownership(
+      root.root_port, root.slot_id, port, &ownership))
+    return false;
+
+  if (ownership != XHCI_CONNECTION_UNOWNED)
+    return false;
+
+  // The rejected connection must be physically
+  // empty, with its change flags acknowledged.
   usb_hub_port_t status = {0};
   if (usb_hub_port_status(port, &status) != USB_HUB_OK ||
       (status.status & USB_PORT_CONNECTED) != 0U || status.change != 0U)
     return false;
 
-  // No xHCI slot was acquired. This rejected
-  // attempt can be discarded without teardown.
+  // No slot was requested, and the physical
+  // connection is confirmed empty and unowned.
+  // Discard only this enumeration-attempt record.
   *record = (usb_managed_device_t){0};
 
   return true;
