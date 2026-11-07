@@ -1581,21 +1581,34 @@ static void cmd_usb_lifecycle_candidates(void) {
     console_puts("USB downstream hub unavailable.\n");
     return;
   }
-  console_puts("USB port-local enumeration eligibility:\n");
+  console_puts("USB enumeration candidates:\n");
   for (uint8_t port = 1U; port <= hub.ports; port++) {
-    usb_enum_port_info_t info = {0};
-    if (!usb_enum_port_inspect(port, &info)) {
+    usb_enum_candidate_info_t info = {0};
+    if (!usb_enum_candidate_inspect(port, &info)) {
       console_printf("  Port %u: Inspection failed\n", (unsigned int)port);
       continue;
     }
     console_printf("  Port %u: %s",
-        (unsigned int)port, usb_enum_port_result_name(info.result));
-    if (info.generation != 0U)
-      console_printf(" (generation %u)", (unsigned int)info.generation);
+        (unsigned int)port, usb_enum_port_result_name(info.port.result));
+    if (info.port.generation != 0U)
+      console_printf(" (generation %u)", (unsigned int)info.port.generation);
+    if (info.port.result == USB_ENUM_PORT_ELIGIBLE) {
+      if (info.would_admit) {
+        console_puts(" [controller: ready]");
+      } else if (
+          info.controller.result == USB_ENUM_ADMIT_INITIAL ||
+          info.controller.result == USB_ENUM_ADMIT_RECONNECT) {
+        console_printf(" [controller selects port %u]",
+            (unsigned int)info.controller.port);
+      } else {
+        console_printf(" [controller: %s]",
+            usb_enum_admission_name(info.controller.result));
+      }
+    }
     console_putc('\n');
   }
-  console_puts("Port-local eligibility only; "
-      "controller-wide admission remains authoritative.\n");
+  console_puts("Read-only assessment; controller-wide admission "
+      "remains authoritative.\n");
 }
 
 static void cmd_usb_lifecycle_current(void) {

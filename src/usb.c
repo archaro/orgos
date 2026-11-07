@@ -1681,3 +1681,32 @@ bool usb_enum_port_inspect(uint8_t port, usb_enum_port_info_t *info) {
   return true;
 }
 
+bool usb_enum_candidate_inspect(
+    uint8_t port, usb_enum_candidate_info_t *info) {
+
+  if (!info)
+    return false;
+
+  *info = (usb_enum_candidate_info_t){0};
+
+  // Establish the selected port's local state.
+  if (!usb_enum_port_inspect(port, &info->port))
+    return false;
+
+  // Independently obtain the existing
+  // controller-wide admission decision.
+  if (!usb_enum_admission_inspect(&info->controller))
+    return false;
+
+  bool controller_ready = info->controller.result == USB_ENUM_ADMIT_INITIAL ||
+      info->controller.result == USB_ENUM_ADMIT_RECONNECT;
+
+  // Both decisions must concern the same port.
+  // A READY decision for another port never
+  // authorises this candidate.
+  info->would_admit = info->port.result == USB_ENUM_PORT_ELIGIBLE &&
+      controller_ready && info->controller.port == port;
+
+  return true;
+}
+

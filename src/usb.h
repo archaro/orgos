@@ -267,3 +267,18 @@ typedef struct {
 // enumeration, lifecycle or ownership state.
 bool usb_enum_port_inspect(uint8_t port, usb_enum_port_info_t *info);
 
+// Read-only combination of port-local eligibility
+// and the existing controller-wide admission policy.
+//
+// would_admit is a diagnostic assessment, not
+// authorisation to begin enumeration. The observations
+// are not an atomic hardware snapshot.
+typedef struct {
+  usb_enum_port_info_t port;
+  usb_enum_admission_info_t controller;
+  bool would_admit;
+} usb_enum_candidate_info_t;
+
+bool usb_enum_candidate_inspect(
+    uint8_t port, usb_enum_candidate_info_t *info);
+
