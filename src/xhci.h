@@ -160,6 +160,11 @@ typedef struct {
   bool command_outstanding;
   bool command_ring_failed;
   bool dispatch_failed;
+  unsigned int waiter_high_water;
+  unsigned int command_waiter_reserve;
+  uint32_t waiter_capacity_rejections;
+  uint32_t waiter_duplicate_rejections;
+  uint32_t waiter_invalid_rejections;
 } xhci_resource_info_t;
 
 bool xhci_resource_get_info(xhci_resource_info_t *info);

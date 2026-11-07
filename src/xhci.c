@@ -236,6 +236,18 @@ static xhci_event_t port_event_queue[XHCI_PORT_EVENT_QUEUE_CAPACITY];
 static unsigned int port_event_count;
 
 #define XHCI_EVENT_WAITERS 8U
+
+// Preserve capacity for the single synchronous
+// command currently permitted by the controller.
+//
+// Transfer waiters must never consume this
+// final reserved entry.
+#define XHCI_COMMAND_WAITER_RESERVE 1U
+
+_Static_assert(
+    XHCI_EVENT_WAITERS > XHCI_COMMAND_WAITER_RESERVE,
+    "xHCI waiter pool must accommodate commands");
+
 struct xhci_event_waiter {
   bool active;
   bool completed;
@@ -247,6 +259,11 @@ struct xhci_event_waiter {
   xhci_event_t event;
 };
 static xhci_event_waiter_t event_waiters[XHCI_EVENT_WAITERS];
+// Lifetime waiter-allocation diagnostics.
+static unsigned int waiter_high_water;
+static uint32_t waiter_capacity_rejections;
+static uint32_t waiter_duplicate_rejections;
+static uint32_t waiter_invalid_rejections;
 
 static xhci_hub_notify_info_t hub_notify_info;
 static xhci_event_waiter_t *hub_notify_waiter;
@@ -1700,28 +1717,70 @@ bool xhci_ep0_match_selftest(void) {
   return true;
 }
 
-static xhci_event_waiter_t *xhci_waiter_register(
-    uint8_t type, uint8_t slot_id, uint8_t endpoint_id,
-    uint64_t trb_address) {
+static xhci_event_waiter_t *xhci_waiter_register(uint8_t type,
+    uint8_t slot_id, uint8_t endpoint_id, uint64_t trb_address) {
 
-  if (trb_address == 0U)
+  if (trb_address == 0U) {
+    waiter_invalid_rejections++;
     return NULL;
-
-  // A completion must have exactly one owner.
-  for (unsigned int i = 0; i < XHCI_EVENT_WAITERS; i++) {
-    xhci_event_waiter_t *waiter = &event_waiters[i];
-    if (waiter->active &&
-        waiter->type == type &&
-        waiter->slot_id == slot_id &&
-        waiter->endpoint_id == endpoint_id &&
-        waiter->trb_address == trb_address)
-      return NULL;
   }
 
-  for (unsigned int i = 0; i < XHCI_EVENT_WAITERS; i++) {
+  // Command completions belong to the controller
+  // command ring, not a device endpoint.
+  if (type == XHCI_TRB_COMMAND_EVENT) {
+    if (slot_id != 0U || endpoint_id != 0U) {
+      waiter_invalid_rejections++;
+      return NULL;
+    }
+  } else if (type == XHCI_TRB_TRANSFER_EVENT) {
+    // A transfer completion must be attributable
+    // to exactly one existing hardware slot.
+    if (endpoint_id == 0U || !xhci_device_by_slot(slot_id)) {
+      waiter_invalid_rejections++;
+      return NULL;
+    }
+  } else {
+    waiter_invalid_rejections++;
+    return NULL;
+  }
+
+  unsigned int active = 0U;
+
+  // Never create two completion owners for
+  // the same event identity.
+  for (unsigned int i = 0U; i < XHCI_EVENT_WAITERS; i++) {
+    const xhci_event_waiter_t *waiter = &event_waiters[i];
+
+    if (!waiter->active)
+      continue;
+
+    active++;
+
+    if (waiter->type == type && waiter->slot_id == slot_id &&
+        waiter->endpoint_id == endpoint_id &&
+        waiter->trb_address == trb_address) {
+      waiter_duplicate_rejections++;
+      return NULL;
+    }
+  }
+
+  // Leave at least one waiter available for
+  // the controller's synchronous command ring.
+  //
+  // This restriction applies to transfers only;
+  // an actual command may consume the reserve.
+  if (type == XHCI_TRB_TRANSFER_EVENT &&
+      active >= XHCI_EVENT_WAITERS - XHCI_COMMAND_WAITER_RESERVE) {
+    waiter_capacity_rejections++;
+    return NULL;
+  }
+
+  for (unsigned int i = 0U; i < XHCI_EVENT_WAITERS; i++) {
     xhci_event_waiter_t *waiter = &event_waiters[i];
+
     if (waiter->active)
       continue;
+
     *waiter = (xhci_event_waiter_t){
       .active = true,
       .type = type,
@@ -1729,9 +1788,16 @@ static xhci_event_waiter_t *xhci_waiter_register(
       .endpoint_id = endpoint_id,
       .trb_address = trb_address
     };
+
+    if (active + 1U > waiter_high_water)
+      waiter_high_water = active + 1U;
+
     return waiter;
   }
 
+  // Even a controller command cannot proceed
+  // if no waiter entry remains.
+  waiter_capacity_rejections++;
   return NULL;
 }
 
@@ -5175,6 +5241,11 @@ bool xhci_resource_get_info(xhci_resource_info_t *info) {
   info->dispatch_failed = dispatch_fault != XHCI_DISPATCH_NONE;
   info->downstream_capacity = XHCI_MAX_DEVICES - 1U;
   info->waiter_capacity = XHCI_EVENT_WAITERS;
+  info->waiter_high_water = waiter_high_water;
+  info->command_waiter_reserve = XHCI_COMMAND_WAITER_RESERVE;
+  info->waiter_capacity_rejections = waiter_capacity_rejections;
+  info->waiter_duplicate_rejections = waiter_duplicate_rejections;
+  info->waiter_invalid_rejections = waiter_invalid_rejections;
   info->controller_dma_pages = xhci_controller_dma_pages();
   info->hub_dma_pages = xhci_device_dma_pages(&internal_hub);
 

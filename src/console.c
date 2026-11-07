@@ -2223,6 +2223,14 @@ static void cmd_usb_resources(void) {
       (unsigned int)info.downstream_dma_pages);
   console_printf("  Active waiters      : %u / %u\n",
       info.active_waiters, info.waiter_capacity);
+  console_printf("    Peak active       : %u\n", info.waiter_high_water);
+  console_printf("    Command reserve   : %u\n", info.command_waiter_reserve);
+  console_printf("    Capacity rejected : %u\n",
+      (unsigned int)info.waiter_capacity_rejections);
+  console_printf("    Duplicate rejected: %u\n",
+      (unsigned int)info.waiter_duplicate_rejections);
+  console_printf("    Invalid rejected  : %u\n",
+      (unsigned int)info.waiter_invalid_rejections);
   console_printf("    Completed         : %u\n", info.completed_waiters);
   console_printf("    Command           : %u\n", info.command_waiters);
   console_printf("    Internal hub      : %u\n", info.hub_waiters);
