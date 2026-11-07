@@ -350,6 +350,23 @@ xhci_cleanup_result_t xhci_downstream_cleanup(
     uint8_t slot_id, xhci_cleanup_info_t *info);
 bool xhci_downstream_is_cleaned(uint8_t slot_id);
 bool xhci_downstream_any_owned(void);
+
+typedef enum {
+  XHCI_CONNECTION_UNCERTAIN,
+  XHCI_CONNECTION_UNOWNED,
+  XHCI_CONNECTION_OWNED
+} xhci_connection_ownership_t;
+
+// Inspect resource ownership for one connection
+// on the internal USB 2.0 hub.
+//
+// UNOWNED means no context claims the connection.
+// OWNED includes a reserved but unconfirmed slot.
+// UNCERTAIN means ownership cannot be determined
+// uniquely and must not authorise resource reuse.
+bool xhci_downstream_connection_ownership(uint8_t root_port, uint8_t hub_slot,
+    uint8_t hub_port, xhci_connection_ownership_t *ownership);
+
 typedef enum {
   XHCI_RECYCLE_OK,
   XHCI_RECYCLE_NOT_READY,

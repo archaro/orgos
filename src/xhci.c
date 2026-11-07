@@ -349,6 +349,57 @@ bool xhci_downstream_any_owned(void) {
   return false;
 }
 
+bool xhci_downstream_connection_ownership(uint8_t root_port, uint8_t hub_slot,
+    uint8_t hub_port, xhci_connection_ownership_t *ownership) {
+
+  if (!ownership)
+    return false;
+
+  *ownership = XHCI_CONNECTION_UNCERTAIN;
+
+  // This query currently concerns connections
+  // beneath the internal four-port USB 2.0 hub.
+  if (root_port == 0U || hub_slot == 0U || hub_port == 0U || hub_port > 4U)
+    return false;
+
+  bool found = false;
+
+  // Entry zero belongs to the internal hub.
+  // Inspect only downstream device contexts.
+  for (unsigned int i = 1U; i < XHCI_MAX_DEVICES; i++) {
+    const xhci_device_t *device = &devices[i];
+
+    // A completely unused or recycled context
+    // cannot retain downstream ownership.
+    if (xhci_device_context_available(device))
+      continue;
+
+    // An occupied context without attributable
+    // topology prevents a definite conclusion.
+    //
+    // This includes unexpected residual state
+    // following an incomplete allocation.
+    if (device->root_port == 0U || device->hub_slot == 0U ||
+        device->hub_port == 0U || device->hub_port > 4U)
+      return true;
+
+    if (device->root_port != root_port || device->hub_slot != hub_slot ||
+        device->hub_port != hub_port)
+      continue;
+
+    // Two occupied contexts claiming the same
+    // connection constitute ambiguous ownership.
+    if (found)
+      return true;
+
+    found = true;
+  }
+
+  *ownership = found ?  XHCI_CONNECTION_OWNED : XHCI_CONNECTION_UNOWNED;
+
+  return true;
+}
+
 static xhci_device_t *xhci_downstream_context_reserve(uint8_t root_port,
     uint8_t hub_slot, uint8_t hub_port, xhci_slot_result_t *failure) {
 

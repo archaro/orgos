@@ -1630,6 +1630,24 @@ static void cmd_usb_lifecycle_port(void) {
   console_printf("  Sequence    : %u\n", (unsigned int)info.last_sequence);
   console_printf("  Last status : 0x%04x\n", (unsigned int)info.last_status);
   console_printf("  Last change : 0x%04x\n", (unsigned int)info.last_change);
+  usb_init_info_t root = {0};
+  xhci_connection_ownership_t ownership = XHCI_CONNECTION_UNCERTAIN;
+  if (usb_get_init_info(&root) && root.result == USB_INIT_OK) {
+    (void)xhci_downstream_connection_ownership(
+        root.root_port, root.slot_id, info.port, &ownership);
+  }
+  const char *owner_name = "Uncertain";
+  switch (ownership) {
+    case XHCI_CONNECTION_UNOWNED:
+      owner_name = "Unowned";
+      break;
+    case XHCI_CONNECTION_OWNED:
+      owner_name = "Owned";
+      break;
+    default:
+      break;
+  }
+  console_printf("  xHCI owner  : %s\n", owner_name);
 }
 
 static void cmd_usb_topology(void) {
