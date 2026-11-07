@@ -59,7 +59,12 @@ static bool control_in(usb_enum_info_t *state, bool downstream,
   return true;
 }
 
-static usb_enum_result_t discover_port(usb_enum_info_t *state) {
+static usb_enum_result_t discover_port(
+    usb_enum_info_t *state, uint8_t admitted_port) {
+
+  if (admitted_port == 0U || admitted_port > state->hub_ports)
+    return USB_ENUM_PORT_FAILED;
+
   uint8_t found = 0U;
 
   for (uint8_t port = 1U; port <= state->hub_ports; port++) {
@@ -87,7 +92,18 @@ static usb_enum_result_t discover_port(usb_enum_info_t *state) {
   if (found == 0U)
     return USB_ENUM_DEVICE_NOT_FOUND;
 
-  state->hub_port = found;
+  // Enumeration must operate on the connection
+  // selected by topology admission.
+  //
+  // Retain the single-connected-device restriction
+  // until independent USB records and lifecycles
+  // have been implemented.
+  if (found != admitted_port) {
+    state->detail = (uint32_t)admitted_port | ((uint32_t)found << 8);
+    return USB_ENUM_PORT_FAILED;
+  }
+
+  state->hub_port = admitted_port;
 
   // Confirm a stable connection before resetting
   // the downstream port and addressing its device.
@@ -361,7 +377,7 @@ usb_enum_result_t usb_enumerate(usb_enum_info_t *info) {
   state.hub_ports = hub.ports;
   usb_enum_result_t result = USB_ENUM_OK;
 
-  result = discover_port(&state);
+  result = discover_port(&state, admission.port);
   if (result != USB_ENUM_OK)
     goto complete;
   // A device has been detected and its port reset.
