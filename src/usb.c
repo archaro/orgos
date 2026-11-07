@@ -25,6 +25,7 @@ static unsigned int change_head;
 static unsigned int change_count;
 static usb_change_stats_t change_stats;
 static usb_change_event_t last_port_change[16];
+
 // Lifecycle storage for the four downstream
 // ports of the internal USB 2.0 hub.
 //
@@ -32,6 +33,14 @@ static usb_change_event_t last_port_change[16];
 // multiple lifecycle executors yet.
 #define USB_LIFECYCLE_RUN_CAPACITY 4U
 static usb_lifecycle_run_info_t lifecycle_runs[USB_LIFECYCLE_RUN_CAPACITY];
+
+// Index from which the next foreground lifecycle
+// scheduling pass begins.
+//
+// Only one lifecycle operation may be dispatched
+// per pass, even when several runs are armed.
+static unsigned int lifecycle_next_index;
+
 // Compatibility executor. Until per-device
 // scheduling is implemented, all lifecycle
 // operations continue to use entry zero.
@@ -69,6 +78,15 @@ static usb_lifecycle_run_info_t *usb_lifecycle_by_generation(
   }
 
   return found;
+}
+
+static bool usb_lifecycle_any_armed(void) {
+  for (unsigned int i = 0U; i < USB_LIFECYCLE_RUN_CAPACITY; i++) {
+    if (lifecycle_runs[i].state == USB_LIFECYCLE_RUN_ARMED)
+      return true;
+  }
+
+  return false;
 }
 
 static usb_lifecycle_run_info_t *usb_lifecycle_select_for_arm(
@@ -746,9 +764,14 @@ static void usb_lifecycle_fail_run(
 }
 
 static void usb_lifecycle_fail(usb_lifecycle_fault_t fault) {
-  // Compatibility path for controller-wide faults.
-  // Only entry zero can currently be armed.
-  usb_lifecycle_fail_run(lifecycle_run, fault);
+  // Controller-wide failures invalidate every
+  // currently armed lifecycle executor.
+  //
+  // Preserve completed and previously failed
+  // records without modifying their history.
+  for (unsigned int i = 0U; i < USB_LIFECYCLE_RUN_CAPACITY; i++) {
+    usb_lifecycle_fail_run(&lifecycle_runs[i], fault);
+  }
 }
 
 static void usb_lifecycle_service_run(usb_lifecycle_run_info_t *run) {
@@ -901,14 +924,32 @@ static void usb_lifecycle_service_run(usb_lifecycle_run_info_t *run) {
 }
 
 static void usb_lifecycle_service(void) {
-  // Serialised compatibility scheduler.
-  // Additional executors are not serviced yet.
-  usb_lifecycle_service_run(lifecycle_run);
+  // Visit armed executors in round-robin order.
+  //
+  // The scheduler dispatches at most one run
+  // per foreground service pass. xHCI lifecycle
+  // commands therefore remain serialised.
+  for (unsigned int scanned = 0U;
+      scanned < USB_LIFECYCLE_RUN_CAPACITY; scanned++) {
+
+    unsigned int index =
+        (lifecycle_next_index + scanned) % USB_LIFECYCLE_RUN_CAPACITY;
+    usb_lifecycle_run_info_t *run = &lifecycle_runs[index];
+    if (run->state != USB_LIFECYCLE_RUN_ARMED)
+      continue;
+
+    // Start the next scheduling pass after the
+    // selected executor, even if this operation
+    // completes or fails.
+    lifecycle_next_index = (index + 1U) % USB_LIFECYCLE_RUN_CAPACITY;
+
+    usb_lifecycle_service_run(run);
+    return;
+  }
 }
 
 static void usb_auto_enum_service(void) {
-  if (!auto_enum.enabled || !auto_enum.pending ||
-      lifecycle_run->state == USB_LIFECYCLE_RUN_ARMED)
+  if (!auto_enum.enabled || !auto_enum.pending || usb_lifecycle_any_armed())
     return;
 
   // Deferred hub-change inspections are rate-limited.
