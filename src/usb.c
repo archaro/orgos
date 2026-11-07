@@ -41,10 +41,12 @@ static usb_lifecycle_run_info_t lifecycle_runs[USB_LIFECYCLE_RUN_CAPACITY];
 // per pass, even when several runs are armed.
 static unsigned int lifecycle_next_index;
 
-// Compatibility executor. Until per-device
-// scheduling is implemented, all lifecycle
-// operations continue to use entry zero.
-static usb_lifecycle_run_info_t *const lifecycle_run = &lifecycle_runs[0];
+// Most recently armed lifecycle executor.
+// Retained for the existing single-run diagnostic
+// interface; it does not determine scheduling
+// or ownership.
+static usb_lifecycle_run_info_t *lifecycle_last_run = &lifecycle_runs[0];
+
 static uint64_t auto_enum_next_check_us;
 static usb_auto_enum_info_t auto_enum = {
   .enabled = true,
@@ -89,35 +91,54 @@ static bool usb_lifecycle_any_armed(void) {
   return false;
 }
 
+static bool usb_lifecycle_any_failed(void) {
+  for (unsigned int i = 0U; i < USB_LIFECYCLE_RUN_CAPACITY; i++) {
+    if (lifecycle_runs[i].state == USB_LIFECYCLE_RUN_FAILED)
+      return true;
+  }
+
+  return false;
+}
+
 static usb_lifecycle_run_info_t *usb_lifecycle_select_for_arm(
     uint32_t generation) {
 
-  if (generation == 0U)
+  if (generation == 0U || usb_lifecycle_any_armed() ||
+      usb_lifecycle_any_failed())
     return NULL;
 
-  // There must be no other armed executor, and
-  // failed executor records must never be reused.
+  // A generation may never acquire a second
+  // lifecycle executor, even if its previous
+  // executor has already completed.
   for (unsigned int i = 0U; i < USB_LIFECYCLE_RUN_CAPACITY; i++) {
     usb_lifecycle_run_info_t *run = &lifecycle_runs[i];
-    if (run->state == USB_LIFECYCLE_RUN_ARMED ||
-        run->state == USB_LIFECYCLE_RUN_FAILED)
-      return NULL;
-
-    // Never arm another executor for an incarnation
-    // whose lifecycle has already been recorded.
     if (run->state != USB_LIFECYCLE_RUN_DISARMED &&
         run->generation == generation)
       return NULL;
   }
 
-  // Only entry zero is executable at present.
-  // Other entries will become allocatable when
-  // lifecycle execution accepts a selected run.
-  if (lifecycle_run->state != USB_LIFECYCLE_RUN_DISARMED &&
-      lifecycle_run->state != USB_LIFECYCLE_RUN_COMPLETE)
-    return NULL;
+  usb_lifecycle_run_info_t *oldest_complete = NULL;
 
-  return lifecycle_run;
+  for (unsigned int i = 0U; i < USB_LIFECYCLE_RUN_CAPACITY; i++) {
+    usb_lifecycle_run_info_t *run = &lifecycle_runs[i];
+
+    // Prefer unused records so completed
+    // lifecycle history remains available
+    // for as long as possible.
+    if (run->state == USB_LIFECYCLE_RUN_DISARMED)
+      return run;
+
+    // COMPLETE means the previous incarnation
+    // passed through successful recycling and
+    // enumeration rearm.
+    if (run->state == USB_LIFECYCLE_RUN_COMPLETE &&
+        (!oldest_complete || run->generation < oldest_complete->generation))
+      oldest_complete = run;
+  }
+
+  // Reuse only the oldest completed record.
+  // Failed records are never candidates.
+  return oldest_complete;
 }
 
 static bool usb_port_valid(const xhci_port_t *port) {
@@ -659,12 +680,11 @@ bool usb_lifecycle_inspect_generation(
   return usb_lifecycle_inspect_record( &device, run, attempted, info);
 }
 
-bool usb_lifecycle_get_run_info(
-    usb_lifecycle_run_info_t *info) {
+bool usb_lifecycle_get_run_info(usb_lifecycle_run_info_t *info) {
   if (!info)
     return false;
 
-  *info = *lifecycle_run;
+  *info = *lifecycle_last_run;
   return true;
 }
 
@@ -717,6 +737,10 @@ bool usb_lifecycle_arm_generation(uint32_t generation) {
     .slot_id = device.slot_id
   };
 
+  // Compatibility diagnostics follow the executor
+  // most recently selected for a new lifecycle.
+  lifecycle_last_run = run;
+
   return true;
 }
 
@@ -741,10 +765,9 @@ static void usb_lifecycle_auto_arm(void) {
       enumeration.slot_id != device.slot_id)
     return;
 
-  // Never restart teardown for a generation whose
-  // executor is already armed, complete or failed.
-  if (lifecycle_run->generation == device.generation &&
-      lifecycle_run->state != USB_LIFECYCLE_RUN_DISARMED)
+  // An incarnation which already owns a lifecycle
+  // record must not be armed again.
+  if (usb_lifecycle_by_generation(device.generation))
     return;
 
   // All controller operations remain the
@@ -1269,16 +1292,21 @@ bool usb_reenum_inspect(usb_reenum_info_t *info) {
     return true;
   }
 
-  if (lifecycle_run->generation == device.generation) {
-    if (lifecycle_run->state == USB_LIFECYCLE_RUN_ARMED) {
-      info->result = USB_REENUM_EXECUTOR_ACTIVE;
-      return true;
-    }
+  // Reconnection must not proceed while a
+  // lifecycle executor is still active.
+  // This is controller-wide until independent
+  // device admission is implemented.
+  if (usb_lifecycle_any_armed()) {
+    info->result = USB_REENUM_EXECUTOR_ACTIVE;
+    return true;
+  }
 
-    if (lifecycle_run->state == USB_LIFECYCLE_RUN_FAILED) {
-      info->result = USB_REENUM_EXECUTOR_FAILED;
-      return true;
-    }
+  // A failed executor may retain uncertain
+  // hardware ownership, even if it belongs
+  // to an earlier generation.
+  if (usb_lifecycle_any_failed()) {
+    info->result = USB_REENUM_EXECUTOR_FAILED;
+    return true;
   }
 
   if (info->enumeration_attempted) {
