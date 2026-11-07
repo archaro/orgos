@@ -707,7 +707,8 @@ static void usb_lifecycle_service(void) {
       break;
     }
     case USB_LIFECYCLE_DETACH: {
-      succeeded = usb_device_finalize_disconnect();
+      succeeded = usb_device_finalize_disconnect_generation(
+          lifecycle_run.generation, lifecycle_run.slot_id);
       lifecycle_run.last_result = succeeded ? 0U : 1U;
       break;
     }
@@ -719,7 +720,7 @@ static void usb_lifecycle_service(void) {
       break;
     }
     case USB_LIFECYCLE_REARM: {
-      succeeded = usb_enumeration_rearm();
+      succeeded = usb_enumeration_rearm_generation(lifecycle_run.generation);
       lifecycle_run.last_result = succeeded ? 0U : 1U;
       break;
     }

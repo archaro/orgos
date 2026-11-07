@@ -124,6 +124,11 @@ bool usb_device_test_quiesce(void);
 void usb_device_port_changed(uint8_t port, uint16_t status, uint16_t change);
 bool usb_device_finalize_disconnect(void);
 bool usb_enumeration_rearm(void);
+// Teardown operations selected by the lifecycle
+// executor's retained device incarnation.
+bool usb_device_finalize_disconnect_generation(
+    uint32_t generation, uint8_t slot_id);
+bool usb_enumeration_rearm_generation(uint32_t generation);
 bool usb_enumeration_rearm_rejected(uint8_t port);
 bool usb_enumeration_test_abort_arm(void);
 bool usb_enumeration_test_config_abort_arm(void);

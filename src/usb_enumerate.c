@@ -862,101 +862,134 @@ bool usb_device_test_quiesce(void) {
 }
 
 void usb_device_port_changed(uint8_t port, uint16_t status, uint16_t change) {
-  if (!managed_device->valid)
+  // Notifications currently originate from the
+  // internal USB 2.0 hub. Resolve its identity
+  // before selecting the downstream record.
+  usb_init_info_t root = {0};
+
+  if (!usb_get_init_info(&root) || root.result != USB_INIT_OK ||
+      root.root_port == 0U || root.slot_id == 0U)
     return;
 
-  if (managed_device->device.state == USB_DEVICE_DETACHED ||
-      managed_device->device.state == USB_DEVICE_DISCONNECTING)
+  usb_managed_device_t *record = usb_managed_by_connection(
+      root.root_port, root.slot_id, port);
+
+  if (!record)
     return;
 
-  // Ignore changes affecting other downstream ports.
-  if (port != managed_device->device.parent_port)
+  if (record->device.state == USB_DEVICE_DETACHED ||
+      record->device.state == USB_DEVICE_DISCONNECTING)
     return;
 
-  // A connection-change flag invalidates the
-  // existing device identity even if the port
-  // currently reports a connected device.
+  // A connection-change notification invalidates
+  // the old incarnation even if another device
+  // has already connected on the same port.
   bool connection_changed = (change & 0x0001U) != 0U;
   bool connected = (status & 0x0001U) != 0U;
   if (!connection_changed && connected)
     return;
 
-  // Prevent new transfers through this device's
-  // existing xHCI slot before declaring it stale.
-  if (!xhci_downstream_quiesce(managed_device->device.slot_id))
+  // Quiesce only the hardware slot owned by this
+  // physical connection. Retain its identity
+  // for the subsequent lifecycle teardown.
+  uint8_t slot_id = record->device.slot_id;
+  if (slot_id == 0U || !xhci_downstream_quiesce(slot_id))
     return;
 
-  // Retain the slot and address for teardown.
-  // They are not yet safe to reuse.
-  managed_device->device.state = USB_DEVICE_DISCONNECTING;
+  record->device.state = USB_DEVICE_DISCONNECTING;
+}
+
+bool usb_device_finalize_disconnect_generation(
+    uint32_t generation, uint8_t slot_id) {
+
+  if (slot_id == 0U)
+    return false;
+
+  usb_managed_device_t *record = usb_managed_by_generation(generation);
+  if (!record || record->device.state != USB_DEVICE_DISCONNECTING ||
+      record->device.slot_id != slot_id ||
+      usb_managed_by_slot(slot_id) != record ||
+      !xhci_downstream_is_quiesced(slot_id) ||
+      !xhci_downstream_is_cleaned(slot_id))
+    return false;
+
+  // Controller cleanup is complete. Invalidate
+  // the public hardware identity but retain the
+  // physical connection and device generation.
+  record->device.slot_id = 0U;
+  record->device.address = 0U;
+  record->device.vendor_id = 0U;
+  record->device.product_id = 0U;
+  record->device.speed = USB_SPEED_UNKNOWN;
+  record->device.state = USB_DEVICE_DETACHED;
+
+  return true;
 }
 
 bool usb_device_finalize_disconnect(void) {
-  if (!managed_device->valid ||
-      managed_device->device.state != USB_DEVICE_DISCONNECTING ||
-      !xhci_downstream_is_quiesced(managed_device->device.slot_id) ||
-      !xhci_downstream_is_cleaned(managed_device->device.slot_id))
+  // Compatibility interface for the original
+  // single-device lifecycle.
+  return usb_device_finalize_disconnect_generation(
+      managed_device->device.generation, managed_device->device.slot_id);
+}
+
+bool usb_enumeration_rearm_generation(uint32_t generation) {
+  usb_managed_device_t *record = usb_managed_by_generation(generation);
+  if (!record || !record->attempted ||
+      record->device.state != USB_DEVICE_DETACHED ||
+      record->device.slot_id != 0U || xhci_downstream_any_owned())
     return false;
 
-  // Controller teardown is complete.
-  // Invalidate the old device identity.
-  managed_device->device.slot_id = 0U;
-  managed_device->device.address = 0U;
-  managed_device->device.vendor_id = 0U;
-  managed_device->device.product_id = 0U;
-  managed_device->device.speed = USB_SPEED_UNKNOWN;
-
-  // Preserve topology and generation
-  // for subsequent diagnostics.
-  managed_device->device.state = USB_DEVICE_DETACHED;
+  // The previous incarnation no longer owns
+  // controller resources. Clear its enumeration
+  // attempt, but retain its device history.
+  record->attempted = false;
+  record->enumeration = (usb_enum_info_t){0};
 
   return true;
 }
 
 bool usb_enumeration_rearm(void) {
-  if (!managed_device->valid || !managed_device->attempted ||
-      managed_device->device.state != USB_DEVICE_DETACHED ||
-      xhci_downstream_any_owned())
-    return false;
-
-  // The old device has been detached and
-  // its xHCI state has been recycled.
-  managed_device->attempted = false;
-  managed_device->enumeration = (usb_enum_info_t){0};
-
-  return true;
+  // Retain the original compatibility interface.
+  return usb_enumeration_rearm_generation( managed_device->device.generation);
 }
 
 bool usb_enumeration_rearm_rejected(uint8_t port) {
-  // Only recover an unsupported-speed rejection
-  // which occurred before acquiring an xHCI slot.
-  // A failed operation after slot acquisition
-  // requires the existing controlled recovery path.
-  if (!managed_device->attempted || managed_device->enumeration.slot_attempted ||
-      managed_device->enumeration.result != USB_ENUM_UNSUPPORTED_SPEED ||
-      managed_device->enumeration.hub_port != port || !managed_device->valid ||
-      managed_device->device.state != USB_DEVICE_DETACHED)
+  usb_managed_device_t *record = NULL;
+
+  // A rejected enumeration may have no generation
+  // or hardware slot. Select it by its recorded
+  // enumeration port and failure state.
+  for (unsigned int i = 0U; i < USB_MANAGED_DEVICE_CAPACITY; i++) {
+    usb_managed_device_t *candidate = &managed_devices[i];
+    if (!candidate->valid || !candidate->attempted ||
+        candidate->enumeration.slot_attempted ||
+        candidate->enumeration.result != USB_ENUM_UNSUPPORTED_SPEED ||
+        candidate->enumeration.hub_port != port ||
+        candidate->device.state != USB_DEVICE_DETACHED)
+      continue;
+
+    // Ambiguous ownership is not permission
+    // to discard either record.
+    if (record)
+      return false;
+
+    record = candidate;
+  }
+
+  if (!record || xhci_downstream_any_owned())
     return false;
 
-  // There must be no outstanding downstream
-  // controller resources awaiting reclamation.
-  if (xhci_downstream_any_owned())
-    return false;
-
-  // Confirm that the rejected port is now empty
-  // and that all hub change flags have settled.
+  // The rejected port must now be empty, with
+  // all associated change flags acknowledged.
   usb_hub_port_t status = {0};
   if (usb_hub_port_status(port, &status) != USB_HUB_OK ||
       (status.status & USB_PORT_CONNECTED) != 0U || status.change != 0U)
     return false;
 
-  // No slot was acquired and no downstream
-  // allocations were handed to the controller.
-  // Discard the unsuccessful enumeration record.
-  managed_device->attempted = false;
-  managed_device->enumeration = (usb_enum_info_t){0};
-  managed_device->device = (usb_device_t){0};
-  managed_device->valid = false;
+  // No xHCI slot was acquired. This rejected
+  // attempt can be discarded without teardown.
+  *record = (usb_managed_device_t){0};
 
   return true;
 }
