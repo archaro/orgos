@@ -1,4 +1,5 @@
 
+#include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -24,10 +25,18 @@ typedef struct {
   bool attempted;
 } usb_managed_device_t;
 
-// A single managed record until independent
-// device ownership and lifecycle handling
-// have been introduced.
-static usb_managed_device_t managed_device;
+// The internal USB 2.0 hub has four downstream
+// ports. This is a storage limit, not permission
+// to enumerate four devices yet.
+#define USB_MANAGED_DEVICE_CAPACITY 4U
+static usb_managed_device_t managed_devices[USB_MANAGED_DEVICE_CAPACITY];
+
+// Compatibility owner for the existing single-
+// device enumeration and lifecycle interfaces.
+//
+// Explicit record selection will replace this
+// pointer in B2.2d.2c.
+static usb_managed_device_t *const managed_device = &managed_devices[0];
 
 static bool test_abort_after_address;
 static bool test_abort_after_config;
@@ -35,6 +44,69 @@ static bool test_abort_after_config;
 // Generations must be unique across all device
 // incarnations, regardless of physical port.
 static uint32_t device_generation;
+
+static usb_managed_device_t *usb_managed_by_connection(
+    uint8_t root_port, uint8_t parent_slot, uint8_t parent_port) {
+
+  if (root_port == 0U || parent_port == 0U)
+    return NULL;
+
+  usb_managed_device_t *found = NULL;
+  for (unsigned int i = 0U; i < USB_MANAGED_DEVICE_CAPACITY; i++) {
+    usb_managed_device_t *record = &managed_devices[i];
+    if (!record->valid || record->device.root_port != root_port ||
+        record->device.parent_slot != parent_slot ||
+        record->device.parent_port != parent_port)
+      continue;
+
+    // Never choose arbitrarily between two records
+    // claiming the same physical connection.
+    if (found)
+      return NULL;
+
+    found = record;
+  }
+
+  return found;
+}
+
+static usb_managed_device_t *usb_managed_by_slot(uint8_t slot_id) {
+  if (slot_id == 0U)
+    return NULL;
+
+  usb_managed_device_t *found = NULL;
+  for (unsigned int i = 0U; i < USB_MANAGED_DEVICE_CAPACITY; i++) {
+    usb_managed_device_t *record = &managed_devices[i];
+    if (!record->valid || record->device.slot_id != slot_id)
+      continue;
+
+    if (found)
+      return NULL;
+
+    found = record;
+  }
+
+  return found;
+}
+
+static usb_managed_device_t *usb_managed_by_generation(uint32_t generation) {
+  if (generation == 0U)
+    return NULL;
+
+  usb_managed_device_t *found = NULL;
+  for (unsigned int i = 0U; i < USB_MANAGED_DEVICE_CAPACITY; i++) {
+    usb_managed_device_t *record = &managed_devices[i];
+    if (!record->valid || record->device.generation != generation)
+      continue;
+
+    if (found)
+      return NULL;
+
+    found = record;
+  }
+
+  return found;
+}
 
 static uint16_t read_u16(const uint8_t *p) {
   return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
@@ -157,7 +229,7 @@ static usb_enum_result_t address_device( usb_enum_info_t *state) {
 
   // Preserve identity immediately, not after
   // the later preparation/addressing operations.
-  managed_device.device.slot_id = slot.slot_id;
+  managed_device->device.slot_id = slot.slot_id;
 
   state->stage = USB_ENUM_STAGE_PREPARE;
   state->prepare_attempted = true;
@@ -342,16 +414,16 @@ static usb_enum_result_t configure_bulk( usb_enum_info_t *state) {
 bool usb_get_enumeration(usb_enum_info_t *info) {
   if (!info)
     return false;
-  *info = managed_device.enumeration;
-  return managed_device.attempted;
+  *info = managed_device->enumeration;
+  return managed_device->attempted;
 }
 
 usb_enum_result_t usb_enumerate(usb_enum_info_t *info) {
   if (!info)
     return USB_ENUM_NOT_READY;
 
-  if (managed_device.attempted) {
-    *info = managed_device.enumeration;
+  if (managed_device->attempted) {
+    *info = managed_device->enumeration;
     return USB_ENUM_ALREADY_ATTEMPTED;
   }
 
@@ -377,14 +449,14 @@ usb_enum_result_t usb_enumerate(usb_enum_info_t *info) {
 
   // Some enumeration operations are not safe to retry
   // following an uncertain command completion.
-  managed_device.attempted = true;
+  managed_device->attempted = true;
   usb_enum_info_t state = {0};
   state.stage = USB_ENUM_STAGE_DISCOVER;
 
   // Start with no downstream device identified.
-  managed_device.device = (usb_device_t){0};
-  managed_device.device.state = USB_DEVICE_DETACHED;
-  managed_device.valid = true;
+  managed_device->device = (usb_device_t){0};
+  managed_device->device.state = USB_DEVICE_DETACHED;
+  managed_device->valid = true;
   state.hub_ports = hub.ports;
   usb_enum_result_t result = USB_ENUM_OK;
 
@@ -392,11 +464,11 @@ usb_enum_result_t usb_enumerate(usb_enum_info_t *info) {
   if (result != USB_ENUM_OK)
     goto complete;
   // A device has been detected and its port reset.
-  managed_device.device.root_port = root.root_port;
-  managed_device.device.parent_slot = root.slot_id;
-  managed_device.device.parent_port = state.hub_port;
-  managed_device.device.speed = (usb_speed_t)state.speed;
-  managed_device.device.state = USB_DEVICE_DETECTED;
+  managed_device->device.root_port = root.root_port;
+  managed_device->device.parent_slot = root.slot_id;
+  managed_device->device.parent_port = state.hub_port;
+  managed_device->device.speed = (usb_speed_t)state.speed;
+  managed_device->device.state = USB_DEVICE_DETECTED;
   // Each new device incarnation receives
   // a distinct generation identifier.
   if (device_generation == UINT32_MAX) {
@@ -404,17 +476,17 @@ usb_enum_result_t usb_enumerate(usb_enum_info_t *info) {
     goto complete;
   }
   device_generation++;
-  managed_device.device.generation = device_generation;
+  managed_device->device.generation = device_generation;
   // Enumeration will now assign a controller slot
   // and USB address to the detected device.
-  managed_device.device.state = USB_DEVICE_ENUMERATING;
+  managed_device->device.state = USB_DEVICE_ENUMERATING;
 
   result = address_device(&state);
   if (result != USB_ENUM_OK)
     goto complete;
 
-  managed_device.device.slot_id = state.slot_id;
-  managed_device.device.address = state.address;
+  managed_device->device.slot_id = state.slot_id;
+  managed_device->device.address = state.address;
 
   state.stage = USB_ENUM_STAGE_DEVICE_DESCRIPTOR;
 
@@ -430,8 +502,8 @@ usb_enum_result_t usb_enumerate(usb_enum_info_t *info) {
   if (result != USB_ENUM_OK)
     goto complete;
 
-  managed_device.device.vendor_id = state.vendor_id;
-  managed_device.device.product_id = state.product_id;
+  managed_device->device.vendor_id = state.vendor_id;
+  managed_device->device.product_id = state.product_id;
   state.quirks = usb_midi_quirks_lookup(state.vendor_id, state.product_id);
 
   state.stage = USB_ENUM_STAGE_CONFIGURATION_DESCRIPTOR;
@@ -458,31 +530,71 @@ usb_enum_result_t usb_enumerate(usb_enum_info_t *info) {
   if (result != USB_ENUM_OK)
     goto complete;
 
-  managed_device.device.state = USB_DEVICE_CONFIGURED;
+  managed_device->device.state = USB_DEVICE_CONFIGURED;
   state.stage = USB_ENUM_STAGE_MIDI_QUIRK;
   if (!usb_midi_quirks_apply(state.slot_id, state.quirks, &state.detail))
     result = USB_ENUM_MIDI_QUIRK_FAILED;
 
   if (result == USB_ENUM_OK) {
-    managed_device.device.state = USB_DEVICE_ACTIVE;
+    managed_device->device.state = USB_DEVICE_ACTIVE;
     state.stage = USB_ENUM_STAGE_COMPLETE;
   }
 
 complete:
-  if (result != USB_ENUM_OK && managed_device.device.state != USB_DEVICE_DETACHED)
-    managed_device.device.state = USB_DEVICE_FAILED;
+  if (result != USB_ENUM_OK && managed_device->device.state != USB_DEVICE_DETACHED)
+    managed_device->device.state = USB_DEVICE_FAILED;
   state.result = result;
-  managed_device.enumeration = state;
+  managed_device->enumeration = state;
   *info = state;
 
   return result;
 }
 
 bool usb_get_device(usb_device_t *device) {
-  if (!device || !managed_device.valid)
+  if (!device || !managed_device->valid)
     return false;
 
-  *device = managed_device.device;
+  *device = managed_device->device;
+  return true;
+}
+
+bool usb_get_device_by_connection(uint8_t root_port, uint8_t parent_slot,
+    uint8_t parent_port, usb_device_t *device) {
+
+  if (!device)
+    return false;
+
+  usb_managed_device_t *record = usb_managed_by_connection(
+      root_port, parent_slot, parent_port);
+  if (!record)
+    return false;
+
+  *device = record->device;
+  return true;
+}
+
+bool usb_get_device_by_slot(uint8_t slot_id, usb_device_t *device) {
+  if (!device)
+    return false;
+
+  usb_managed_device_t *record = usb_managed_by_slot(slot_id);
+  if (!record)
+    return false;
+
+  *device = record->device;
+  return true;
+}
+
+bool usb_get_device_by_generation(uint32_t generation, usb_device_t *device) {
+
+  if (!device)
+    return false;
+
+  usb_managed_device_t *record = usb_managed_by_generation(generation);
+  if (!record)
+    return false;
+
+  *device = record->device;
   return true;
 }
 
@@ -492,42 +604,42 @@ bool usb_enumeration_recovery_inspect(usb_recovery_info_t *info) {
 
   *info = (usb_recovery_info_t){0};
 
-  if (!managed_device.valid || managed_device.device.state != USB_DEVICE_FAILED ||
-      !managed_device.attempted || managed_device.enumeration.result == USB_ENUM_OK) {
+  if (!managed_device->valid || managed_device->device.state != USB_DEVICE_FAILED ||
+      !managed_device->attempted || managed_device->enumeration.result == USB_ENUM_OK) {
     info->result = USB_RECOVERY_NO_FAILED_DEVICE;
     return true;
   }
 
-  info->generation = managed_device.device.generation;
-  info->slot_id = managed_device.device.slot_id;
+  info->generation = managed_device->device.generation;
+  info->slot_id = managed_device->device.slot_id;
 
-  if (!managed_device.enumeration.slot_confirmed || managed_device.device.slot_id == 0U) {
+  if (!managed_device->enumeration.slot_confirmed || managed_device->device.slot_id == 0U) {
     info->result = USB_RECOVERY_NO_CONFIRMED_SLOT;
     return true;
   }
 
-  if (!managed_device.enumeration.address_attempted ||
-      managed_device.enumeration.address == 0U ||
-      managed_device.enumeration.stage < USB_ENUM_STAGE_DEVICE_DESCRIPTOR) {
+  if (!managed_device->enumeration.address_attempted ||
+      managed_device->enumeration.address == 0U ||
+      managed_device->enumeration.stage < USB_ENUM_STAGE_DEVICE_DESCRIPTOR) {
     info->result = USB_RECOVERY_ADDRESS_UNCONFIRMED;
     return true;
   }
 
-  if (managed_device.enumeration.bulk_attempted) {
+  if (managed_device->enumeration.bulk_attempted) {
     info->result = USB_RECOVERY_BULK_ATTEMPTED;
     return true;
   }
 
-  if (xhci_downstream_is_quiesced(managed_device.device.slot_id) ||
-      xhci_downstream_is_slot_disabled(managed_device.device.slot_id) ||
-      xhci_downstream_is_cleaned(managed_device.device.slot_id)) {
+  if (xhci_downstream_is_quiesced(managed_device->device.slot_id) ||
+      xhci_downstream_is_slot_disabled(managed_device->device.slot_id) ||
+      xhci_downstream_is_cleaned(managed_device->device.slot_id)) {
     info->result = USB_RECOVERY_ALREADY_QUIESCED;
     return true;
   }
 
   xhci_downstream_transfer_state_t transfers = {0};
 
-  if (!xhci_downstream_transfer_state(managed_device.device.slot_id, &transfers)) {
+  if (!xhci_downstream_transfer_state(managed_device->device.slot_id, &transfers)) {
     info->result = USB_RECOVERY_TRANSFER_STATE_UNAVAILABLE;
     return true;
   }
@@ -538,7 +650,7 @@ bool usb_enumeration_recovery_inspect(usb_recovery_info_t *info) {
   info->ep0_state_valid = transfers.ep0_state_valid;
   info->ep0_state = transfers.ep0_state;
 
-  if (transfers.slot_id != managed_device.device.slot_id) {
+  if (transfers.slot_id != managed_device->device.slot_id) {
     info->result = USB_RECOVERY_TRANSFER_STATE_UNAVAILABLE;
     return true;
   }
@@ -560,11 +672,11 @@ bool usb_enumeration_recovery_inspect(usb_recovery_info_t *info) {
   // not yet verified teardown following a genuine
   // EP0 error completion. The confirmed-error path
   // is implemented but remains unproven on hardware.
-  if (managed_device.enumeration.ep0_operation_failed || transfers.ep0_failed) {
-    if (managed_device.enumeration.ep0_operation_failed &&
-        managed_device.enumeration.ep0_result == XHCI_CONTROL_TRANSFER_FAILED &&
+  if (managed_device->enumeration.ep0_operation_failed || transfers.ep0_failed) {
+    if (managed_device->enumeration.ep0_operation_failed &&
+        managed_device->enumeration.ep0_result == XHCI_CONTROL_TRANSFER_FAILED &&
         transfers.ep0_failed &&
-       	xhci_downstream_ep0_fault_reclaimable(managed_device.device.slot_id)) {
+       	xhci_downstream_ep0_fault_reclaimable(managed_device->device.slot_id)) {
       info->result = USB_RECOVERY_READY_EP0_ERROR;
     } else if (transfers.ep0_submitted && transfers.ep0_completion_seen &&
         transfers.ep0_completion_code != 1U) {
@@ -597,26 +709,26 @@ bool usb_enumeration_recovery_begin(void) {
 
   // The old xHCI slot must not accept further
   // transfers while recovery dismantles it.
-  if (!xhci_downstream_quiesce(managed_device.device.slot_id))
+  if (!xhci_downstream_quiesce(managed_device->device.slot_id))
     return false;
-  managed_device.device.state = USB_DEVICE_DISCONNECTING;
+  managed_device->device.state = USB_DEVICE_DISCONNECTING;
 
   return true;
 }
 
 bool usb_device_test_quiesce(void) {
-  if (!managed_device.valid || managed_device.device.state != USB_DEVICE_ACTIVE ||
-      managed_device.device.slot_id == 0U ||
-      xhci_downstream_is_quiesced(managed_device.device.slot_id))
+  if (!managed_device->valid || managed_device->device.state != USB_DEVICE_ACTIVE ||
+      managed_device->device.slot_id == 0U ||
+      xhci_downstream_is_quiesced(managed_device->device.slot_id))
     return false;
 
   xhci_downstream_transfer_state_t state = {0};
-  if (!xhci_downstream_transfer_state(managed_device.device.slot_id, &state))
+  if (!xhci_downstream_transfer_state(managed_device->device.slot_id, &state))
     return false;
 
   // Require exactly one outstanding Bulk IN
   // transfer, with no other active operations.
-  if (state.slot_id != managed_device.device.slot_id || !state.bulk_in_started ||
+  if (state.slot_id != managed_device->device.slot_id || !state.bulk_in_started ||
       !state.bulk_in_pending || state.bulk_in_completed ||
       state.bulk_in_failed || state.active_waiters != 1U ||
       state.ep0_active || state.bulk_out_active)
@@ -629,26 +741,26 @@ bool usb_device_test_quiesce(void) {
 
   // This is an irreversible transition for
   // the current device generation.
-  if (!xhci_downstream_quiesce(managed_device.device.slot_id))
+  if (!xhci_downstream_quiesce(managed_device->device.slot_id))
     return false;
 
   // Present the same software lifecycle state
   // as an actual downstream disconnection.
-  managed_device.device.state = USB_DEVICE_DISCONNECTING;
+  managed_device->device.state = USB_DEVICE_DISCONNECTING;
 
   return true;
 }
 
 void usb_device_port_changed(uint8_t port, uint16_t status, uint16_t change) {
-  if (!managed_device.valid)
+  if (!managed_device->valid)
     return;
 
-  if (managed_device.device.state == USB_DEVICE_DETACHED ||
-      managed_device.device.state == USB_DEVICE_DISCONNECTING)
+  if (managed_device->device.state == USB_DEVICE_DETACHED ||
+      managed_device->device.state == USB_DEVICE_DISCONNECTING)
     return;
 
   // Ignore changes affecting other downstream ports.
-  if (port != managed_device.device.parent_port)
+  if (port != managed_device->device.parent_port)
     return;
 
   // A connection-change flag invalidates the
@@ -661,46 +773,46 @@ void usb_device_port_changed(uint8_t port, uint16_t status, uint16_t change) {
 
   // Prevent new transfers through this device's
   // existing xHCI slot before declaring it stale.
-  if (!xhci_downstream_quiesce(managed_device.device.slot_id))
+  if (!xhci_downstream_quiesce(managed_device->device.slot_id))
     return;
 
   // Retain the slot and address for teardown.
   // They are not yet safe to reuse.
-  managed_device.device.state = USB_DEVICE_DISCONNECTING;
+  managed_device->device.state = USB_DEVICE_DISCONNECTING;
 }
 
 bool usb_device_finalize_disconnect(void) {
-  if (!managed_device.valid ||
-      managed_device.device.state != USB_DEVICE_DISCONNECTING ||
-      !xhci_downstream_is_quiesced(managed_device.device.slot_id) ||
-      !xhci_downstream_is_cleaned(managed_device.device.slot_id))
+  if (!managed_device->valid ||
+      managed_device->device.state != USB_DEVICE_DISCONNECTING ||
+      !xhci_downstream_is_quiesced(managed_device->device.slot_id) ||
+      !xhci_downstream_is_cleaned(managed_device->device.slot_id))
     return false;
 
   // Controller teardown is complete.
   // Invalidate the old device identity.
-  managed_device.device.slot_id = 0U;
-  managed_device.device.address = 0U;
-  managed_device.device.vendor_id = 0U;
-  managed_device.device.product_id = 0U;
-  managed_device.device.speed = USB_SPEED_UNKNOWN;
+  managed_device->device.slot_id = 0U;
+  managed_device->device.address = 0U;
+  managed_device->device.vendor_id = 0U;
+  managed_device->device.product_id = 0U;
+  managed_device->device.speed = USB_SPEED_UNKNOWN;
 
   // Preserve topology and generation
   // for subsequent diagnostics.
-  managed_device.device.state = USB_DEVICE_DETACHED;
+  managed_device->device.state = USB_DEVICE_DETACHED;
 
   return true;
 }
 
 bool usb_enumeration_rearm(void) {
-  if (!managed_device.valid || !managed_device.attempted ||
-      managed_device.device.state != USB_DEVICE_DETACHED ||
+  if (!managed_device->valid || !managed_device->attempted ||
+      managed_device->device.state != USB_DEVICE_DETACHED ||
       xhci_downstream_any_owned())
     return false;
 
   // The old device has been detached and
   // its xHCI state has been recycled.
-  managed_device.attempted = false;
-  managed_device.enumeration = (usb_enum_info_t){0};
+  managed_device->attempted = false;
+  managed_device->enumeration = (usb_enum_info_t){0};
 
   return true;
 }
@@ -710,10 +822,10 @@ bool usb_enumeration_rearm_rejected(uint8_t port) {
   // which occurred before acquiring an xHCI slot.
   // A failed operation after slot acquisition
   // requires the existing controlled recovery path.
-  if (!managed_device.attempted || managed_device.enumeration.slot_attempted ||
-      managed_device.enumeration.result != USB_ENUM_UNSUPPORTED_SPEED ||
-      managed_device.enumeration.hub_port != port || !managed_device.valid ||
-      managed_device.device.state != USB_DEVICE_DETACHED)
+  if (!managed_device->attempted || managed_device->enumeration.slot_attempted ||
+      managed_device->enumeration.result != USB_ENUM_UNSUPPORTED_SPEED ||
+      managed_device->enumeration.hub_port != port || !managed_device->valid ||
+      managed_device->device.state != USB_DEVICE_DETACHED)
     return false;
 
   // There must be no outstanding downstream
@@ -731,16 +843,16 @@ bool usb_enumeration_rearm_rejected(uint8_t port) {
   // No slot was acquired and no downstream
   // allocations were handed to the controller.
   // Discard the unsuccessful enumeration record.
-  managed_device.attempted = false;
-  managed_device.enumeration = (usb_enum_info_t){0};
-  managed_device.device = (usb_device_t){0};
-  managed_device.valid = false;
+  managed_device->attempted = false;
+  managed_device->enumeration = (usb_enum_info_t){0};
+  managed_device->device = (usb_device_t){0};
+  managed_device->valid = false;
 
   return true;
 }
 
 bool usb_enumeration_test_abort_arm(void) {
-  if (managed_device.attempted || test_abort_after_address ||
+  if (managed_device->attempted || test_abort_after_address ||
       test_abort_after_config)
     return false;
 
@@ -749,7 +861,7 @@ bool usb_enumeration_test_abort_arm(void) {
 }
 
 bool usb_enumeration_test_config_abort_arm(void) {
-  if (managed_device.attempted || test_abort_after_address ||
+  if (managed_device->attempted || test_abort_after_address ||
       test_abort_after_config)
     return false;
 
