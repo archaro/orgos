@@ -461,6 +461,21 @@ bool usb_get_enumeration(usb_enum_info_t *info) {
   return managed_device->attempted;
 }
 
+bool usb_get_enumeration_generation(
+    uint32_t generation, usb_enum_info_t *info) {
+
+  if (!info)
+    return false;
+
+  *info = (usb_enum_info_t){0};
+  usb_managed_device_t *record = usb_managed_by_generation(generation);
+  if (!record || !record->attempted)
+    return false;
+
+  *info = record->enumeration;
+  return true;
+}
+
 usb_enum_result_t usb_enumerate(usb_enum_info_t *info) {
   if (!info)
     return USB_ENUM_NOT_READY;

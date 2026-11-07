@@ -74,6 +74,10 @@ typedef struct {
 } usb_lifecycle_info_t;
 
 bool usb_lifecycle_inspect(usb_lifecycle_info_t *info);
+// Inspect the lifecycle of a specific device
+// incarnation, without compatibility fallback.
+bool usb_lifecycle_inspect_generation(
+    uint32_t generation, usb_lifecycle_info_t *info);
 
 typedef enum {
   USB_LIFECYCLE_RUN_DISARMED,

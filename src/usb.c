@@ -463,62 +463,59 @@ static void usb_service_hub_changes(void) {
     usb_change_fail(0U);
 }
 
-bool usb_lifecycle_inspect(usb_lifecycle_info_t *info) {
-  if (!info)
+static bool usb_lifecycle_inspect_record(const usb_device_t *device,
+    const usb_lifecycle_run_info_t *run, bool enumeration_attempted,
+    usb_lifecycle_info_t *info) {
+
+  if (!device || !info)
     return false;
 
   *info = (usb_lifecycle_info_t){0};
-  usb_device_t device = {0};
-  if (!usb_get_device(&device))
-    return true;
-
-  info->generation = device.generation;
-  info->slot_id = device.slot_id;
+  info->generation = device->generation;
+  info->slot_id = device->slot_id;
 
   // Detachment clears the USB device's slot ID,
-  // but the xHCI context remains owned until
-  // recycling has completed.
-  //
-  // While this lifecycle executor is armed for
-  // the same generation, retain its original
-  // slot identity for xHCI state inspection.
-  uint8_t inspection_slot = device.slot_id;
+  // but the lifecycle executor retains the
+  // original hardware identity for recycling.
+  uint8_t inspection_slot = device->slot_id;
+  if (device->state == USB_DEVICE_DETACHED &&
+      run && run->state == USB_LIFECYCLE_RUN_ARMED &&
+      run->generation == device->generation && run->slot_id != 0U)
+    inspection_slot = run->slot_id;
 
-  if (device.state == USB_DEVICE_DETACHED &&
-      lifecycle_run->state == USB_LIFECYCLE_RUN_ARMED &&
-      lifecycle_run->generation == device.generation &&
-      lifecycle_run->slot_id != 0U)
-    inspection_slot = lifecycle_run->slot_id;
-
+  // Inspect the original xHCI slot even after
+  // the public USB slot identity is cleared.
   info->quiesced = xhci_downstream_is_quiesced(inspection_slot);
   info->slot_disabled = xhci_downstream_is_slot_disabled(inspection_slot);
   info->cleaned = xhci_downstream_is_cleaned(inspection_slot);
 
-  if (device.state == USB_DEVICE_ACTIVE)
+  if (device->state == USB_DEVICE_ACTIVE)
     return true;
 
-  if (device.state == USB_DEVICE_DETACHED) {
+  if (device->state == USB_DEVICE_DETACHED) {
     if (xhci_downstream_any_owned()) {
-      // A detached USB record is not proof that
-      // the controller has relinquished its slot.
-      //
-      // Recycle only the context whose complete
-      // teardown has already been confirmed.
-      if (info->quiesced && info->slot_disabled && info->cleaned)
+      // Recycling requires the executor which
+      // owns this exact device incarnation,
+      // together with completed hardware teardown.
+      if (run &&
+          run->state == USB_LIFECYCLE_RUN_ARMED &&
+          run->generation == device->generation && run->slot_id != 0U &&
+          info->quiesced && info->slot_disabled && info->cleaned) {
         info->next = USB_LIFECYCLE_RECYCLE;
-      else
+      } else {
         info->next = USB_LIFECYCLE_BLOCKED;
+      }
     } else {
-      // No downstream context retains ownership.
-      // Enumeration may now be rearmed.
-      usb_enum_info_t enumeration = {0};
-      if (usb_get_enumeration(&enumeration))
+      // No downstream xHCI context remains owned.
+      // The previous enumeration may now be rearmed.
+      if (enumeration_attempted)
         info->next = USB_LIFECYCLE_REARM;
     }
+
     return true;
   }
 
-  if (device.state != USB_DEVICE_DISCONNECTING ||
+  if (device->state != USB_DEVICE_DISCONNECTING ||
       !info->quiesced || !usb_service_available()) {
     info->next = USB_LIFECYCLE_BLOCKED;
     return true;
@@ -530,7 +527,7 @@ bool usb_lifecycle_inspect(usb_lifecycle_info_t *info) {
   }
 
   xhci_downstream_transfer_state_t transfers = {0};
-  if (!xhci_downstream_transfer_state(device.slot_id, &transfers)) {
+  if (!xhci_downstream_transfer_state(device->slot_id, &transfers)) {
     info->next = USB_LIFECYCLE_BLOCKED;
     return true;
   }
@@ -573,6 +570,44 @@ bool usb_lifecycle_inspect(usb_lifecycle_info_t *info) {
       USB_LIFECYCLE_DISABLE : USB_LIFECYCLE_BLOCKED;
 
   return true;
+}
+
+bool usb_lifecycle_inspect(usb_lifecycle_info_t *info) {
+  if (!info)
+    return false;
+
+  *info = (usb_lifecycle_info_t){0};
+  usb_device_t device = {0};
+  if (!usb_get_device(&device))
+    return true;
+
+  usb_enum_info_t enumeration = {0};
+  bool attempted = usb_get_enumeration(&enumeration);
+  usb_lifecycle_run_info_t *run =
+      usb_lifecycle_by_generation(device.generation);
+
+  return usb_lifecycle_inspect_record(&device, run, attempted, info);
+}
+
+bool usb_lifecycle_inspect_generation(
+    uint32_t generation, usb_lifecycle_info_t *info) {
+
+  if (!info)
+    return false;
+
+  *info = (usb_lifecycle_info_t){0};
+  usb_device_t device = {0};
+  // Unknown or ambiguous generations are not
+  // permission to select another device.
+  if (!usb_get_device_by_generation(generation, &device))
+    return false;
+
+  usb_enum_info_t enumeration = {0};
+  bool attempted = usb_get_enumeration_generation( generation, &enumeration);
+
+  usb_lifecycle_run_info_t *run = usb_lifecycle_by_generation(generation);
+
+  return usb_lifecycle_inspect_record( &device, run, attempted, info);
 }
 
 bool usb_lifecycle_get_run_info(
@@ -663,7 +698,8 @@ static void usb_lifecycle_service(void) {
     return;
 
   usb_lifecycle_info_t info = {0};
-  if (!usb_lifecycle_inspect(&info)) {
+
+  if (!usb_lifecycle_inspect_generation(lifecycle_run->generation, &info)) {
     usb_lifecycle_fail(USB_LIFECYCLE_FAULT_INSPECTION);
     return;
   }

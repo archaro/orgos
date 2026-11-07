@@ -76,6 +76,8 @@ typedef struct {
 
 usb_enum_result_t usb_enumerate(usb_enum_info_t *info);
 bool usb_get_enumeration(usb_enum_info_t *info);
+bool usb_get_enumeration_generation(
+    uint32_t generation, usb_enum_info_t *info);
 bool usb_get_device(usb_device_t *device);
 // Read-only lookup of managed USB device records.
 // Unknown or ambiguous identities are rejected.
