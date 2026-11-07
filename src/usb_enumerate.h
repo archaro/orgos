@@ -113,6 +113,12 @@ typedef struct {
 bool usb_enumeration_recovery_inspect(usb_recovery_info_t *info);
 bool usb_enumeration_recovery_ready(void);
 bool usb_enumeration_recovery_begin(void);
+// Generation-specific recovery interfaces.
+// These reject unknown device incarnations and
+// never fall back to the compatibility record.
+bool usb_enumeration_recovery_inspect_generation(
+    uint32_t generation, usb_recovery_info_t *info);
+bool usb_enumeration_recovery_begin_generation( uint32_t generation);
 
 bool usb_device_test_quiesce(void);
 void usb_device_port_changed(uint8_t port, uint16_t status, uint16_t change);

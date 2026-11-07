@@ -1321,11 +1321,17 @@ static void cmd_usb_recover(void) {
     console_puts("USB recovery: SERVICE UNAVAILABLE\n");
     return;
   }
-  if (!usb_enumeration_recovery_ready()) {
+  usb_device_t device = {0};
+  usb_recovery_info_t recovery = {0};
+  if (!usb_get_device(&device) || device.generation == 0U ||
+      !usb_enumeration_recovery_inspect_generation(device.generation, &recovery) ||
+      (recovery.result != USB_RECOVERY_READY &&
+       recovery.result != USB_RECOVERY_READY_EP0_ERROR)) {
     console_puts("USB recovery: NOT READY\n");
     return;
   }
-  if (!usb_enumeration_recovery_begin()) {
+  if (!usb_enumeration_recovery_begin_generation(
+      device.generation)) {
     console_puts("USB recovery: FAILED\n");
     return;
   }

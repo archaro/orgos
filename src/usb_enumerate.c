@@ -648,48 +648,51 @@ bool usb_get_device_by_generation(uint32_t generation, usb_device_t *device) {
   return true;
 }
 
-bool usb_enumeration_recovery_inspect(usb_recovery_info_t *info) {
+static bool usb_enumeration_recovery_inspect_record(
+    const usb_managed_device_t *record, usb_recovery_info_t *info) {
+
   if (!info)
     return false;
 
   *info = (usb_recovery_info_t){0};
 
-  if (!managed_device->valid || managed_device->device.state != USB_DEVICE_FAILED ||
-      !managed_device->attempted || managed_device->enumeration.result == USB_ENUM_OK) {
+  if (!record || !record->valid ||
+      record->device.state != USB_DEVICE_FAILED || !record->attempted ||
+      record->enumeration.result == USB_ENUM_OK) {
     info->result = USB_RECOVERY_NO_FAILED_DEVICE;
     return true;
   }
 
-  info->generation = managed_device->device.generation;
-  info->slot_id = managed_device->device.slot_id;
+  info->generation = record->device.generation;
+  info->slot_id = record->device.slot_id;
 
-  if (!managed_device->enumeration.slot_confirmed || managed_device->device.slot_id == 0U) {
+  if (!record->enumeration.slot_confirmed || record->device.slot_id == 0U) {
     info->result = USB_RECOVERY_NO_CONFIRMED_SLOT;
     return true;
   }
 
-  if (!managed_device->enumeration.address_attempted ||
-      managed_device->enumeration.address == 0U ||
-      managed_device->enumeration.stage < USB_ENUM_STAGE_DEVICE_DESCRIPTOR) {
+  if (!record->enumeration.address_attempted ||
+      record->enumeration.address == 0U ||
+      record->enumeration.stage < USB_ENUM_STAGE_DEVICE_DESCRIPTOR) {
     info->result = USB_RECOVERY_ADDRESS_UNCONFIRMED;
     return true;
   }
 
-  if (managed_device->enumeration.bulk_attempted) {
+  if (record->enumeration.bulk_attempted) {
     info->result = USB_RECOVERY_BULK_ATTEMPTED;
     return true;
   }
 
-  if (xhci_downstream_is_quiesced(managed_device->device.slot_id) ||
-      xhci_downstream_is_slot_disabled(managed_device->device.slot_id) ||
-      xhci_downstream_is_cleaned(managed_device->device.slot_id)) {
+  if (xhci_downstream_is_quiesced(record->device.slot_id) ||
+      xhci_downstream_is_slot_disabled(record->device.slot_id) ||
+      xhci_downstream_is_cleaned(record->device.slot_id)) {
     info->result = USB_RECOVERY_ALREADY_QUIESCED;
     return true;
   }
 
   xhci_downstream_transfer_state_t transfers = {0};
 
-  if (!xhci_downstream_transfer_state(managed_device->device.slot_id, &transfers)) {
+  if (!xhci_downstream_transfer_state(record->device.slot_id, &transfers)) {
     info->result = USB_RECOVERY_TRANSFER_STATE_UNAVAILABLE;
     return true;
   }
@@ -700,7 +703,7 @@ bool usb_enumeration_recovery_inspect(usb_recovery_info_t *info) {
   info->ep0_state_valid = transfers.ep0_state_valid;
   info->ep0_state = transfers.ep0_state;
 
-  if (transfers.slot_id != managed_device->device.slot_id) {
+  if (transfers.slot_id != record->device.slot_id) {
     info->result = USB_RECOVERY_TRANSFER_STATE_UNAVAILABLE;
     return true;
   }
@@ -722,11 +725,11 @@ bool usb_enumeration_recovery_inspect(usb_recovery_info_t *info) {
   // not yet verified teardown following a genuine
   // EP0 error completion. The confirmed-error path
   // is implemented but remains unproven on hardware.
-  if (managed_device->enumeration.ep0_operation_failed || transfers.ep0_failed) {
-    if (managed_device->enumeration.ep0_operation_failed &&
-        managed_device->enumeration.ep0_result == XHCI_CONTROL_TRANSFER_FAILED &&
+  if (record->enumeration.ep0_operation_failed || transfers.ep0_failed) {
+    if (record->enumeration.ep0_operation_failed &&
+        record->enumeration.ep0_result == XHCI_CONTROL_TRANSFER_FAILED &&
         transfers.ep0_failed &&
-       	xhci_downstream_ep0_fault_reclaimable(managed_device->device.slot_id)) {
+       	xhci_downstream_ep0_fault_reclaimable(record->device.slot_id)) {
       info->result = USB_RECOVERY_READY_EP0_ERROR;
     } else if (transfers.ep0_submitted && transfers.ep0_completion_seen &&
         transfers.ep0_completion_code != 1U) {
@@ -743,6 +746,30 @@ bool usb_enumeration_recovery_inspect(usb_recovery_info_t *info) {
   return true;
 }
 
+bool usb_enumeration_recovery_inspect(
+    usb_recovery_info_t *info) {
+
+  // Compatibility inspection also handles failures
+  // which occurred before a generation was assigned.
+  return usb_enumeration_recovery_inspect_record(
+      managed_device, info);
+}
+
+bool usb_enumeration_recovery_inspect_generation(
+    uint32_t generation, usb_recovery_info_t *info) {
+
+  if (!info)
+    return false;
+
+  *info = (usb_recovery_info_t){0};
+
+  usb_managed_device_t *record = usb_managed_by_generation(generation);
+  if (!record)
+    return false;
+
+  return usb_enumeration_recovery_inspect_record( record, info);
+}
+
 bool usb_enumeration_recovery_ready(void) {
   usb_recovery_info_t info = {0};
 
@@ -753,17 +780,50 @@ bool usb_enumeration_recovery_ready(void) {
       info.result == USB_RECOVERY_READY_EP0_ERROR;
 }
 
-bool usb_enumeration_recovery_begin(void) {
-  if (!usb_enumeration_recovery_ready())
+static bool usb_enumeration_recovery_begin_record(
+    usb_managed_device_t *record) {
+
+  if (!record)
     return false;
 
-  // The old xHCI slot must not accept further
-  // transfers while recovery dismantles it.
-  if (!xhci_downstream_quiesce(managed_device->device.slot_id))
-    return false;
-  managed_device->device.state = USB_DEVICE_DISCONNECTING;
+  usb_recovery_info_t recovery = {0};
 
+  // Inspection must concern this exact record,
+  // not whichever device happens to be exposed
+  // through the compatibility interface.
+  if (!usb_enumeration_recovery_inspect_record(
+      record, &recovery))
+    return false;
+
+  if (recovery.result != USB_RECOVERY_READY &&
+      recovery.result != USB_RECOVERY_READY_EP0_ERROR)
+    return false;
+
+  // An actionable recovery requires a confirmed
+  // device incarnation and retained hardware slot.
+  if (recovery.generation == 0U ||
+      recovery.generation != record->device.generation ||
+      recovery.slot_id == 0U ||
+      recovery.slot_id != record->device.slot_id)
+    return false;
+
+  // Once quiesced, this device's slot must not
+  // accept further transfers. Its identity remains
+  // intact for the lifecycle executor.
+  if (!xhci_downstream_quiesce(recovery.slot_id))
+    return false;
+
+  record->device.state = USB_DEVICE_DISCONNECTING;
   return true;
+}
+
+bool usb_enumeration_recovery_begin_generation(uint32_t generation) {
+  return usb_enumeration_recovery_begin_record(
+      usb_managed_by_generation(generation));
+}
+
+bool usb_enumeration_recovery_begin(void) {
+  return usb_enumeration_recovery_begin_record(managed_device);
 }
 
 bool usb_device_test_quiesce(void) {
