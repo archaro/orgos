@@ -110,43 +110,98 @@ static usb_managed_device_t *usb_managed_by_generation(uint32_t generation) {
   return found;
 }
 
+static bool usb_managed_record_reusable( const usb_managed_device_t *record) {
+  if (!record || record->attempted)
+    return false;
+
+  // An unused record has no previous device
+  // incarnation or controller resources.
+  if (!record->valid)
+    return true;
+
+  // A previously used record is reusable only
+  // after successful detachment and rearm.
+  if (record->device.state != USB_DEVICE_DETACHED ||
+      record->device.slot_id != 0U || record->device.generation == 0U)
+    return false;
+
+  xhci_connection_ownership_t ownership = XHCI_CONNECTION_UNCERTAIN;
+  if (!xhci_downstream_connection_ownership( record->device.root_port,
+      record->device.parent_slot, record->device.parent_port, &ownership))
+    return false;
+
+  return ownership == XHCI_CONNECTION_UNOWNED;
+}
+
 static usb_managed_device_t *usb_managed_select_for_enumeration(
-    uint8_t root_port, uint8_t parent_slot, uint8_t parent_port) {
+    uint8_t root_port, uint8_t parent_slot,
+    uint8_t parent_port, bool multiple_records_enabled) {
 
   if (root_port == 0U || parent_slot == 0U || parent_port == 0U)
     return NULL;
 
-  // Multiple records are not yet supported by
-  // the USB enumeration and lifecycle layers.
-  for (unsigned int i = 1U; i < USB_MANAGED_DEVICE_CAPACITY; i++) {
-    if (managed_devices[i].valid || managed_devices[i].attempted)
+  usb_managed_device_t *matching = NULL;
+
+  // Look for an existing record associated with
+  // this physical connection. Reject duplicate
+  // ownership rather than selecting arbitrarily.
+  for (unsigned int i = 0U; i < USB_MANAGED_DEVICE_CAPACITY; i++) {
+    usb_managed_device_t *record = &managed_devices[i];
+    if (!record->valid || record->device.root_port != root_port ||
+        record->device.parent_slot != parent_slot ||
+        record->device.parent_port != parent_port)
+      continue;
+
+    if (matching)
       return NULL;
+
+    matching = record;
   }
 
-  // Reuse the record already associated with
-  // this physical connection, if one exists.
-  usb_managed_device_t *record = usb_managed_by_connection(
-      root_port, parent_slot, parent_port);
+  if (!multiple_records_enabled) {
+    // Compatibility mode: only entry zero may
+    // participate in enumeration. Retain the
+    // existing single-device ownership restriction.
+    for (unsigned int i = 1U; i < USB_MANAGED_DEVICE_CAPACITY; i++) {
+      if (managed_devices[i].valid || managed_devices[i].attempted)
+        return NULL;
+    }
 
-  // The compatibility interfaces still expose
-  // only entry zero. Other records cannot yet
-  // participate in enumeration.
-  if (record && record != managed_device)
-    return NULL;
+    if (matching && matching != managed_device)
+      return NULL;
 
-  if (!record)
-    record = managed_device;
+    return usb_managed_record_reusable(managed_device) ?
+        managed_device : NULL;
+  }
 
-  // A detached and rearmed record may be reused,
-  // including on a different physical port.
+  // Future multi-record mode.
   //
-  // An active or uncertain device incarnation
-  // must never be overwritten.
-  if (record->attempted ||
-      (record->valid && record->device.state != USB_DEVICE_DETACHED))
-    return NULL;
+  // Reuse an existing connection record only
+  // when its previous incarnation is fully
+  // detached, rearmed and unowned.
+  if (matching)
+    return usb_managed_record_reusable(matching) ?  matching : NULL;
 
-  return record;
+  // Prefer completely unused records.
+  for (unsigned int i = 0U; i < USB_MANAGED_DEVICE_CAPACITY; i++) {
+    usb_managed_device_t *record = &managed_devices[i];
+    if (!record->valid && usb_managed_record_reusable(record))
+      return record;
+  }
+
+  // Otherwise reuse the oldest safely released
+  // device incarnation.
+  usb_managed_device_t *oldest = NULL;
+  for (unsigned int i = 0U; i < USB_MANAGED_DEVICE_CAPACITY; i++) {
+    usb_managed_device_t *record = &managed_devices[i];
+    if (!record->valid || !usb_managed_record_reusable(record))
+      continue;
+
+    if (!oldest || record->device.generation < oldest->device.generation)
+      oldest = record;
+  }
+
+  return oldest;
 }
 
 static uint16_t read_u16(const uint8_t *p) {
@@ -505,10 +560,11 @@ usb_enum_result_t usb_enumerate(usb_enum_info_t *info) {
   if (!usb_hub_get_init_info(&hub) || hub.result != USB_HUB_INIT_OK)
     return USB_ENUM_NOT_READY;
 
-  // Bind this enumeration attempt to the record
-  // representing the admitted physical connection.
+  // Multi-record selection remains disabled until
+  // the complete USB regression has passed and
+  // independent device admission is enabled.
   usb_managed_device_t *record = usb_managed_select_for_enumeration(
-      root.root_port, root.slot_id, admission.port);
+      root.root_port, root.slot_id, admission.port, false);
   if (!record)
     return USB_ENUM_NOT_READY;
 
