@@ -71,6 +71,29 @@ static usb_managed_device_t *usb_managed_by_connection(
   return found;
 }
 
+static bool usb_managed_record_reusable( const usb_managed_device_t *record) {
+  if (!record || record->attempted)
+    return false;
+
+  // An unused record has no previous device
+  // incarnation or controller resources.
+  if (!record->valid)
+    return true;
+
+  // A previously used record is reusable only
+  // after successful detachment and rearm.
+  if (record->device.state != USB_DEVICE_DETACHED ||
+      record->device.slot_id != 0U || record->device.generation == 0U)
+    return false;
+
+  xhci_connection_ownership_t ownership = XHCI_CONNECTION_UNCERTAIN;
+  if (!xhci_downstream_connection_ownership( record->device.root_port,
+      record->device.parent_slot, record->device.parent_port, &ownership))
+    return false;
+
+  return ownership == XHCI_CONNECTION_UNOWNED;
+}
+
 static usb_managed_device_t *usb_managed_by_slot(uint8_t slot_id) {
   if (slot_id == 0U)
     return NULL;
@@ -107,29 +130,6 @@ static usb_managed_device_t *usb_managed_by_generation(uint32_t generation) {
   }
 
   return found;
-}
-
-static bool usb_managed_record_reusable( const usb_managed_device_t *record) {
-  if (!record || record->attempted)
-    return false;
-
-  // An unused record has no previous device
-  // incarnation or controller resources.
-  if (!record->valid)
-    return true;
-
-  // A previously used record is reusable only
-  // after successful detachment and rearm.
-  if (record->device.state != USB_DEVICE_DETACHED ||
-      record->device.slot_id != 0U || record->device.generation == 0U)
-    return false;
-
-  xhci_connection_ownership_t ownership = XHCI_CONNECTION_UNCERTAIN;
-  if (!xhci_downstream_connection_ownership( record->device.root_port,
-      record->device.parent_slot, record->device.parent_port, &ownership))
-    return false;
-
-  return ownership == XHCI_CONNECTION_UNOWNED;
 }
 
 static usb_managed_device_t *usb_managed_select_for_enumeration(
@@ -273,9 +273,10 @@ static usb_enum_result_t discover_port(
   // Enumeration must operate on the connection
   // selected by topology admission.
   //
-  // Retain the single-connected-device restriction
-  // until independent USB records and lifecycles
-  // have been implemented.
+  // The compatibility enumeration path still
+  // requires exactly one connected downstream
+  // device. Independent port admission remains
+  // disabled until the regression gate.
   if (found != admitted_port) {
     state->detail = (uint32_t)admitted_port | ((uint32_t)found << 8);
     return USB_ENUM_PORT_FAILED;
@@ -565,41 +566,26 @@ bool usb_get_enumeration_by_connection(uint8_t root_port, uint8_t parent_slot,
   return true;
 }
 
-usb_enum_result_t usb_enumerate(usb_enum_info_t *info) {
-  if (!info)
+static usb_enum_result_t usb_enumerate_record(usb_managed_device_t *record,
+    const usb_init_info_t *root, uint8_t admitted_port, uint8_t hub_ports,
+    usb_enum_info_t *info) {
+
+  if (!record || !root || !info || root->root_port == 0U ||
+      root->slot_id == 0U || admitted_port == 0U ||
+      admitted_port > hub_ports)
     return USB_ENUM_NOT_READY;
 
-  if (managed_device->attempted) {
-    *info = managed_device->enumeration;
+  // An attempted enumeration belongs to its
+  // selected record, not to the compatibility
+  // device or some other physical connection.
+  if (record->attempted) {
+    *info = record->enumeration;
     return USB_ENUM_ALREADY_ATTEMPTED;
   }
 
-  usb_enum_admission_info_t admission = {0};
-  if (!usb_enum_admission_inspect(&admission) ||
-      (admission.result != USB_ENUM_ADMIT_INITIAL &&
-       admission.result != USB_ENUM_ADMIT_RECONNECT)) {
-    *info = (usb_enum_info_t){0};
-    info->result = USB_ENUM_NOT_READY;
-    return USB_ENUM_NOT_READY;
-  }
-
-  usb_init_info_t root;
-  if (!usb_get_init_info(&root) ||
-      root.result != USB_INIT_OK || root.address == 0U)
-    return USB_ENUM_NOT_READY;
-
-  // The internal hub must be configured and powered
-  // before downstream devices can be enumerated.
-  usb_hub_init_info_t hub = {0};
-  if (!usb_hub_get_init_info(&hub) || hub.result != USB_HUB_INIT_OK)
-    return USB_ENUM_NOT_READY;
-
-  // Multi-record selection remains disabled until
-  // the complete USB regression has passed and
-  // independent device admission is enabled.
-  usb_managed_device_t *record = usb_managed_select_for_enumeration(
-      root.root_port, root.slot_id, admission.port, false);
-  if (!record)
+  // Only unused or safely rearmed records may
+  // begin another enumeration attempt.
+  if (!usb_managed_record_reusable(record))
     return USB_ENUM_NOT_READY;
 
   // Some enumeration operations are not safe to retry
@@ -616,17 +602,17 @@ usb_enum_result_t usb_enumerate(usb_enum_info_t *info) {
   // must nevertheless remain attributable to its
   // admitted physical connection.
   record->device = (usb_device_t){
-    .root_port = root.root_port,
-    .parent_slot = root.slot_id,
-    .parent_port = admission.port,
+    .root_port = root->root_port,
+    .parent_slot = root->slot_id,
+    .parent_port = admitted_port,
     .state = USB_DEVICE_DETACHED
   };
 
   record->valid = true;
-  state.hub_ports = hub.ports;
+  state.hub_ports = hub_ports;
   usb_enum_result_t result = USB_ENUM_OK;
 
-  result = discover_port(&state, admission.port);
+  result = discover_port(&state, admitted_port);
   if (result != USB_ENUM_OK)
     goto complete;
   // A device has been detected and its port reset.
@@ -711,6 +697,52 @@ complete:
   *info = state;
 
   return result;
+}
+
+usb_enum_result_t usb_enumerate(usb_enum_info_t *info) {
+  if (!info)
+    return USB_ENUM_NOT_READY;
+
+  // Compatibility behaviour: expose the recorded
+  // result of the existing single-device attempt.
+  if (managed_device->attempted) {
+    *info = managed_device->enumeration;
+    return USB_ENUM_ALREADY_ATTEMPTED;
+  }
+
+  usb_enum_admission_info_t admission = {0};
+  if (!usb_enum_admission_inspect(&admission) ||
+      (admission.result != USB_ENUM_ADMIT_INITIAL &&
+       admission.result != USB_ENUM_ADMIT_RECONNECT)) {
+    *info = (usb_enum_info_t){0};
+    info->result = USB_ENUM_NOT_READY;
+    return USB_ENUM_NOT_READY;
+  }
+
+  usb_init_info_t root = {0};
+  if (!usb_get_init_info(&root) || root.result != USB_INIT_OK ||
+      root.address == 0U)
+    return USB_ENUM_NOT_READY;
+
+  // The internal hub must be configured and
+  // powered before enumerating downstream devices.
+  usb_hub_init_info_t hub = {0};
+  if (!usb_hub_get_init_info(&hub) || hub.result != USB_HUB_INIT_OK)
+    return USB_ENUM_NOT_READY;
+
+  // Remain in single-device compatibility mode
+  // until the comprehensive regression is passed.
+  usb_managed_device_t *record = usb_managed_select_for_enumeration(
+      root.root_port, root.slot_id, admission.port, false);
+
+  if (!record)
+    return USB_ENUM_NOT_READY;
+
+  // Admission and record selection are complete.
+  // The enumeration engine now operates solely
+  // on the explicitly selected managed record.
+  return usb_enumerate_record(
+      record, &root, admission.port, hub.ports, info);
 }
 
 bool usb_get_device(usb_device_t *device) {
