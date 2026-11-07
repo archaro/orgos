@@ -734,29 +734,44 @@ static void usb_lifecycle_auto_arm(void) {
   usb_lifecycle_arm_generation(device.generation);
 }
 
-static void usb_lifecycle_fail(usb_lifecycle_fault_t fault) {
-  if (lifecycle_run->state != USB_LIFECYCLE_RUN_ARMED)
+static void usb_lifecycle_fail_run(
+    usb_lifecycle_run_info_t *run, usb_lifecycle_fault_t fault) {
+
+  if (!run || run->state != USB_LIFECYCLE_RUN_ARMED)
     return;
 
-  lifecycle_run->fault = fault;
-  lifecycle_run->state = USB_LIFECYCLE_RUN_FAILED;
-  lifecycle_run->last_succeeded = false;
+  run->fault = fault;
+  run->state = USB_LIFECYCLE_RUN_FAILED;
+  run->last_succeeded = false;
 }
 
-static void usb_lifecycle_service(void) {
-  if (lifecycle_run->state != USB_LIFECYCLE_RUN_ARMED)
+static void usb_lifecycle_fail(usb_lifecycle_fault_t fault) {
+  // Compatibility path for controller-wide faults.
+  // Only entry zero can currently be armed.
+  usb_lifecycle_fail_run(lifecycle_run, fault);
+}
+
+static void usb_lifecycle_service_run(usb_lifecycle_run_info_t *run) {
+  if (!run || run->state != USB_LIFECYCLE_RUN_ARMED)
     return;
 
-  usb_lifecycle_info_t info = {0};
-
-  if (!usb_lifecycle_inspect_generation(lifecycle_run->generation, &info)) {
-    usb_lifecycle_fail(USB_LIFECYCLE_FAULT_INSPECTION);
+  // The selected executor must be the unique
+  // owner of its device incarnation.
+  if (run->generation == 0U || run->slot_id == 0U ||
+      usb_lifecycle_by_generation(run->generation) != run) {
+    usb_lifecycle_fail_run(run, USB_LIFECYCLE_FAULT_GENERATION);
     return;
   }
 
-  lifecycle_run->observed_generation = info.generation;
-  if (info.generation != lifecycle_run->generation) {
-    usb_lifecycle_fail(USB_LIFECYCLE_FAULT_GENERATION);
+  usb_lifecycle_info_t info = {0};
+  if (!usb_lifecycle_inspect_generation(run->generation, &info)) {
+    usb_lifecycle_fail_run(run, USB_LIFECYCLE_FAULT_INSPECTION);
+    return;
+  }
+
+  run->observed_generation = info.generation;
+  if (info.generation != run->generation) {
+    usb_lifecycle_fail_run(run, USB_LIFECYCLE_FAULT_GENERATION);
     return;
   }
 
@@ -769,8 +784,8 @@ static void usb_lifecycle_service(void) {
        info.next == USB_LIFECYCLE_RETIRE_IN ||
        info.next == USB_LIFECYCLE_CLEANUP) &&
       (info.slot_id == 0U ||
-       info.slot_id != lifecycle_run->slot_id)) {
-    usb_lifecycle_fail(USB_LIFECYCLE_FAULT_BLOCKED);
+       info.slot_id != run->slot_id)) {
+    usb_lifecycle_fail_run(run, USB_LIFECYCLE_FAULT_BLOCKED);
     return;
   }
 
@@ -780,9 +795,9 @@ static void usb_lifecycle_service(void) {
   // The lifecycle executor must still retain
   // the original hardware slot identity.
   if (info.next == USB_LIFECYCLE_RECYCLE && (info.slot_id != 0U ||
-       lifecycle_run->slot_id == 0U || !info.quiesced ||
+       run->slot_id == 0U || !info.quiesced ||
        !info.slot_disabled || !info.cleaned)) {
-    usb_lifecycle_fail(USB_LIFECYCLE_FAULT_BLOCKED);
+    usb_lifecycle_fail_run(run, USB_LIFECYCLE_FAULT_BLOCKED);
     return;
   }
 
@@ -791,18 +806,18 @@ static void usb_lifecycle_service(void) {
   if (info.next == USB_LIFECYCLE_IDLE)
     return;
 
-  lifecycle_run->last_action = info.next;
-  lifecycle_run->last_succeeded = false;
-  lifecycle_run->last_result = 0U;
-  lifecycle_run->command_result = 0U;
-  lifecycle_run->completion_code = 0U;
+  run->last_action = info.next;
+  run->last_succeeded = false;
+  run->last_result = 0U;
+  run->command_result = 0U;
+  run->completion_code = 0U;
   bool succeeded = false;
 
   switch (info.next) {
     case USB_LIFECYCLE_RECONCILE_IN: {
       xhci_in_reconcile_result_t result =
-          xhci_bulk_in_quiesced_reconcile(lifecycle_run->slot_id);
-      lifecycle_run->last_result = (uint32_t)result;
+          xhci_bulk_in_quiesced_reconcile(run->slot_id);
+      run->last_result = (uint32_t)result;
       succeeded = result == XHCI_IN_RECONCILE_OK ||
           result == XHCI_IN_RECONCILE_RESOLVED;
       break;
@@ -810,79 +825,85 @@ static void usb_lifecycle_service(void) {
     case USB_LIFECYCLE_STOP_IN: {
       xhci_stop_info_t result = {0};
       xhci_stop_result_t status =
-          xhci_downstream_stop_bulk_in(lifecycle_run->slot_id, &result);
-      lifecycle_run->last_result = (uint32_t)status;
-      lifecycle_run->command_result = (uint8_t)result.command_result;
-      lifecycle_run->completion_code = result.completion_code;
+          xhci_downstream_stop_bulk_in(run->slot_id, &result);
+      run->last_result = (uint32_t)status;
+      run->command_result = (uint8_t)result.command_result;
+      run->completion_code = result.completion_code;
       succeeded = status == XHCI_STOP_OK;
       break;
     }
     case USB_LIFECYCLE_DISABLE: {
       xhci_disable_info_t result = {0};
       xhci_disable_result_t status =
-          xhci_downstream_disable(lifecycle_run->slot_id, &result);
-      lifecycle_run->last_result = (uint32_t)status;
-      lifecycle_run->command_result = (uint8_t)result.command_result;
-      lifecycle_run->completion_code = result.completion_code;
+          xhci_downstream_disable(run->slot_id, &result);
+      run->last_result = (uint32_t)status;
+      run->command_result = (uint8_t)result.command_result;
+      run->completion_code = result.completion_code;
       succeeded = status == XHCI_DISABLE_OK;
       break;
     }
     case USB_LIFECYCLE_RETIRE_IN: {
       xhci_bulk_in_retire_result_t status =
-          xhci_bulk_in_stream_retire(lifecycle_run->slot_id);
-      lifecycle_run->last_result = (uint32_t)status;
+          xhci_bulk_in_stream_retire(run->slot_id);
+      run->last_result = (uint32_t)status;
       succeeded = status == XHCI_BULK_IN_RETIRE_OK;
       break;
     }
     case USB_LIFECYCLE_CLEANUP: {
       xhci_cleanup_info_t result = {0};
       xhci_cleanup_result_t status =
-          xhci_downstream_cleanup(lifecycle_run->slot_id, &result);
-      lifecycle_run->last_result = (uint32_t)status;
+          xhci_downstream_cleanup(run->slot_id, &result);
+      run->last_result = (uint32_t)status;
       succeeded = status == XHCI_CLEANUP_OK;
       break;
     }
     case USB_LIFECYCLE_DETACH: {
       succeeded = usb_device_finalize_disconnect_generation(
-          lifecycle_run->generation, lifecycle_run->slot_id);
-      lifecycle_run->last_result = succeeded ? 0U : 1U;
+          run->generation, run->slot_id);
+      run->last_result = succeeded ? 0U : 1U;
       break;
     }
     case USB_LIFECYCLE_RECYCLE: {
       xhci_recycle_result_t status =
-          xhci_downstream_recycle(lifecycle_run->slot_id);
-      lifecycle_run->last_result = (uint32_t)status;
+          xhci_downstream_recycle(run->slot_id);
+      run->last_result = (uint32_t)status;
       succeeded = status == XHCI_RECYCLE_OK;
       break;
     }
     case USB_LIFECYCLE_REARM: {
-      succeeded = usb_enumeration_rearm_generation(lifecycle_run->generation);
-      lifecycle_run->last_result = succeeded ? 0U : 1U;
+      succeeded = usb_enumeration_rearm_generation(run->generation);
+      run->last_result = succeeded ? 0U : 1U;
       break;
     }
     default: {
       // A blocked or unsupported state is not
       // permission to guess the next operation.
-      usb_lifecycle_fail(USB_LIFECYCLE_FAULT_BLOCKED);
+      usb_lifecycle_fail_run(run, USB_LIFECYCLE_FAULT_BLOCKED);
       return;
     }
   }
 
-  lifecycle_run->steps++;
-  lifecycle_run->last_succeeded = succeeded;
+  run->steps++;
+  run->last_succeeded = succeeded;
   if (!succeeded) {
-    usb_lifecycle_fail(USB_LIFECYCLE_FAULT_OPERATION);
+    usb_lifecycle_fail_run(run, USB_LIFECYCLE_FAULT_OPERATION);
     return;
   }
 
   if (info.next == USB_LIFECYCLE_REARM) {
-    lifecycle_run->state = USB_LIFECYCLE_RUN_COMPLETE;
+    run->state = USB_LIFECYCLE_RUN_COMPLETE;
 
     // The previous generation no longer owns
     // the downstream controller resources.
     // Check for a device already reconnected.
     usb_auto_enum_request();
   }
+}
+
+static void usb_lifecycle_service(void) {
+  // Serialised compatibility scheduler.
+  // Additional executors are not serviced yet.
+  usb_lifecycle_service_run(lifecycle_run);
 }
 
 static void usb_auto_enum_service(void) {
