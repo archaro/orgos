@@ -1531,6 +1531,73 @@ static void cmd_usb_lifecycle_admission(void) {
   }
 }
 
+static const char *usb_enum_port_result_name(
+    usb_enum_port_result_t result) {
+
+  switch (result) {
+    case USB_ENUM_PORT_ELIGIBLE:
+      return "Eligible";
+    case USB_ENUM_PORT_SERVICE_FAILED:
+      return "Service unavailable";
+    case USB_ENUM_PORT_HUB_FAILED:
+      return "Hub monitoring failed";
+    case USB_ENUM_PORT_HUB_NOT_READY:
+      return "Hub unavailable";
+    case USB_ENUM_PORT_INVALID:
+      return "Invalid port";
+    case USB_ENUM_PORT_STATUS_FAILED:
+      return "Port status unavailable";
+    case USB_ENUM_PORT_CHANGE_PENDING:
+      return "Change pending";
+    case USB_ENUM_PORT_DISCONNECTED:
+      return "Disconnected";
+    case USB_ENUM_PORT_NOT_POWERED:
+      return "Not powered";
+    case USB_ENUM_PORT_OVERCURRENT:
+      return "Overcurrent";
+    case USB_ENUM_PORT_RESETTING:
+      return "Resetting";
+    case USB_ENUM_PORT_AMBIGUOUS:
+      return "Ambiguous ownership";
+    case USB_ENUM_PORT_ALREADY_ATTEMPTED:
+      return "Enumeration attempted";
+    case USB_ENUM_PORT_DEVICE_OWNED:
+      return "Managed device owns port";
+    case USB_ENUM_PORT_UNSAFE_HISTORY:
+      return "Uncertain device history";
+    case USB_ENUM_PORT_XHCI_OWNED:
+      return "xHCI context owned";
+    case USB_ENUM_PORT_XHCI_UNCERTAIN:
+      return "Uncertain xHCI ownership";
+    default:
+      return "Unknown";
+  }
+}
+
+static void cmd_usb_lifecycle_candidates(void) {
+  usb_hub_init_info_t hub = {0};
+  if (!usb_hub_get_init_info(&hub) || hub.result != USB_HUB_INIT_OK ||
+      hub.ports == 0U || hub.ports > 4U) {
+    console_puts("USB downstream hub unavailable.\n");
+    return;
+  }
+  console_puts("USB port-local enumeration eligibility:\n");
+  for (uint8_t port = 1U; port <= hub.ports; port++) {
+    usb_enum_port_info_t info = {0};
+    if (!usb_enum_port_inspect(port, &info)) {
+      console_printf("  Port %u: Inspection failed\n", (unsigned int)port);
+      continue;
+    }
+    console_printf("  Port %u: %s",
+        (unsigned int)port, usb_enum_port_result_name(info.result));
+    if (info.generation != 0U)
+      console_printf(" (generation %u)", (unsigned int)info.generation);
+    console_putc('\n');
+  }
+  console_puts("Port-local eligibility only; "
+      "controller-wide admission remains authoritative.\n");
+}
+
 static void cmd_usb_lifecycle_current(void) {
   usb_lifecycle_info_t info = {0};
   if (!usb_lifecycle_inspect(&info)) {
@@ -2192,11 +2259,15 @@ static void cmd_usb(const char *args) {
       cmd_usb_lifecycle_admission();
       return;
     }
+    if (next_word_is(&args, "candidates") && end_of_args(args)) {
+      cmd_usb_lifecycle_candidates();
+      return;
+    }
     if (next_word_is(&args, "port") && end_of_args(args)) {
       cmd_usb_lifecycle_port();
       return;
     }
-    console_puts( "Usage: usb lifecycle [status | admission | port]\n");
+    console_puts( "Usage: usb lifecycle [status | admission | candidates | port]\n");
     return;
   }
   if (next_word_is(&args, "transfers") && end_of_args(args)) {

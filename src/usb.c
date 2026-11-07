@@ -1533,3 +1533,151 @@ bool usb_enum_admission_inspect(usb_enum_admission_info_t *info) {
   return true;
 }
 
+bool usb_enum_port_inspect(uint8_t port, usb_enum_port_info_t *info) {
+  if (!info)
+    return false;
+
+  *info = (usb_enum_port_info_t){
+    .result = USB_ENUM_PORT_INVALID,
+    .port = port
+  };
+
+  if (!usb_service_available()) {
+    info->result = USB_ENUM_PORT_SERVICE_FAILED;
+    return true;
+  }
+
+  if (change_stats.failed) {
+    info->result = USB_ENUM_PORT_HUB_FAILED;
+    return true;
+  }
+
+  usb_init_info_t root = {0};
+  usb_hub_init_info_t hub = {0};
+
+  if (!usb_get_init_info(&root) || root.result != USB_INIT_OK ||
+      root.root_port == 0U || root.slot_id == 0U ||
+      !usb_hub_get_init_info(&hub) || hub.result != USB_HUB_INIT_OK) {
+    info->result = USB_ENUM_PORT_HUB_NOT_READY;
+    return true;
+  }
+
+  // Current scope: the four downstream ports
+  // of the internal USB 2.0 hub.
+  if (port == 0U || port > hub.ports || port > 4U)
+    return true;
+
+  usb_hub_port_t current = {0};
+
+  if (usb_hub_port_status(port, &current) != USB_HUB_OK) {
+    info->result = USB_ENUM_PORT_STATUS_FAILED;
+    return true;
+  }
+
+  info->status = current.status;
+  info->change = current.change;
+
+  // Never inspect a connection as stable while
+  // its change notification is still outstanding.
+  if (current.change != 0U ||
+      (change_pending_mask & (uint16_t)(1U << port)) != 0U) {
+    info->result = USB_ENUM_PORT_CHANGE_PENDING;
+    return true;
+  }
+
+  if ((current.status & (1U << 3)) != 0U) {
+    info->result = USB_ENUM_PORT_OVERCURRENT;
+    return true;
+  }
+
+  if ((current.status & (1U << 4)) != 0U) {
+    info->result = USB_ENUM_PORT_RESETTING;
+    return true;
+  }
+
+  if ((current.status & 0x0001U) == 0U) {
+    info->result = USB_ENUM_PORT_DISCONNECTED;
+    return true;
+  }
+
+  if ((current.status & 0x0100U) == 0U) {
+    info->result = USB_ENUM_PORT_NOT_POWERED;
+    return true;
+  }
+
+  // Find every managed record claiming this
+  // physical connection, including records
+  // without an assigned generation or slot.
+  usb_device_t matching = {0};
+  bool found = false;
+
+  for (unsigned int i = 0U; i < USB_MANAGED_DEVICE_CAPACITY; i++) {
+    usb_device_t device = {0};
+    if (!usb_get_device_at(i, &device))
+      continue;
+
+    if (device.root_port != root.root_port ||
+        device.parent_slot != root.slot_id || device.parent_port != port)
+      continue;
+
+    // Duplicate physical ownership must never
+    // produce an eligible admission result.
+    if (found) {
+      info->result = USB_ENUM_PORT_AMBIGUOUS;
+      return true;
+    }
+
+    matching = device;
+    found = true;
+  }
+
+  if (found) {
+    info->generation = matching.generation;
+    info->slot_id = matching.slot_id;
+
+    usb_enum_info_t enumeration = {0};
+
+    // A failed or completed attempt remains
+    // latched until explicitly rearmed.
+    if (usb_get_enumeration_by_connection(root.root_port, root.slot_id,
+        port, &enumeration)) {
+      info->result = USB_ENUM_PORT_ALREADY_ATTEMPTED;
+      return true;
+    }
+
+    // A retained historical record is acceptable
+    // only after detachment and rearm.
+    if (matching.state != USB_DEVICE_DETACHED || matching.slot_id != 0U) {
+      info->result = USB_ENUM_PORT_DEVICE_OWNED;
+      return true;
+    }
+
+    if (matching.generation == 0U) {
+      info->result = USB_ENUM_PORT_UNSAFE_HISTORY;
+      return true;
+    }
+  }
+
+  // Finally, confirm that no xHCI context still
+  // owns the selected physical connection.
+  xhci_connection_ownership_t ownership = XHCI_CONNECTION_UNCERTAIN;
+  if (!xhci_downstream_connection_ownership(
+      root.root_port, root.slot_id, port, &ownership)) {
+    info->result = USB_ENUM_PORT_XHCI_UNCERTAIN;
+    return true;
+  }
+
+  if (ownership == XHCI_CONNECTION_OWNED) {
+    info->result = USB_ENUM_PORT_XHCI_OWNED;
+    return true;
+  }
+
+  if (ownership != XHCI_CONNECTION_UNOWNED) {
+    info->result = USB_ENUM_PORT_XHCI_UNCERTAIN;
+    return true;
+  }
+
+  info->result = USB_ENUM_PORT_ELIGIBLE;
+  return true;
+}
+

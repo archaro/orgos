@@ -229,3 +229,41 @@ typedef struct {
 
 bool usb_enum_admission_inspect(usb_enum_admission_info_t *info);
 
+// Port-local enumeration prerequisites.
+//
+// ELIGIBLE does not grant permission to enumerate.
+// The controller-wide admission policy remains
+// authoritative.
+typedef enum {
+  USB_ENUM_PORT_ELIGIBLE,
+  USB_ENUM_PORT_SERVICE_FAILED,
+  USB_ENUM_PORT_HUB_FAILED,
+  USB_ENUM_PORT_HUB_NOT_READY,
+  USB_ENUM_PORT_INVALID,
+  USB_ENUM_PORT_STATUS_FAILED,
+  USB_ENUM_PORT_CHANGE_PENDING,
+  USB_ENUM_PORT_DISCONNECTED,
+  USB_ENUM_PORT_NOT_POWERED,
+  USB_ENUM_PORT_OVERCURRENT,
+  USB_ENUM_PORT_RESETTING,
+  USB_ENUM_PORT_AMBIGUOUS,
+  USB_ENUM_PORT_ALREADY_ATTEMPTED,
+  USB_ENUM_PORT_DEVICE_OWNED,
+  USB_ENUM_PORT_UNSAFE_HISTORY,
+  USB_ENUM_PORT_XHCI_OWNED,
+  USB_ENUM_PORT_XHCI_UNCERTAIN
+} usb_enum_port_result_t;
+
+typedef struct {
+  usb_enum_port_result_t result;
+  uint8_t port;
+  uint16_t status;
+  uint16_t change;
+  uint32_t generation;
+  uint8_t slot_id;
+} usb_enum_port_info_t;
+
+// Inspect one downstream port without changing
+// enumeration, lifecycle or ownership state.
+bool usb_enum_port_inspect(uint8_t port, usb_enum_port_info_t *info);
+
