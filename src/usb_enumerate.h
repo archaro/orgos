@@ -80,6 +80,13 @@ typedef struct {
 } usb_enum_info_t;
 
 usb_enum_result_t usb_enumerate(usb_enum_info_t *info);
+
+// Preview whether a physical connection can acquire
+// a managed-device record in future multi-record mode.
+// This does not reserve a record or admit enumeration.
+bool usb_managed_record_available(uint8_t root_port,
+    uint8_t parent_slot, uint8_t parent_port);
+
 bool usb_get_enumeration(usb_enum_info_t *info);
 bool usb_get_enumeration_generation(
     uint32_t generation, usb_enum_info_t *info);

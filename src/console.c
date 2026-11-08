@@ -2319,6 +2319,8 @@ static void cmd_usb_auto_ports(void) {
       (unsigned int)info.pending_ports);
   console_printf("  Eligible mask : 0x%04x\n",
       (unsigned int)info.eligible_ports);
+  console_printf("  Record mask   : 0x%04x\n",
+      (unsigned int)info.record_ready_ports);
   console_printf("  Next port     : %u\n", (unsigned int)info.next_port);
   console_printf("  Free contexts : %u\n", info.free_contexts);
   console_printf("  Waiter room   : %u\n", info.waiter_headroom);

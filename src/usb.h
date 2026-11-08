@@ -297,6 +297,7 @@ typedef struct {
   usb_enum_port_info_t port;
   usb_enum_admission_info_t controller;
   bool resources_ready;
+  bool record_ready;
   bool would_admit;
 } usb_enum_candidate_info_t;
 
@@ -310,6 +311,7 @@ bool usb_enum_candidate_inspect(
 typedef struct {
   uint16_t pending_ports;
   uint16_t eligible_ports;
+  uint16_t record_ready_ports;
   uint8_t next_port;
   uint8_t selected_port;
   unsigned int free_contexts;

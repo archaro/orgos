@@ -203,6 +203,15 @@ static usb_managed_device_t *usb_managed_select_for_enumeration(
   return oldest;
 }
 
+bool usb_managed_record_available(uint8_t root_port,
+    uint8_t parent_slot, uint8_t parent_port) {
+
+  // Use the existing multi-record selection rules.
+  // This function only inspects; it changes no state.
+  return usb_managed_select_for_enumeration(
+      root_port, parent_slot, parent_port, true) != NULL;
+}
+
 static uint16_t read_u16(const uint8_t *p) {
   return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
 }

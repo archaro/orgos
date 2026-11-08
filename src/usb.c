@@ -1803,6 +1803,17 @@ bool usb_enum_candidate_inspect(
   info->resources_ready = usb_enum_resource_ready(
       &free_contexts, &waiter_headroom);
 
+  if (info->port.result == USB_ENUM_PORT_ELIGIBLE) {
+    usb_init_info_t root = {0};
+
+    if (!usb_get_init_info(&root) || root.result != USB_INIT_OK ||
+        root.root_port == 0U || root.slot_id == 0U)
+      return false;
+
+    info->record_ready = usb_managed_record_available(
+        root.root_port, root.slot_id, port);
+  }
+
   bool controller_ready = info->controller.result == USB_ENUM_ADMIT_INITIAL ||
       info->controller.result == USB_ENUM_ADMIT_RECONNECT;
 
@@ -1811,7 +1822,7 @@ bool usb_enum_candidate_inspect(
   // authorises this candidate.
   info->would_admit = info->port.result == USB_ENUM_PORT_ELIGIBLE &&
       controller_ready && info->controller.port == port &&
-      info->resources_ready;
+      info->resources_ready && info->record_ready;
 
   return true;
 }
@@ -1831,6 +1842,11 @@ bool usb_auto_enum_select_inspect(usb_auto_enum_select_info_t *info) {
     return false;
 
   if (info->next_port == 0U || info->next_port > hub.ports)
+    return false;
+
+  usb_init_info_t root = {0};
+  if (!usb_get_init_info(&root) || root.result != USB_INIT_OK ||
+      root.root_port == 0U || root.slot_id == 0U)
     return false;
 
   info->resources_ready = usb_enum_resource_ready(
@@ -1854,9 +1870,16 @@ bool usb_auto_enum_select_inspect(usb_auto_enum_select_info_t *info) {
 
     info->eligible_ports |= bit;
 
-    // Retain the first eligible port encountered.
-    // Continue inspecting to obtain the complete
-    // eligible bitmap.
+    // Local eligibility alone is insufficient.
+    // A managed-device record must also be safely
+    // available for this physical connection.
+    if (!usb_managed_record_available(root.root_port, root.slot_id, port))
+      continue;
+
+    info->record_ready_ports |= bit;
+
+    // Select the first candidate which has both
+    // local eligibility and managed-record capacity.
     if (info->selected_port == 0U)
       info->selected_port = port;
   }
