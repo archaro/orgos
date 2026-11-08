@@ -1571,15 +1571,30 @@ static const char *usb_lifecycle_fault_name(usb_lifecycle_fault_t fault) {
   }
 }
 
-static void cmd_usb_lifecycle_status(void) {
-  cmd_usb_lifecycle_current();
-  console_putc('\n');
+static void cmd_usb_lifecycle_status(const char *args) {
   usb_lifecycle_run_info_t info = {0};
-  if (!usb_lifecycle_get_run_info(&info)) {
-    console_puts("USB lifecycle executor unavailable.\n");
-    return;
+  if (end_of_args(args)) {
+    // Preserve the existing compatibility view.
+    cmd_usb_lifecycle_current();
+    console_putc('\n');
+    if (!usb_lifecycle_get_run_info(&info)) {
+      console_puts("USB lifecycle executor unavailable.\n");
+      return;
+    }
+    console_puts("USB lifecycle executor (last run):\n");
+  } else {
+    unsigned int generation = 0U;
+    if (!next_uint(&args, &generation) || !end_of_args(args) ||
+        generation == 0U) {
+      console_puts("Usage: usb lifecycle status [generation]\n");
+      return;
+    }
+    if (!usb_lifecycle_get_run_info_generation((uint32_t)generation, &info)) {
+      console_puts("USB lifecycle generation unavailable.\n");
+      return;
+    }
+    console_printf("USB lifecycle executor (generation %u):\n", generation);
   }
-  console_puts("USB lifecycle executor (last run):\n");
   console_printf("  State       : %s\n", usb_lifecycle_run_name(info.state));
   console_printf("  Generation  : %u\n", (unsigned int)info.generation);
   console_printf("  Steps       : %u\n", (unsigned int)info.steps);
@@ -2393,11 +2408,11 @@ static void cmd_usb(const char *args) {
   }
   if (next_word_is(&args, "lifecycle")) {
     if (end_of_args(args)) {
-      cmd_usb_lifecycle_status();
+      cmd_usb_lifecycle_status("");
       return;
     }
-    if (next_word_is(&args, "status") && end_of_args(args)) {
-      cmd_usb_lifecycle_status();
+    if (next_word_is(&args, "status")) {
+      cmd_usb_lifecycle_status(args);
       return;
     }
     if (next_word_is(&args, "admission") && end_of_args(args)) {
@@ -2412,7 +2427,8 @@ static void cmd_usb(const char *args) {
       cmd_usb_lifecycle_port();
       return;
     }
-    console_puts( "Usage: usb lifecycle [status | admission | candidates | port]\n");
+    console_puts("Usage: usb lifecycle [status [generation] | "
+                 "admission | candidates | port]\n");
     return;
   }
   if (next_word_is(&args, "resources") && end_of_args(args)) {

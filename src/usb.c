@@ -29,8 +29,8 @@ static usb_change_event_t last_port_change[16];
 // Lifecycle storage for the four downstream
 // ports of the internal USB 2.0 hub.
 //
-// Capacity does not imply permission to run
-// multiple lifecycle executors yet.
+// Independent executors may be armed together.
+// Hardware operations are dispatched serially.
 #define USB_LIFECYCLE_RUN_CAPACITY 4U
 static usb_lifecycle_run_info_t lifecycle_runs[USB_LIFECYCLE_RUN_CAPACITY];
 
@@ -113,43 +113,41 @@ static bool usb_lifecycle_any_failed(void) {
 }
 
 static usb_lifecycle_run_info_t *usb_lifecycle_select_for_arm(
-    uint32_t generation) {
+    uint32_t generation, uint8_t slot_id) {
 
-  if (generation == 0U || usb_lifecycle_any_armed() ||
-      usb_lifecycle_any_failed())
+  if (generation == 0U || slot_id == 0U)
     return NULL;
 
-  // A generation may never acquire a second
-  // lifecycle executor, even if its previous
-  // executor has already completed.
+  // No generation may own two lifecycle executors.
+  // An armed or failed executor must also retain
+  // exclusive ownership of its original slot.
   for (unsigned int i = 0U; i < USB_LIFECYCLE_RUN_CAPACITY; i++) {
+
     usb_lifecycle_run_info_t *run = &lifecycle_runs[i];
     if (run->state != USB_LIFECYCLE_RUN_DISARMED &&
         run->generation == generation)
+      return NULL;
+
+    if ((run->state == USB_LIFECYCLE_RUN_ARMED ||
+         run->state == USB_LIFECYCLE_RUN_FAILED) && run->slot_id == slot_id)
       return NULL;
   }
 
   usb_lifecycle_run_info_t *oldest_complete = NULL;
 
   for (unsigned int i = 0U; i < USB_LIFECYCLE_RUN_CAPACITY; i++) {
-    usb_lifecycle_run_info_t *run = &lifecycle_runs[i];
 
-    // Prefer unused records so completed
-    // lifecycle history remains available
-    // for as long as possible.
+    usb_lifecycle_run_info_t *run = &lifecycle_runs[i];
+    // Preserve completed history where possible.
     if (run->state == USB_LIFECYCLE_RUN_DISARMED)
       return run;
 
-    // COMPLETE means the previous incarnation
-    // passed through successful recycling and
-    // enumeration rearm.
     if (run->state == USB_LIFECYCLE_RUN_COMPLETE &&
         (!oldest_complete || run->generation < oldest_complete->generation))
       oldest_complete = run;
   }
 
-  // Reuse only the oldest completed record.
-  // Failed records are never candidates.
+  // Never reuse an armed or failed record.
   return oldest_complete;
 }
 
@@ -854,7 +852,19 @@ bool usb_lifecycle_arm_generation(uint32_t generation) {
       connection_owner.slot_id != device.slot_id)
     return false;
 
-  usb_lifecycle_run_info_t *run = usb_lifecycle_select_for_arm(generation);
+  // Independent lifecycle admission must not
+  // override a controller-wide hardware fault.
+  // Other devices may legitimately have active
+  // Bulk IN waiters at this point.
+  xhci_resource_info_t resources = {0};
+  if (!xhci_resource_get_info(&resources) ||
+      !resources.controller_running || resources.command_outstanding ||
+      resources.command_ring_failed || resources.dispatch_failed ||
+      resources.orphan_waiters != 0U)
+    return false;
+
+  usb_lifecycle_run_info_t *run =
+      usb_lifecycle_select_for_arm(generation, device.slot_id);
   if (!run)
     return false;
 
@@ -873,12 +883,12 @@ bool usb_lifecycle_arm_generation(uint32_t generation) {
 }
 
 static void usb_lifecycle_auto_arm(void) {
-  // Only one executor may be armed at a time
-  // until concurrent lifecycle admission is
-  // explicitly enabled.
-  if (usb_lifecycle_any_armed() || usb_lifecycle_any_failed())
-    return;
-
+  // Arm at most one new device incarnation per
+  // foreground service pass.
+  //
+  // Other generations may already have armed
+  // executors. Their hardware commands remain
+  // serialised by usb_lifecycle_service().
   for (unsigned int i = 0U; i < USB_MANAGED_DEVICE_CAPACITY; i++) {
     usb_device_t device = {0};
     if (!usb_get_device_at(i, &device))

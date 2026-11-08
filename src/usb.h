@@ -124,9 +124,12 @@ typedef struct {
 } usb_lifecycle_run_info_t;
 
 // Arm lifecycle teardown for a specific device
-// incarnation. Multiple concurrent executors
-// are not yet supported.
+// incarnation.
+//
+// Independent generations may own separate
+// executors. Hardware operations remain serial.
 bool usb_lifecycle_arm_generation(uint32_t generation);
+
 bool usb_lifecycle_get_run_info(usb_lifecycle_run_info_t *info);
 // Read-only inspection of a lifecycle executor
 // belonging to a specific device incarnation.
