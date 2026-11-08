@@ -1832,17 +1832,84 @@ static void cmd_usb_topology(void) {
   console_puts( "SuperSpeed root-port enumeration is not yet implemented.\n");
 }
 
-static void cmd_usb_test_midiout(void) {
-  usb_enum_info_t enumeration = {0};
+static bool usb_test_midi_active_generation(
+    uint32_t generation, uint8_t expected_slot, usb_device_t *owner) {
+  if (!owner)
+    return false;
+  *owner = (usb_device_t){0};
+  if (!usb_service_available() || generation == 0U)
+    return false;
   usb_device_t device = {0};
-
-  if (!usb_get_enumeration(&enumeration) ||
+  usb_device_t by_slot = {0};
+  usb_device_t by_connection = {0};
+  usb_enum_info_t enumeration = {0};
+  if (!usb_get_device_by_generation(generation, &device) ||
+      device.state != USB_DEVICE_ACTIVE || device.slot_id == 0U ||
+      device.root_port == 0U || device.parent_slot == 0U ||
+      device.parent_port == 0U)
+    return false;
+  if (expected_slot != 0U && device.slot_id != expected_slot)
+    return false;
+  // The hardware slot must belong to exactly
+  // the same device incarnation.
+  if (!usb_get_device_by_slot(device.slot_id, &by_slot) ||
+      by_slot.generation != generation ||
+      by_slot.root_port != device.root_port ||
+      by_slot.parent_slot != device.parent_slot ||
+      by_slot.parent_port != device.parent_port)
+    return false;
+  // Physical-connection ownership must also
+  // resolve uniquely to this generation and slot.
+  if (!usb_get_device_by_connection( device.root_port, device.parent_slot,
+          device.parent_port, &by_connection) ||
+      by_connection.generation != generation ||
+      by_connection.slot_id != device.slot_id)
+    return false;
+  // The completed enumeration must belong to
+  // this same device and its MIDI endpoints.
+  if (!usb_get_enumeration_generation( generation, &enumeration) ||
       enumeration.result != USB_ENUM_OK ||
-      !usb_get_device(&device) ||
-      device.state != USB_DEVICE_ACTIVE) {
-    console_puts("No active USB-MIDI device.\n");
+      enumeration.slot_id != device.slot_id ||
+      enumeration.hub_port != device.parent_port ||
+      enumeration.vendor_id != device.vendor_id ||
+      enumeration.product_id != device.product_id)
+    return false;
+  *owner = device;
+  return true;
+}
+
+static bool usb_test_midi_select(const char *args, usb_device_t *device) {
+  if (!args || !device)
+    return false;
+  *device = (usb_device_t){0};
+  uint32_t generation = 0U;
+  if (end_of_args(args)) {
+    // Preserve the original console behaviour:
+    // no argument selects the compatibility record.
+    usb_device_t compatibility = {0};
+    if (!usb_get_device(&compatibility))
+      return false;
+    generation = compatibility.generation;
+  } else {
+    unsigned int requested = 0U;
+    // Exactly one positive decimal generation.
+    // Reject trailing words and integer overflow.
+    if (!next_uint(&args, &requested) || !end_of_args(args) ||
+        requested == 0U)
+      return false;
+    generation = (uint32_t)requested;
+  }
+  return usb_test_midi_active_generation( generation, 0U, device);
+}
+
+static void cmd_usb_test_midiout(const char *args) {
+  usb_device_t device = {0};
+  if (!usb_test_midi_select(args, &device)) {
+    console_puts( "No active USB-MIDI device or invalid generation.\n");
     return;
   }
+  console_printf("USB-MIDI target: generation %u, slot %u\n",
+      (unsigned int)device.generation, (unsigned int)device.slot_id);
   const uint8_t note_on[4] = {0x09U, 0x90U, 0x3cU, 0x64U};
   const uint8_t note_off[4] = {0x08U, 0x80U, 0x3cU, 0x00U};
   xhci_bulk_out_info_t info = {0};
@@ -1859,6 +1926,16 @@ static void cmd_usb_test_midiout(void) {
     return;
   }
   usb_test_delay_ms(250U);
+  // The delay separates two hardware operations.
+  // Never send Note Off to a different incarnation
+  // which might have acquired the original slot.
+  usb_device_t current = {0};
+  if (!usb_test_midi_active_generation(
+          device.generation, device.slot_id, &current)) {
+    console_puts(
+        "USB-MIDI Note On/Off: FAILED (device ownership changed)\n");
+    return;
+  }
   console_puts("USB-MIDI Note Off...\n");
   info = (xhci_bulk_out_info_t){0};
   result = xhci_downstream_bulk_out(
@@ -2042,16 +2119,14 @@ static void cmd_usb_test_midiin(const char *args) {
   console_puts("Usage: usb test midiin [status | stream | read | stress]\n");
 }
 
-static void cmd_usb_test_midiwrap(void) {
-  usb_enum_info_t enumeration = {0};
+static void cmd_usb_test_midiwrap(const char *args) {
   usb_device_t device = {0};
-  if (!usb_get_enumeration(&enumeration) ||
-      enumeration.result != USB_ENUM_OK || !usb_get_device(&device) ||
-      device.state != USB_DEVICE_ACTIVE || device.slot_id == 0U ||
-      device.slot_id != enumeration.slot_id) {
-    console_puts("No active USB-MIDI device.\n");
+  if (!usb_test_midi_select(args, &device)) {
+    console_puts( "No active USB-MIDI device or invalid generation.\n");
     return;
   }
+  console_printf("USB-MIDI target: generation %u, slot %u\n",
+      (unsigned int)device.generation, (unsigned int)device.slot_id);
   const unsigned int transfers = 520U;
   const unsigned int ring_entries = 255U;
   const uint64_t trb_size = 16U;
@@ -2065,6 +2140,14 @@ static void cmd_usb_test_midiwrap(void) {
   console_puts("  WARNING: Sends real MIDI OUT messages: "
       "channel 16, CC 102.\n");
   for (unsigned int i = 0U; i < transfers; i++) {
+    // A long-running diagnostic must not continue
+    // against a recycled or reassigned slot.
+    usb_device_t current = {0};
+    if (!usb_test_midi_active_generation(
+            device.generation, device.slot_id, &current)) {
+      console_printf( "Transfer %u: device ownership changed\n", i + 1U);
+      break;
+    }
     // Cable 0, Control Change, channel 16, controller 102.
     uint8_t packet[4] = { 0x0bU, 0xbfU, 0x66U, (uint8_t)(i & 0x7fU) };
     xhci_bulk_out_info_t info = {0};
@@ -2396,14 +2479,12 @@ static void cmd_usb(const char *args) {
       cmd_usb_test_quiesce();
       return;
     }
-    if (next_word_is(&other_args, "midiout") &&
-        end_of_args(other_args)) {
-      cmd_usb_test_midiout();
+    if (next_word_is(&other_args, "midiout")) {
+      cmd_usb_test_midiout(other_args);
       return;
     }
-    if (next_word_is(&other_args, "midiwrap") &&
-        end_of_args(other_args)) {
-      cmd_usb_test_midiwrap();
+    if (next_word_is(&other_args, "midiwrap")) {
+      cmd_usb_test_midiwrap(other_args);
       return;
     }
     if (next_word_is(&other_args, "midiin")) {
