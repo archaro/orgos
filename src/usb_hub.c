@@ -52,8 +52,6 @@
 
 static bool hub_init_attempted;
 static usb_hub_init_info_t hub_init_state;
-static usb_hub_scan_info_t hub_scan_state;
-static bool hub_scan_valid;
 
 static uint16_t usb_hub_read_u16(const uint8_t *p) {
   return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
@@ -334,14 +332,6 @@ usb_hub_result_t usb_hub_port_status(uint8_t port, usb_hub_port_t *result) {
   return USB_HUB_OK;
 }
 
-bool usb_hub_get_scan(usb_hub_scan_info_t *info) {
-  if (!info || !hub_scan_valid)
-    return false;
-
-  *info = hub_scan_state;
-  return true;
-}
-
 usb_hub_result_t usb_hub_scan(usb_hub_scan_info_t *info) {
   if (!info)
     return USB_HUB_NOT_READY;
@@ -375,8 +365,6 @@ usb_hub_result_t usb_hub_scan(usb_hub_scan_info_t *info) {
   }
 
   // Publish only a complete snapshot.
-  hub_scan_state = scan;
-  hub_scan_valid = true;
   *info = scan;
 
   return USB_HUB_OK;

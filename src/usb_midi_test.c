@@ -170,17 +170,6 @@ bool usb_midi_in_stress_start_generation(
   return true;
 }
 
-bool usb_midi_in_stress_start(void) {
-  // Compatibility entry point for the current
-  // single-device diagnostic command.
-  usb_device_t device = {0};
-
-  if (!usb_get_device(&device))
-    return false;
-
-  return usb_midi_in_stress_start_generation(device.generation);
-}
-
 void usb_midi_in_stress_service(void) {
   if (in_stress.state == USB_MIDI_IN_STRESS_IDLE)
     return;

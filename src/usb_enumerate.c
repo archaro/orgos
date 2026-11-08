@@ -993,16 +993,6 @@ bool usb_enumeration_recovery_inspect_generation(
   return usb_enumeration_recovery_inspect_record( record, info);
 }
 
-bool usb_enumeration_recovery_ready(void) {
-  usb_recovery_info_t info = {0};
-
-  if (!usb_enumeration_recovery_inspect(&info))
-    return false;
-
-  return info.result == USB_RECOVERY_READY ||
-      info.result == USB_RECOVERY_READY_EP0_ERROR;
-}
-
 static bool usb_enumeration_recovery_begin_record(
     usb_managed_device_t *record) {
 
@@ -1043,10 +1033,6 @@ static bool usb_enumeration_recovery_begin_record(
 bool usb_enumeration_recovery_begin_generation(uint32_t generation) {
   return usb_enumeration_recovery_begin_record(
       usb_managed_by_generation(generation));
-}
-
-bool usb_enumeration_recovery_begin(void) {
-  return usb_enumeration_recovery_begin_record(managed_device);
 }
 
 bool usb_device_test_quiesce(void) {
@@ -1149,13 +1135,6 @@ bool usb_device_finalize_disconnect_generation(
   return true;
 }
 
-bool usb_device_finalize_disconnect(void) {
-  // Compatibility interface for the original
-  // single-device lifecycle.
-  return usb_device_finalize_disconnect_generation(
-      managed_device->device.generation, managed_device->device.slot_id);
-}
-
 bool usb_enumeration_rearm_generation(uint32_t generation) {
   usb_managed_device_t *record = usb_managed_by_generation(generation);
 
@@ -1193,11 +1172,6 @@ bool usb_enumeration_rearm_generation(uint32_t generation) {
   record->enumeration = (usb_enum_info_t){0};
 
   return true;
-}
-
-bool usb_enumeration_rearm(void) {
-  // Retain the original compatibility interface.
-  return usb_enumeration_rearm_generation( managed_device->device.generation);
 }
 
 bool usb_enumeration_rearm_rejected(uint8_t port) {

@@ -41,7 +41,6 @@ typedef struct {
 } usb_midi_in_stress_info_t;
 
 bool usb_midi_in_stress_reset(void);
-bool usb_midi_in_stress_start(void);
 // Start the single MIDI IN stress diagnostic
 // against an explicitly identified device
 // incarnation. Unknown or ambiguous ownership

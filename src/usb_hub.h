@@ -64,7 +64,6 @@ typedef struct {
 } usb_hub_scan_info_t;
 
 usb_hub_result_t usb_hub_scan(usb_hub_scan_info_t *info);
-bool usb_hub_get_scan(usb_hub_scan_info_t *info);
 
 typedef struct {
   uint8_t port;

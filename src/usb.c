@@ -301,18 +301,6 @@ bool usb_auto_enum_get_info(usb_auto_enum_info_t *info) {
   return true;
 }
 
-bool usb_auto_enum_ports_get_info(usb_auto_enum_ports_info_t *info) {
-  if (!info)
-    return false;
-
-  *info = (usb_auto_enum_ports_info_t){
-    .pending_ports = auto_enum_port_pending,
-    .next_port = auto_enum_next_port
-  };
-
-  return true;
-}
-
 static void usb_auto_enum_port_observe(uint8_t port, bool connected) {
   if (port == 0U || port > 4U)
     return;
@@ -882,16 +870,6 @@ bool usb_lifecycle_arm_generation(uint32_t generation) {
   lifecycle_last_run = run;
 
   return true;
-}
-
-bool usb_lifecycle_arm(void) {
-  usb_device_t device = {0};
-  if (!usb_get_device(&device))
-    return false;
-
-  // Compatibility interface: select the current
-  // device, then use the generation-specific path.
-  return usb_lifecycle_arm_generation(device.generation);
 }
 
 static void usb_lifecycle_auto_arm(void) {
