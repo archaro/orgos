@@ -173,7 +173,7 @@ static usb_managed_device_t *usb_managed_select_for_enumeration(
         managed_device : NULL;
   }
 
-  // Future multi-record mode.
+  // Independent multi-record mode.
   //
   // Reuse an existing connection record only
   // when its previous incarnation is fully
@@ -788,22 +788,60 @@ usb_enum_result_t usb_enumerate(usb_enum_info_t *info) {
   if (!usb_hub_get_init_info(&hub) || hub.result != USB_HUB_INIT_OK)
     return USB_ENUM_NOT_READY;
 
-  // Remain in single-device compatibility mode
-  // until the comprehensive regression is passed.
+  // Preserve single-device compatibility admission
+  // for this original entry point.
   usb_managed_device_t *record = usb_managed_select_for_enumeration(
       root.root_port, root.slot_id, admission.port, false);
 
   if (!record)
     return USB_ENUM_NOT_READY;
 
-  // Admission and record selection are complete.
-  // The enumeration engine now operates solely
-  // on the explicitly selected managed record.
-  // The comprehensive regression gate has not
-  // yet been passed. Require the single-device
-  // topology policy for every public attempt.
+  // Preserve single-device compatibility admission
+  // for this original entry point.
   return usb_enumerate_record(record, &root, admission.port,
       hub.ports, true, info);
+}
+
+usb_enum_result_t usb_enumerate_port(uint8_t port, usb_enum_info_t *info) {
+  if (!info)
+    return USB_ENUM_NOT_READY;
+
+  *info = (usb_enum_info_t){0};
+
+  usb_init_info_t root = {0};
+  if (!usb_get_init_info(&root) || root.result != USB_INIT_OK ||
+      root.root_port == 0U || root.slot_id == 0U || root.address == 0U)
+    return USB_ENUM_NOT_READY;
+
+  // Preserve the result of any previous attempt
+  // against this exact physical connection.
+  // No second attempt may begin before rearm.
+  if (usb_get_enumeration_by_connection(
+      root.root_port, root.slot_id, port, info))
+    return USB_ENUM_ALREADY_ATTEMPTED;
+
+  // Independent, port-local admission.
+  // This does not use the old whole-hub policy.
+  if (!usb_enum_port_dispatch_ready(port))
+    return USB_ENUM_NOT_READY;
+
+  usb_hub_init_info_t hub = {0};
+  if (!usb_hub_get_init_info(&hub) || hub.result != USB_HUB_INIT_OK ||
+      hub.ports == 0U || hub.ports > 4U || port == 0U || port > hub.ports)
+    return USB_ENUM_NOT_READY;
+
+  // Select an independently reusable record.
+  // No record is modified during this selection.
+  usb_managed_device_t *record = usb_managed_select_for_enumeration(
+          root.root_port, root.slot_id, port, true);
+
+  if (!record)
+    return USB_ENUM_NOT_READY;
+
+  // The existing engine performs the actual
+  // enumeration. Its attempt and connection-epoch
+  // bookkeeping remain unchanged.
+  return usb_enumerate_record(record, &root, port, hub.ports, false, info);
 }
 
 bool usb_get_device(usb_device_t *device) {

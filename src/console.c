@@ -1000,11 +1000,35 @@ static void cmd_usb_devices(void) {
       (unsigned int)device.product_id);
 }
 
-static void cmd_usb_enumerate(void) {
+static void cmd_usb_enumerate(const char *args) {
+  uint8_t port = 0U;
+  if (!end_of_args(args)) {
+    unsigned int requested = 0U;
+    if (!next_word_is(&args, "port") || !next_uint(&args, &requested) ||
+        !end_of_args(args) || requested == 0U || requested > 4U) {
+      console_puts("Usage: usb enumerate [port <1-4>]\n");
+      return;
+    }
+    port = (uint8_t)requested;
+  }
   usb_enum_info_t info = {0};
-  bool recorded = usb_get_enumeration(&info);
-  usb_enum_result_t result = recorded ?  info.result : usb_enumerate(&info);
+  bool recorded = false;
+  usb_enum_result_t result;
+  if (port == 0U) {
+    // Original compatibility behaviour.
+    recorded = usb_get_enumeration(&info);
+    result = recorded ? info.result : usb_enumerate(&info);
+  } else {
+    // New explicit per-port behaviour.
+    result = usb_enumerate_port(port, &info);
+    if (result == USB_ENUM_ALREADY_ATTEMPTED) {
+      recorded = true;
+      result = info.result;
+    }
+  }
   console_puts("USB enumeration:\n");
+  if (port != 0U)
+    console_printf("  Requested port  : %u\n", (unsigned int)port);
   console_printf("  Source          : %s\n",
       recorded ? "Recorded result (no new attempt)" : "Manual request");
   console_printf("  Result          : %u\n", (unsigned int)result);
@@ -1020,6 +1044,12 @@ static void cmd_usb_enumerate(void) {
   console_printf("  Hub ports       : %u\n", (unsigned int)info.hub_ports);
   console_printf("  Connected port  : %u\n", (unsigned int)info.hub_port);
   console_printf("  Device slot     : %u\n", (unsigned int)info.slot_id);
+  if (port != 0U) {
+    usb_device_t device = {0};
+    if (usb_get_device_by_slot(info.slot_id, &device))
+      console_printf("  Generation      : %u\n",
+          (unsigned int)device.generation);
+  }
   console_printf("  USB address     : %u\n", (unsigned int)info.address);
   console_printf("  Vendor ID       : 0x%04x\n",
       (unsigned int)info.vendor_id);
@@ -2413,8 +2443,8 @@ static void cmd_usb(const char *args) {
     cmd_usb_devices();
     return;
   }
-  if (next_word_is(&args, "enumerate") && end_of_args(args)) {
-    cmd_usb_enumerate();
+  if (next_word_is(&args, "enumerate")) {
+    cmd_usb_enumerate(args);
     return;
   }
   if (next_word_is(&args, "enumstate") && end_of_args(args)) {

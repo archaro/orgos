@@ -1786,6 +1786,35 @@ static bool usb_enum_resource_ready(unsigned int *free_contexts,
       *free_contexts > 0U && *waiter_headroom > 0U;
 }
 
+bool usb_enum_port_dispatch_ready(uint8_t port) {
+  // B2.2d.9a permits independent enumeration,
+  // but not concurrent lifecycle operations.
+  if (usb_lifecycle_any_armed() || usb_lifecycle_any_failed())
+    return false;
+
+  // An eligible physical port must have no
+  // outstanding changes or existing owner.
+  usb_enum_port_info_t candidate = {0};
+  if (!usb_enum_port_inspect(port, &candidate) ||
+      candidate.result != USB_ENUM_PORT_ELIGIBLE)
+    return false;
+
+  usb_init_info_t root = {0};
+  if (!usb_get_init_info(&root) || root.result != USB_INIT_OK ||
+      root.root_port == 0U || root.slot_id == 0U || root.address == 0U)
+    return false;
+
+  // The selected connection must have a safely
+  // reusable managed-device record.
+  if (!usb_managed_record_available(root.root_port, root.slot_id, port))
+    return false;
+
+  unsigned int contexts = 0U;
+  unsigned int waiters = 0U;
+
+  return usb_enum_resource_ready(&contexts, &waiters);
+}
+
 bool usb_enum_candidate_inspect(
     uint8_t port, usb_enum_candidate_info_t *info) {
 

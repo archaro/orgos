@@ -180,6 +180,12 @@ typedef struct {
 
 bool usb_lifecycle_port_inspect(usb_lifecycle_port_info_t *info);
 
+// Read-only preflight for independent port enumeration.
+// Checks local eligibility, managed-record capacity,
+// xHCI resources and current lifecycle restrictions.
+// The caller must still perform final record selection.
+bool usb_enum_port_dispatch_ready(uint8_t port);
+
 typedef enum {
   USB_REENUM_READY,
   USB_REENUM_SERVICE_FAILED,
@@ -242,9 +248,10 @@ bool usb_enum_admission_inspect(usb_enum_admission_info_t *info);
 
 // Port-local enumeration prerequisites.
 //
-// ELIGIBLE does not grant permission to enumerate.
-// The controller-wide admission policy remains
-// authoritative.
+// ELIGIBLE describes only the physical connection.
+// Enumeration additionally requires resource and
+// managed-record admission. The compatibility
+// entry point retains controller-wide admission.
 typedef enum {
   USB_ENUM_PORT_ELIGIBLE,
   USB_ENUM_PORT_SERVICE_FAILED,

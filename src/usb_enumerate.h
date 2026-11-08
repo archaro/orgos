@@ -81,6 +81,14 @@ typedef struct {
 
 usb_enum_result_t usb_enumerate(usb_enum_info_t *info);
 
+// Explicit enumeration of one internal hub port.
+// Does not impose the compatibility whole-hub
+// single-device restriction.
+//
+// Only a successfully admitted connection can
+// acquire a managed-device record or xHCI slot.
+usb_enum_result_t usb_enumerate_port(uint8_t port, usb_enum_info_t *info);
+
 // Preview whether a physical connection can acquire
 // a managed-device record in future multi-record mode.
 // This does not reserve a record or admit enumeration.
