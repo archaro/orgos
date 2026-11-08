@@ -25,18 +25,15 @@ typedef struct {
   bool attempted;
 } usb_managed_device_t;
 
-// The Raspberry Pi 4b internal USB 2.0 hub has four downstream
-// ports. This is a storage limit, not permission
-// to enumerate four devices yet.
+// Managed device records for the four downstream ports
+// of the Raspberry Pi 4B's internal USB 2.0 hub.
+// Released records may be reused after lifecycle teardown.
 static usb_managed_device_t managed_devices[USB_MANAGED_DEVICE_CAPACITY];
 
-// Compatibility owner for the existing single-
-// device inspection, recovery and lifecycle
-// interfaces.
-//
-// Enumeration selects its record explicitly.
-// Remaining consumers will be migrated before
-// multiple-device admission is enabled.
+// Legacy compatibility owner for the original
+// single-device inspection and test interfaces.
+// Independent enumeration and the multi-device
+// inventory use explicitly selected records.
 static usb_managed_device_t *const managed_device = &managed_devices[0];
 
 static bool test_abort_after_address;

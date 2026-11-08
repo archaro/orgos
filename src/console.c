@@ -969,37 +969,115 @@ static void cmd_usb_hubports(void) {
   }
 }
 
-static void cmd_usb_devices(void) {
-  usb_device_t device = {0};
-  console_puts("USB device inventory:\n");
-  if (!usb_get_device(&device)) {
-    console_puts("  No device record available.\n");
-    return;
+static const char *usb_enum_stage_name(usb_enum_stage_t stage) {
+  switch (stage) {
+    case USB_ENUM_STAGE_NONE:
+      return "None";
+    case USB_ENUM_STAGE_DISCOVER:
+      return "Port discovery";
+    case USB_ENUM_STAGE_ENABLE_SLOT:
+      return "Enable Slot";
+    case USB_ENUM_STAGE_PREPARE:
+      return "Prepare contexts";
+    case USB_ENUM_STAGE_ADDRESS:
+      return "Address Device";
+    case USB_ENUM_STAGE_DEVICE_DESCRIPTOR:
+      return "Device descriptor";
+    case USB_ENUM_STAGE_CONFIGURATION_DESCRIPTOR:
+      return "Configuration descriptor";
+    case USB_ENUM_STAGE_SELECT_CONFIGURATION:
+      return "Select configuration";
+    case USB_ENUM_STAGE_CONFIGURE_BULK:
+      return "Configure Bulk endpoints";
+    case USB_ENUM_STAGE_MIDI_QUIRK:
+      return "MIDI startup quirk";
+    case USB_ENUM_STAGE_COMPLETE:
+      return "Complete";
+    default:
+      return "Unknown";
   }
-  console_printf("  State          : %s\n",
-      usb_device_state_name(device.state));
-  console_printf("  Generation     : %u\n", (unsigned int)device.generation);
-  console_printf("  xHCI quiesced  : %s\n",
-      xhci_downstream_is_quiesced(device.slot_id) ? "Yes" : "No");
-  if (device.state == USB_DEVICE_DETACHED) {
-    console_printf("  Previous port  : %u\n",
-        (unsigned int)device.parent_port);
-    console_puts("  No active downstream device.\n");
-    return;
-  }
-  console_printf("  Root port      : %u\n", (unsigned int)device.root_port);
-  console_printf("  Parent slot    : %u\n", (unsigned int)device.parent_slot);
-  console_printf("  Parent port    : %u\n", (unsigned int)device.parent_port);
-  console_printf("  Speed          : %s\n",
-      usb_speed_name((uint8_t)device.speed));
-  console_printf("  Slot ID        : %u\n", (unsigned int)device.slot_id);
-  console_printf("  USB address    : %u\n", (unsigned int)device.address);
-  console_printf("  Vendor ID      : 0x%04x\n",
-      (unsigned int)device.vendor_id);
-  console_printf("  Product ID     : 0x%04x\n",
-      (unsigned int)device.product_id);
 }
 
+static void cmd_usb_devices(void) {
+  unsigned int records = 0U;
+  unsigned int active = 0U;
+  unsigned int failed = 0U;
+  unsigned int detached = 0U;
+  console_puts("USB managed device inventory:\n");
+  for (unsigned int i = 0U; i < USB_MANAGED_DEVICE_CAPACITY; i++) {
+    usb_device_t device = {0};
+    if (!usb_get_device_at(i, &device))
+      continue;
+    records++;
+    switch (device.state) {
+      case USB_DEVICE_ACTIVE:
+        active++;
+        break;
+      case USB_DEVICE_FAILED:
+        failed++;
+        break;
+      case USB_DEVICE_DETACHED:
+        detached++;
+        break;
+      default:
+        break;
+    }
+    console_printf("\n  Record %u:\n", i);
+    console_printf("    State          : %s\n",
+        usb_device_state_name(device.state));
+    if (device.generation != 0U)
+      console_printf("    Generation     : %u\n",
+          (unsigned int)device.generation);
+    else
+      console_puts("    Generation     : Not assigned\n");
+    console_printf("    Root port      : %u\n",
+        (unsigned int)device.root_port);
+    console_printf("    Parent slot    : %u\n",
+        (unsigned int)device.parent_slot);
+    console_printf("    Parent port    : %u\n",
+        (unsigned int)device.parent_port);
+    console_printf("    Speed          : %s\n",
+        usb_speed_name((uint8_t)device.speed));
+    if (device.slot_id != 0U) {
+      console_printf("    Slot ID        : %u\n",
+          (unsigned int)device.slot_id);
+      console_printf("    xHCI quiesced  : %s\n",
+          xhci_downstream_is_quiesced(device.slot_id) ? "Yes" : "No");
+    } else {
+      console_puts("    Slot ID        : Not assigned\n");
+      console_puts("    xHCI quiesced  : N/A\n");
+    }
+    if (device.address != 0U)
+      console_printf("    USB address    : %u\n",
+          (unsigned int)device.address);
+    else
+      console_puts("    USB address    : Not assigned\n");
+    console_printf("    Vendor ID      : 0x%04x\n",
+        (unsigned int)device.vendor_id);
+    console_printf("    Product ID     : 0x%04x\n",
+        (unsigned int)device.product_id);
+    usb_enum_info_t enumeration = {0};
+    if (usb_get_enumeration_at(i, &enumeration)) {
+      console_printf("    Enumeration    : %s (result %u)\n",
+          enumeration.result == USB_ENUM_OK ? "PASS" : "FAILED",
+          (unsigned int)enumeration.result);
+      console_printf("    Enum stage     : %s\n",
+          usb_enum_stage_name(enumeration.stage));
+      if (enumeration.result != USB_ENUM_OK)
+        console_printf("    Enum detail    : 0x%08x\n",
+            (unsigned int)enumeration.detail);
+    } else {
+      console_puts("    Enumeration    : No recorded attempt\n");
+    }
+  }
+  if (records == 0U)
+    console_puts("  No managed device records.\n");
+  console_printf("\n  Records  : %u / %u\n",
+      records, USB_MANAGED_DEVICE_CAPACITY);
+  console_printf("  Active   : %u\n", active);
+  console_printf("  Failed   : %u\n", failed);
+  console_printf("  Detached : %u\n", detached);
+}
 static void cmd_usb_enumerate(const char *args) {
   uint8_t port = 0U;
   if (!end_of_args(args)) {
@@ -1070,35 +1148,6 @@ static void cmd_usb_enumerate(const char *args) {
       (unsigned int)info.midi.bulk_in,
       (unsigned int)info.midi.bulk_in_mps);
   console_printf("USB enumeration: PASS\n");
-}
-
-static const char *usb_enum_stage_name(usb_enum_stage_t stage) {
-  switch (stage) {
-    case USB_ENUM_STAGE_NONE:
-      return "None";
-    case USB_ENUM_STAGE_DISCOVER:
-      return "Port discovery";
-    case USB_ENUM_STAGE_ENABLE_SLOT:
-      return "Enable Slot";
-    case USB_ENUM_STAGE_PREPARE:
-      return "Prepare contexts";
-    case USB_ENUM_STAGE_ADDRESS:
-      return "Address Device";
-    case USB_ENUM_STAGE_DEVICE_DESCRIPTOR:
-      return "Device descriptor";
-    case USB_ENUM_STAGE_CONFIGURATION_DESCRIPTOR:
-      return "Configuration descriptor";
-    case USB_ENUM_STAGE_SELECT_CONFIGURATION:
-      return "Select configuration";
-    case USB_ENUM_STAGE_CONFIGURE_BULK:
-      return "Configure Bulk endpoints";
-    case USB_ENUM_STAGE_MIDI_QUIRK:
-      return "MIDI startup quirk";
-    case USB_ENUM_STAGE_COMPLETE:
-      return "Complete";
-    default:
-      return "Unknown";
-  }
 }
 
 static const char *xhci_ep_state_name(uint8_t state) {
@@ -1513,8 +1562,8 @@ static void cmd_usb_lifecycle_candidates(void) {
     }
     console_putc('\n');
   }
-  console_puts("Read-only assessment; controller-wide admission "
-      "remains authoritative.\n");
+  console_puts("Legacy controller-wide candidate assessment only; "
+      "automatic enumeration uses usb auto ports.\n");
 }
 
 static void cmd_usb_lifecycle_current(void) {
