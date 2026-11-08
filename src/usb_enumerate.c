@@ -734,9 +734,15 @@ static usb_enum_result_t usb_enumerate_record(usb_managed_device_t *record,
 complete:
   if (result != USB_ENUM_OK && record->device.state != USB_DEVICE_DETACHED)
     record->device.state = USB_DEVICE_FAILED;
+
   state.result = result;
   record->enumeration = state;
   *info = state;
+
+  // The attempt is now permanently associated
+  // with this record until explicit rearm.
+  // Consume its request regardless of result.
+  usb_auto_enum_attempt_recorded(admitted_port);
 
   return result;
 }

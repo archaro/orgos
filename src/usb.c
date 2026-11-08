@@ -330,6 +330,21 @@ bool usb_auto_enum_ports_seed(uint8_t ports, uint16_t connected) {
   return true;
 }
 
+void usb_auto_enum_attempt_recorded(uint8_t port) {
+  if (port == 0U || port > 4U)
+    return;
+
+  // The attempted connection no longer has a
+  // pending request. Success and failure both
+  // consume it; recovery requires an explicit
+  // lifecycle transition.
+  auto_enum_port_pending &= (uint16_t)~(1U << port);
+
+  // Start future round-robin selection at the
+  // port following this attempted connection.
+  auto_enum_next_port = port == 4U ?  1U : (uint8_t)(port + 1U);
+}
+
 static void usb_auto_enum_request(void) {
   auto_enum.pending = true;
   auto_enum_next_check_us = 0ULL;
@@ -1146,22 +1161,6 @@ static void usb_auto_enum_service(void) {
   usb_enum_result_t result = usb_enumerate(&enumeration);
   auto_enum.attempts++;
   auto_enum.last_result = (uint32_t)result;
-
-  // A completed enumeration attempt consumes its
-  // port request, whether it succeeded or failed.
-  //
-  // NOT_READY is not proof that an attempt began,
-  // so retain its request for later scheduling.
-  if (result != USB_ENUM_NOT_READY && admission.port >= 1U &&
-      admission.port <= 4U) {
-
-    uint16_t bit = (uint16_t)(1U << admission.port);
-    auto_enum_port_pending &= (uint16_t)~bit;
-    // Retain the next round-robin starting point.
-    // It is not used for admission yet.
-    auto_enum_next_port = admission.port == 4U ?
-        1U : (uint8_t)(admission.port + 1U);
-  }
 
   if (result == USB_ENUM_OK)
     auto_enum.successes++;

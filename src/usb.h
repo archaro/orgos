@@ -60,6 +60,11 @@ bool usb_auto_enum_ports_get_info(usb_auto_enum_ports_info_t *info);
 // This never invokes enumeration.
 bool usb_auto_enum_ports_seed(uint8_t ports, uint16_t connected);
 
+// Called only after an enumeration attempt has
+// been recorded against its physical connection.
+// This updates request bookkeeping, not hardware.
+void usb_auto_enum_attempt_recorded(uint8_t port);
+
 void usb_auto_enum_set_enabled(bool enabled);
 
 typedef enum {
