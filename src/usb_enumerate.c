@@ -240,13 +240,69 @@ static bool control_in(usb_enum_info_t *state, bool downstream,
 static usb_enum_result_t discover_port(
     usb_enum_info_t *state, uint8_t admitted_port) {
 
-  if (admitted_port == 0U || admitted_port > state->hub_ports)
+  if (!state || admitted_port == 0U || admitted_port > state->hub_ports)
+    return USB_ENUM_PORT_FAILED;
+
+  // Inspect the selected port, not the complete
+  // hub topology. Other ports are outside the
+  // scope of this operation.
+  usb_hub_port_t current = {0};
+  usb_hub_result_t result = usb_hub_port_status(admitted_port, &current);
+
+  if (result != USB_HUB_OK) {
+    state->detail = (uint32_t)result;
+    return USB_ENUM_PORT_FAILED;
+  }
+
+  if (!(current.status & USB_PORT_POWERED)) {
+    state->detail = admitted_port;
+    return USB_ENUM_PORT_FAILED;
+  }
+
+  if (!(current.status & USB_PORT_CONNECTED))
+    return USB_ENUM_DEVICE_NOT_FOUND;
+
+  // Retain the physical connection identity
+  // before any fallible debounce or reset.
+  state->hub_port = admitted_port;
+  usb_hub_port_t stable = {0};
+  result = usb_hub_port_debounce(admitted_port, &stable);
+
+  if (result != USB_HUB_OK) {
+    state->detail = (uint32_t)result;
+    return USB_ENUM_DEBOUNCE_FAILED;
+  }
+
+  usb_hub_reset_info_t reset = {0};
+
+  result = usb_hub_port_reset(admitted_port, &reset);
+  if (result != USB_HUB_OK) {
+    state->detail = (uint32_t)result;
+    return USB_ENUM_RESET_FAILED;
+  }
+
+  state->speed = reset.speed;
+
+  // Full-Speed remains the only downstream
+  // device speed supported by this driver.
+  if (reset.speed != 1U)
+    return USB_ENUM_UNSUPPORTED_SPEED;
+
+  return USB_ENUM_OK;
+}
+
+static usb_enum_result_t discover_compatibility_topology(
+    usb_enum_info_t *state, uint8_t admitted_port) {
+
+  if (!state || admitted_port == 0U || admitted_port > state->hub_ports)
     return USB_ENUM_PORT_FAILED;
 
   uint8_t found = 0U;
-
+  // Preserve the original single-device policy.
+  // Every hub port must be readable and powered,
+  // and exactly one may have a connected device.
   for (uint8_t port = 1U; port <= state->hub_ports; port++) {
-    usb_hub_port_t info;
+    usb_hub_port_t info = {0};
     usb_hub_result_t result = usb_hub_port_status(port, &info);
 
     if (result != USB_HUB_OK) {
@@ -270,40 +326,12 @@ static usb_enum_result_t discover_port(
   if (found == 0U)
     return USB_ENUM_DEVICE_NOT_FOUND;
 
-  // Enumeration must operate on the connection
-  // selected by topology admission.
-  //
-  // The compatibility enumeration path still
-  // requires exactly one connected downstream
-  // device. Independent port admission remains
-  // disabled until the regression gate.
+  // The admitted connection and the sole
+  // observed connection must be identical.
   if (found != admitted_port) {
     state->detail = (uint32_t)admitted_port | ((uint32_t)found << 8);
     return USB_ENUM_PORT_FAILED;
   }
-
-  state->hub_port = admitted_port;
-
-  // Confirm a stable connection before resetting
-  // the downstream port and addressing its device.
-  usb_hub_port_t stable;
-  usb_hub_result_t result = usb_hub_port_debounce(found, &stable);
-  if (result != USB_HUB_OK) {
-    state->detail = (uint32_t)result;
-    return USB_ENUM_DEBOUNCE_FAILED;
-  }
-
-  usb_hub_reset_info_t reset;
-  result = usb_hub_port_reset(found, &reset);
-  if (result != USB_HUB_OK) {
-    state->detail = (uint32_t)result;
-    return USB_ENUM_RESET_FAILED;
-  }
-
-  state->speed = reset.speed;
-
-  if (reset.speed != 1U)
-    return USB_ENUM_UNSUPPORTED_SPEED;
 
   return USB_ENUM_OK;
 }
@@ -568,7 +596,7 @@ bool usb_get_enumeration_by_connection(uint8_t root_port, uint8_t parent_slot,
 
 static usb_enum_result_t usb_enumerate_record(usb_managed_device_t *record,
     const usb_init_info_t *root, uint8_t admitted_port, uint8_t hub_ports,
-    usb_enum_info_t *info) {
+    bool require_single_device, usb_enum_info_t *info) {
 
   if (!record || !root || !info || root->root_port == 0U ||
       root->slot_id == 0U || admitted_port == 0U ||
@@ -612,6 +640,20 @@ static usb_enum_result_t usb_enumerate_record(usb_managed_device_t *record,
   state.hub_ports = hub_ports;
   usb_enum_result_t result = USB_ENUM_OK;
 
+  // Retain the original whole-hub restriction
+  // for the public single-device enumeration path.
+  //
+  // Future independent admission will bypass
+  // this policy check, but not the selected-port
+  // discovery operation which follows it.
+  if (require_single_device) {
+    result = discover_compatibility_topology(&state, admitted_port);
+    if (result != USB_ENUM_OK)
+      goto complete;
+  }
+
+  // Only the explicitly admitted physical port
+  // may now be debounced and reset.
   result = discover_port(&state, admitted_port);
   if (result != USB_ENUM_OK)
     goto complete;
@@ -741,8 +783,11 @@ usb_enum_result_t usb_enumerate(usb_enum_info_t *info) {
   // Admission and record selection are complete.
   // The enumeration engine now operates solely
   // on the explicitly selected managed record.
-  return usb_enumerate_record(
-      record, &root, admission.port, hub.ports, info);
+  // The comprehensive regression gate has not
+  // yet been passed. Require the single-device
+  // topology policy for every public attempt.
+  return usb_enumerate_record(record, &root, admission.port,
+      hub.ports, true, info);
 }
 
 bool usb_get_device(usb_device_t *device) {
