@@ -45,6 +45,17 @@ typedef struct {
 } usb_auto_enum_info_t;
 
 bool usb_auto_enum_get_info(usb_auto_enum_info_t *info);
+// Per-port requests retained independently of the
+// current single-device automatic enumeration flag.
+//
+// Port n occupies bit n; bit zero is unused.
+typedef struct {
+  uint16_t pending_ports;
+  uint8_t next_port;
+} usb_auto_enum_ports_info_t;
+
+bool usb_auto_enum_ports_get_info(usb_auto_enum_ports_info_t *info);
+
 void usb_auto_enum_set_enabled(bool enabled);
 
 typedef enum {

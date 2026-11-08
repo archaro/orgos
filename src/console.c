@@ -2289,27 +2289,36 @@ static void cmd_usb_hubirq(void) {
 
 static void cmd_usb_auto_status(void) {
   usb_auto_enum_info_t info = {0};
-
   if (!usb_auto_enum_get_info(&info)) {
     console_puts("USB auto enumeration unavailable.\n");
     return;
   }
-
   console_puts("USB automatic enumeration:\n");
-  console_printf("  Enabled    : %s\n",
-      info.enabled ? "Yes" : "No");
-  console_printf("  Pending    : %s\n",
-      info.pending ? "Yes" : "No");
-  console_printf("  Attempts   : %u\n",
-      (unsigned int)info.attempts);
-  console_printf("  Successful : %u\n",
-      (unsigned int)info.successes);
-  console_printf("  Failed     : %u\n",
-      (unsigned int)info.failures);
-
+  console_printf("  Enabled    : %s\n", info.enabled ? "Yes" : "No");
+  console_printf("  Pending    : %s\n", info.pending ? "Yes" : "No");
+  console_printf("  Attempts   : %u\n", (unsigned int)info.attempts);
+  console_printf("  Successful : %u\n", (unsigned int)info.successes);
+  console_printf("  Failed     : %u\n", (unsigned int)info.failures);
   if (info.attempts != 0U)
-    console_printf("  Last result: %u\n",
-        (unsigned int)info.last_result);
+    console_printf("  Last result: %u\n", (unsigned int)info.last_result);
+}
+
+static void cmd_usb_auto_ports(void) {
+  usb_auto_enum_ports_info_t info = {0};
+  if (!usb_auto_enum_ports_get_info(&info)) {
+    console_puts("USB port requests unavailable.\n");
+    return;
+  }
+  console_puts("USB per-port enumeration requests:\n");
+  console_printf("  Pending mask : 0x%04x\n",
+      (unsigned int)info.pending_ports);
+  console_printf("  Next port    : %u\n", (unsigned int)info.next_port);
+  for (unsigned int port = 1U; port <= 4U; port++) {
+    bool pending = (info.pending_ports & (1U << port)) != 0U;
+    console_printf("  Port %u       : %s\n",
+        port, pending ? "Pending" : "None");
+  }
+  console_puts("  Dispatch     : Single-device compatibility\n");
 }
 
 static void cmd_usb_resources(void) {
@@ -2376,6 +2385,11 @@ static void cmd_usb_auto(const char *args) {
   word = args;
   if (next_word_is(&word, "status") && end_of_args(word)) {
     cmd_usb_auto_status();
+    return;
+  }
+  word = args;
+  if (next_word_is(&word, "ports") && end_of_args(word)) {
+    cmd_usb_auto_ports();
     return;
   }
   console_puts("Usage: usb auto [on|off|status]\n");

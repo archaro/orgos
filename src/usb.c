@@ -53,6 +53,14 @@ static usb_auto_enum_info_t auto_enum = {
   .pending = true
 };
 
+// Future multi-port scheduling state.
+//
+// This bookkeeping does not authorise enumeration.
+// The existing controller-wide admission path
+// remains the only operational scheduler.
+static uint16_t auto_enum_port_pending;
+static uint8_t auto_enum_next_port = 1U;
+
 // A completed notification may identify several ports.
 // Retain progress until all have been processed.
 static uint16_t change_pending_mask;
@@ -289,6 +297,18 @@ bool usb_auto_enum_get_info(usb_auto_enum_info_t *info) {
   return true;
 }
 
+bool usb_auto_enum_ports_get_info(usb_auto_enum_ports_info_t *info) {
+  if (!info)
+    return false;
+
+  *info = (usb_auto_enum_ports_info_t){
+    .pending_ports = auto_enum_port_pending,
+    .next_port = auto_enum_next_port
+  };
+
+  return true;
+}
+
 static void usb_auto_enum_request(void) {
   auto_enum.pending = true;
   auto_enum_next_check_us = 0ULL;
@@ -425,10 +445,22 @@ static void usb_change_enqueue(uint8_t port, const usb_hub_port_t *status) {
 
   change_count++;
 
-  // Inform automatic enumeration of a possible
-  // new device, regardless of queue occupancy.
-  if (status->change & 0x0001U)
+  // Retain connection requests by physical port.
+  // A disconnection cancels an unprocessed request.
+  //
+  // The compatibility scheduler still uses its
+  // existing controller-wide pending flag.
+  if (status->change & 0x0001U) {
+    if (port >= 1U && port <= 4U) {
+      uint16_t bit = (uint16_t)(1U << port);
+      if (status->status & 0x0001U)
+        auto_enum_port_pending |= bit;
+      else
+        auto_enum_port_pending &= (uint16_t)~bit;
+    }
+
     usb_auto_enum_request();
+  }
 
   // Lifecycle notification is operational state,
   // not a diagnostic queue consumer.
@@ -1093,6 +1125,22 @@ static void usb_auto_enum_service(void) {
   usb_enum_result_t result = usb_enumerate(&enumeration);
   auto_enum.attempts++;
   auto_enum.last_result = (uint32_t)result;
+
+  // A completed enumeration attempt consumes its
+  // port request, whether it succeeded or failed.
+  //
+  // NOT_READY is not proof that an attempt began,
+  // so retain its request for later scheduling.
+  if (result != USB_ENUM_NOT_READY && admission.port >= 1U &&
+      admission.port <= 4U) {
+
+    uint16_t bit = (uint16_t)(1U << admission.port);
+    auto_enum_port_pending &= (uint16_t)~bit;
+    // Retain the next round-robin starting point.
+    // It is not used for admission yet.
+    auto_enum_next_port = admission.port == 4U ?
+        1U : (uint8_t)(admission.port + 1U);
+  }
 
   if (result == USB_ENUM_OK)
     auto_enum.successes++;
