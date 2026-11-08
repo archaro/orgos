@@ -1595,6 +1595,11 @@ static void cmd_usb_lifecycle_candidates(void) {
     if (info.port.result == USB_ENUM_PORT_ELIGIBLE) {
       if (info.would_admit) {
         console_puts(" [controller: ready]");
+      } else if (!info.resources_ready &&
+          (info.controller.result == USB_ENUM_ADMIT_INITIAL ||
+           info.controller.result == USB_ENUM_ADMIT_RECONNECT) &&
+           info.controller.port == port) {
+        console_puts(" [resources: unavailable]");
       } else if (
           info.controller.result == USB_ENUM_ADMIT_INITIAL ||
           info.controller.result == USB_ENUM_ADMIT_RECONNECT) {
@@ -2315,6 +2320,10 @@ static void cmd_usb_auto_ports(void) {
   console_printf("  Eligible mask : 0x%04x\n",
       (unsigned int)info.eligible_ports);
   console_printf("  Next port     : %u\n", (unsigned int)info.next_port);
+  console_printf("  Free contexts : %u\n", info.free_contexts);
+  console_printf("  Waiter room   : %u\n", info.waiter_headroom);
+  console_printf("  Resources     : %s\n",
+      info.resources_ready ? "Ready" : "Blocked");
   if (info.selected_port != 0U)
     console_printf("  Candidate     : Port %u\n",
         (unsigned int)info.selected_port);

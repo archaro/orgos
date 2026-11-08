@@ -296,6 +296,7 @@ bool usb_enum_port_inspect(uint8_t port, usb_enum_port_info_t *info);
 typedef struct {
   usb_enum_port_info_t port;
   usb_enum_admission_info_t controller;
+  bool resources_ready;
   bool would_admit;
 } usb_enum_candidate_info_t;
 
@@ -311,7 +312,10 @@ typedef struct {
   uint16_t eligible_ports;
   uint8_t next_port;
   uint8_t selected_port;
+  unsigned int free_contexts;
+  unsigned int waiter_headroom;
   usb_enum_admission_info_t controller;
+  bool resources_ready;
   bool would_admit;
 } usb_auto_enum_select_info_t;
 bool usb_auto_enum_select_inspect(usb_auto_enum_select_info_t *info);

@@ -1749,6 +1749,37 @@ bool usb_enum_port_inspect(uint8_t port, usb_enum_port_info_t *info) {
   return true;
 }
 
+static bool usb_enum_resource_ready(unsigned int *free_contexts,
+    unsigned int *waiter_headroom) {
+
+  if (!free_contexts || !waiter_headroom)
+    return false;
+
+  *free_contexts = 0U;
+  *waiter_headroom = 0U;
+
+  xhci_resource_info_t resources = {0};
+  if (!xhci_resource_get_info(&resources))
+    return false;
+
+  *free_contexts = resources.downstream_free;
+
+  // A transfer waiter must be available without
+  // consuming the controller command reserve.
+  if (resources.waiter_capacity > resources.command_waiter_reserve) {
+    unsigned int limit = resources.waiter_capacity -
+        resources.command_waiter_reserve;
+
+    if (resources.active_waiters < limit)
+      *waiter_headroom = limit - resources.active_waiters;
+  }
+
+  return resources.controller_running && !resources.command_outstanding &&
+      !resources.command_ring_failed && !resources.dispatch_failed &&
+      resources.command_waiters == 0U && resources.orphan_waiters == 0U &&
+      *free_contexts > 0U && *waiter_headroom > 0U;
+}
+
 bool usb_enum_candidate_inspect(
     uint8_t port, usb_enum_candidate_info_t *info) {
 
@@ -1766,6 +1797,12 @@ bool usb_enum_candidate_inspect(
   if (!usb_enum_admission_inspect(&info->controller))
     return false;
 
+  unsigned int free_contexts = 0U;
+  unsigned int waiter_headroom = 0U;
+
+  info->resources_ready = usb_enum_resource_ready(
+      &free_contexts, &waiter_headroom);
+
   bool controller_ready = info->controller.result == USB_ENUM_ADMIT_INITIAL ||
       info->controller.result == USB_ENUM_ADMIT_RECONNECT;
 
@@ -1773,7 +1810,8 @@ bool usb_enum_candidate_inspect(
   // A READY decision for another port never
   // authorises this candidate.
   info->would_admit = info->port.result == USB_ENUM_PORT_ELIGIBLE &&
-      controller_ready && info->controller.port == port;
+      controller_ready && info->controller.port == port &&
+      info->resources_ready;
 
   return true;
 }
@@ -1794,6 +1832,9 @@ bool usb_auto_enum_select_inspect(usb_auto_enum_select_info_t *info) {
 
   if (info->next_port == 0U || info->next_port > hub.ports)
     return false;
+
+  info->resources_ready = usb_enum_resource_ready(
+      &info->free_contexts, &info->waiter_headroom);
 
   // Visit each hub port once, beginning at the
   // retained round-robin position.
@@ -1828,8 +1869,9 @@ bool usb_auto_enum_select_inspect(usb_auto_enum_select_info_t *info) {
   bool controller_ready = info->controller.result == USB_ENUM_ADMIT_INITIAL ||
       info->controller.result == USB_ENUM_ADMIT_RECONNECT;
 
-  info->would_admit = info->selected_port != 0U &&
-      controller_ready && info->controller.port == info->selected_port;
+  info->would_admit = info->resources_ready &&
+      info->selected_port != 0U && controller_ready &&
+      info->controller.port == info->selected_port;
 
   return true;
 }
