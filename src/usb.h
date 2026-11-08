@@ -53,8 +53,12 @@ typedef struct {
   uint16_t pending_ports;
   uint8_t next_port;
 } usb_auto_enum_ports_info_t;
-
 bool usb_auto_enum_ports_get_info(usb_auto_enum_ports_info_t *info);
+
+// The initial hub scan uses bit (port - 1).
+// Translate connected ports into pending requests.
+// This never invokes enumeration.
+bool usb_auto_enum_ports_seed(uint8_t ports, uint16_t connected);
 
 void usb_auto_enum_set_enabled(bool enabled);
 
@@ -292,4 +296,18 @@ typedef struct {
 
 bool usb_enum_candidate_inspect(
     uint8_t port, usb_enum_candidate_info_t *info);
+
+// Read-only preview of future multi-port scheduling.
+//
+// The selected port satisfies local eligibility,
+// but that does not grant controller admission.
+typedef struct {
+  uint16_t pending_ports;
+  uint16_t eligible_ports;
+  uint8_t next_port;
+  uint8_t selected_port;
+  usb_enum_admission_info_t controller;
+  bool would_admit;
+} usb_auto_enum_select_info_t;
+bool usb_auto_enum_select_inspect(usb_auto_enum_select_info_t *info);
 

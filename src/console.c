@@ -2304,21 +2304,33 @@ static void cmd_usb_auto_status(void) {
 }
 
 static void cmd_usb_auto_ports(void) {
-  usb_auto_enum_ports_info_t info = {0};
-  if (!usb_auto_enum_ports_get_info(&info)) {
-    console_puts("USB port requests unavailable.\n");
+  usb_auto_enum_select_info_t info = {0};
+  if (!usb_auto_enum_select_inspect(&info)) {
+    console_puts("USB candidate selection unavailable.\n");
     return;
   }
-  console_puts("USB per-port enumeration requests:\n");
-  console_printf("  Pending mask : 0x%04x\n",
+  console_puts("USB per-port enumeration scheduler:\n");
+  console_printf("  Pending mask  : 0x%04x\n",
       (unsigned int)info.pending_ports);
-  console_printf("  Next port    : %u\n", (unsigned int)info.next_port);
+  console_printf("  Eligible mask : 0x%04x\n",
+      (unsigned int)info.eligible_ports);
+  console_printf("  Next port     : %u\n", (unsigned int)info.next_port);
+  if (info.selected_port != 0U)
+    console_printf("  Candidate     : Port %u\n",
+        (unsigned int)info.selected_port);
+  else
+    console_puts("  Candidate     : None\n");
+  console_printf("  Controller    : %s\n",
+      usb_enum_admission_name(info.controller.result));
+  console_printf("  Would admit   : %s\n", info.would_admit ? "Yes" : "No");
   for (unsigned int port = 1U; port <= 4U; port++) {
-    bool pending = (info.pending_ports & (1U << port)) != 0U;
-    console_printf("  Port %u       : %s\n",
-        port, pending ? "Pending" : "None");
+    uint16_t bit = (uint16_t)(1U << port);
+    const char *state = "None";
+    if (info.pending_ports & bit)
+      state = (info.eligible_ports & bit) ?  "Eligible" : "Blocked";
+    console_printf("  Port %u        : %s\n", port, state);
   }
-  console_puts("  Dispatch     : Single-device compatibility\n");
+  console_puts("  Dispatch      : Compatibility only\n");
 }
 
 static void cmd_usb_resources(void) {
@@ -2392,7 +2404,7 @@ static void cmd_usb_auto(const char *args) {
     cmd_usb_auto_ports();
     return;
   }
-  console_puts("Usage: usb auto [on|off|status]\n");
+  console_puts("Usage: usb auto [on|off|status|ports]\n");
 }
 
 static void cmd_usb(const char *args) {

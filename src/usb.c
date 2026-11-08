@@ -309,6 +309,27 @@ bool usb_auto_enum_ports_get_info(usb_auto_enum_ports_info_t *info) {
   return true;
 }
 
+bool usb_auto_enum_ports_seed(uint8_t ports, uint16_t connected) {
+  if (!usb_service_available() || ports == 0U || ports > 4U)
+    return false;
+
+  uint16_t valid = (uint16_t)((1U << ports) - 1U);
+  if ((connected & (uint16_t)~valid) != 0U)
+    return false;
+
+  // The hub scan numbers ports from bit zero.
+  // Our scheduler reserves bit zero and uses
+  // the physical port number as its bit index.
+  for (uint8_t port = 1U; port <= ports; port++) {
+    if (connected & (1U << (port - 1U)))
+      auto_enum_port_pending |= (uint16_t)(1U << port);
+  }
+
+  // Merge rather than replace: an earlier request
+  // must never be discarded by initial discovery.
+  return true;
+}
+
 static void usb_auto_enum_request(void) {
   auto_enum.pending = true;
   auto_enum_next_check_us = 0ULL;
@@ -1754,6 +1775,62 @@ bool usb_enum_candidate_inspect(
   // authorises this candidate.
   info->would_admit = info->port.result == USB_ENUM_PORT_ELIGIBLE &&
       controller_ready && info->controller.port == port;
+
+  return true;
+}
+
+bool usb_auto_enum_select_inspect(usb_auto_enum_select_info_t *info) {
+  if (!info)
+    return false;
+
+  *info = (usb_auto_enum_select_info_t){
+    .pending_ports = auto_enum_port_pending,
+    .next_port = auto_enum_next_port
+  };
+
+  usb_hub_init_info_t hub = {0};
+  if (!usb_hub_get_init_info(&hub) || hub.result != USB_HUB_INIT_OK ||
+      hub.ports == 0U || hub.ports > 4U)
+    return false;
+
+  if (info->next_port == 0U || info->next_port > hub.ports)
+    return false;
+
+  // Visit each hub port once, beginning at the
+  // retained round-robin position.
+  for (uint8_t i = 0U; i < hub.ports; i++) {
+    uint8_t port = (uint8_t)(((info->next_port - 1U + i) % hub.ports) + 1U);
+
+    uint16_t bit = (uint16_t)(1U << port);
+    if (!(info->pending_ports & bit))
+      continue;
+
+    usb_enum_port_info_t candidate = {0};
+    if (!usb_enum_port_inspect(port, &candidate))
+      return false;
+
+    if (candidate.result != USB_ENUM_PORT_ELIGIBLE)
+      continue;
+
+    info->eligible_ports |= bit;
+
+    // Retain the first eligible port encountered.
+    // Continue inspecting to obtain the complete
+    // eligible bitmap.
+    if (info->selected_port == 0U)
+      info->selected_port = port;
+  }
+
+  // Controller-wide admission is independent of
+  // local candidate selection and remains mandatory.
+  if (!usb_enum_admission_inspect(&info->controller))
+    return false;
+
+  bool controller_ready = info->controller.result == USB_ENUM_ADMIT_INITIAL ||
+      info->controller.result == USB_ENUM_ADMIT_RECONNECT;
+
+  info->would_admit = info->selected_port != 0U &&
+      controller_ready && info->controller.port == info->selected_port;
 
   return true;
 }

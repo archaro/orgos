@@ -404,6 +404,8 @@ void main(void) {
             if (scan_result == USB_HUB_OK) {
               console_printf("OK (connected mask 0x%04x).\n",
                   (unsigned int)scan.connected);
+              if (!usb_auto_enum_ports_seed(scan.ports, scan.connected))
+                  console_puts("USB port request seeding failed.\n");
               console_puts("Starting hub notifications... ");
               xhci_hub_notify_result_t notify_result =
                   xhci_hub_notify_start();
