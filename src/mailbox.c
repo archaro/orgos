@@ -38,10 +38,6 @@ static volatile uint32_t message[MAILBOX_BUFFER_BYTES / 4U]
     __attribute__((aligned(64)));
 static bool mailbox_poisoned;
 
-static inline void mailbox_barrier(void) {
-  __asm__ volatile("dsb sy" ::: "memory");
-}
-
 // Check that cache maintenance cannot affect
 // memory outside our dedicated mailbox buffer.
 static bool mailbox_cache_layout_valid(void) {

@@ -437,7 +437,6 @@ typedef struct {
 } xhci_device_info_t;
 
 xhci_device_result_t xhci_device_prepare(xhci_device_info_t *result);
-bool xhci_device_get_info(xhci_device_info_t *result);
 xhci_device_result_t xhci_downstream_prepare(
     uint8_t hub_port, uint8_t speed, xhci_device_info_t *result);
 
@@ -712,16 +711,6 @@ xhci_noop_result_t xhci_noop( xhci_noop_info_t *result);
 bool xhci_check_readiness(xhci_readiness_t *result);
 
 typedef struct {
-  uint32_t hcsparams1;
-  uint32_t hcsparams2;
-  uint32_t hcsparams3;
-  uint32_t hccparams1;
-  uint32_t hccparams2;
-  uint32_t ext_cap_offset;
-  uint32_t ext_cap_header;
-} xhci_cap_diagnostic_t;
-
-typedef struct {
   uint32_t offset;
   uint32_t header;
   uint32_t name;
@@ -737,8 +726,6 @@ typedef struct {
 
 bool xhci_protocol_get(unsigned int index, xhci_protocol_t *protocol,
     bool *found);
-
-bool xhci_diagnose_capabilities(xhci_cap_diagnostic_t *result);
 
 typedef enum {
   XHCI_RESET_OK,

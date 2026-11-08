@@ -20,9 +20,7 @@
 #define XHCI_CAPLENGTH_HCIVERSION 0x00U
 #define XHCI_HCSPARAMS1           0x04U
 #define XHCI_HCSPARAMS2           0x08U
-#define XHCI_HCSPARAMS3           0x0cU
 #define XHCI_HCCPARAMS1           0x10U
-#define XHCI_HCCPARAMS2           0x1cU
 #define XHCI_DBOFF                0x14U
 #define XHCI_RTSOFF               0x18U
 #define XHCI_EXT_CAP_PROTOCOL     2U
@@ -164,7 +162,6 @@ typedef struct {
   uint8_t ep0_completion_code;
   bool prepared;
   bool addressed;
-  xhci_device_info_t info;
   dma_buffer_t bulk_out_buffer;
   unsigned int bulk_out_index;
   unsigned int bulk_out_cycle;
@@ -179,7 +176,6 @@ typedef struct {
   dma_buffer_t interrupt_ring;
   dma_buffer_t interrupt_buffer;
   uint8_t interrupt_dci;
-  uint8_t interrupt_interval;
   uint16_t interrupt_mps;
   bool interrupt_ready;
   unsigned int interrupt_index;
@@ -950,42 +946,6 @@ bool xhci_check_readiness(xhci_readiness_t *result) {
 
   result->ready = (status & XHCI_STS_CNR) == 0;
   result->halted = (status & XHCI_STS_HALTED) != 0;
-  return true;
-}
-
-bool xhci_diagnose_capabilities( xhci_cap_diagnostic_t *result) {
-
-  if (!result)
-    return false;
-
-  xhci_info_t info;
-  if (!xhci_probe(&info))
-    return false;
-
-  *result = (xhci_cap_diagnostic_t){0};
-  result->hcsparams1 = xhci_read(XHCI_HCSPARAMS1);
-  result->hcsparams2 = xhci_read(XHCI_HCSPARAMS2);
-  result->hcsparams3 = xhci_read(XHCI_HCSPARAMS3);
-  result->hccparams1 = xhci_read(XHCI_HCCPARAMS1);
-
-  // HCCPARAMS2 exists in xHCI 1.1 and later.
-  // The VL805 reports xHCI 1.0, so do not
-  // read offset 0x1c as HCCPARAMS2.
-  if (info.version >= 0x0110U)
-    result->hccparams2 = xhci_read(XHCI_HCCPARAMS2);
-
-  // HCCPARAMS1[31:16] contains the extended
-  // capabilities pointer, in DWORD units.
-  uint32_t xecp = (result->hccparams1 >> 16) & 0xffffU;
-  result->ext_cap_offset = xecp * 4U;
-
-  // Read the first capability header if the
-  // pointer lies inside the initial 4 KiB BAR
-  // region used by our current diagnostics.
-  if (result->ext_cap_offset >= 0x20U && result->ext_cap_offset <= 0xffcU) {
-    result->ext_cap_header = xhci_read(result->ext_cap_offset);
-  }
-
   return true;
 }
 
@@ -2377,14 +2337,6 @@ failed:
   return false;
 }
 
-bool xhci_device_get_info(xhci_device_info_t *result) {
-  if (!result || !internal_hub.prepared)
-    return false;
-
-  *result = internal_hub.info;
-  return true;
-}
-
 xhci_device_result_t xhci_device_prepare(xhci_device_info_t *result) {
   if (!result)
     return XHCI_DEVICE_NOT_READY;
@@ -2495,7 +2447,6 @@ xhci_device_result_t xhci_device_prepare(xhci_device_info_t *result) {
   __asm__ volatile("dsb sy" ::: "memory");
 
   result->dcbaa_entry = dcbaa[internal_hub_slot];
-  internal_hub.info = *result;
   internal_hub.prepared = true;
   return XHCI_DEVICE_OK;
 
@@ -2640,7 +2591,6 @@ xhci_device_result_t xhci_downstream_prepare(
   __asm__ volatile("dsb sy" ::: "memory");
 
   result->dcbaa_entry = dcbaa[device->slot_id];
-  device->info = *result;
   device->prepared = true;
   return XHCI_DEVICE_OK;
 }
@@ -3623,7 +3573,7 @@ xhci_address_result_t xhci_address_device(
       (cache.data_line_size & (cache.data_line_size - 1U)))
     return XHCI_ADDRESS_VERIFY_FAILED;
 
-  uint32_t size = internal_hub.info.context_size;
+  uint32_t size = internal_hub.context_size;
   uint8_t *output = internal_hub.output.virtual;
   if (!cache_invalidate(output, 2U * size))
     return XHCI_ADDRESS_VERIFY_FAILED;
@@ -4404,7 +4354,6 @@ xhci_interrupt_config_result_t xhci_hub_interrupt_configure(
     return XHCI_INTERRUPT_CONFIG_VERIFY_FAILED;
 
   device->interrupt_dci = dci;
-  device->interrupt_interval = xhci_interval;
   device->interrupt_mps = mps;
   device->interrupt_ready = true;
   device->interrupt_index = 0U;
