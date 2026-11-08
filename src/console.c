@@ -21,7 +21,6 @@
 #include "usb_midi.h"
 #include "usb_enumerate.h"
 #include "usb_midi_test.h"
-#include "midi.h"
 
 #define CONSOLE_LINE_SIZE 256
 
@@ -53,14 +52,6 @@ void console_printf(const char *fmt, ...) {
   va_end(args);
 }
 
-static void console_puthex8(uint8_t value) {
-  // Print one byte as two hexadecimal digits.
-  static const char hex[] = "0123456789ABCDEF";
-
-  console_putc(hex[value >> 4]);
-  console_putc(hex[value & 0x0f]);
-}
-
 void console_puthex(uint32_t value, unsigned int digits) {
   static const char hex[] = "0123456789ABCDEF";
 
@@ -77,70 +68,6 @@ static void console_puthex64(uint64_t value) {
     unsigned int shift = (15U - i) * 4U;
     console_putc(hex[(value >> shift) & 0x0fU]);
   }
-}
-
-static void cmd_mailbox(const char *args) {
-  if (!end_of_args(args)) {
-    console_puts("Usage: mailbox\n");
-    return;
-  }
-
-  uint32_t revision;
-  uint32_t clock_hz;
-  uint32_t base;
-  uint32_t size;
-  console_puts("Firmware mailbox diagnostics:\n");
-  console_puts("  Board revision : ");
-  if (mailbox_get_board_revision(&revision)) {
-    console_puts("0x");
-    console_puthex(revision, 8);
-    console_putc('\n');
-  } else {
-    console_puts("FAILED\n");
-  }
-  console_puts("  UART clock     : ");
-  if (mailbox_get_clock_rate(
-          MAILBOX_CLOCK_UART, &clock_hz)) {
-    console_putu32(clock_hz);
-    console_puts(" Hz\n");
-  } else {
-    console_puts("FAILED\n");
-  }
-  console_puts("  ARM low memory : ");
-  if (mailbox_get_arm_memory(&base, &size)) {
-    console_putu32(size / (1024U * 1024U));
-    console_puts(" MiB\n");
-  } else {
-    console_puts("FAILED\n");
-  }
-}
-
-static void cmd_timer(const char *args) {
-  if (!end_of_args(args)) {
-    console_puts("Usage: timer\n");
-    return;
-  }
-
-  // This function tells us some interesting information about the timer.
-  uint64_t tick = timer_now_us();
-
-  console_puts("System timer:\n");
-  console_puts("  Counter    : ");
-  console_putu64(tick);
-  console_puts(" ticks\n");
-  console_puts("  Frequency  : 1000000 Hz\n");
-  console_puts("  Resolution : 1 us\n");
-  console_puts("  Elapsed    : ");
-  console_putu64(tick / 1000000U);
-  console_putc('.');
-
-  uint32_t fraction = (uint32_t)(tick % 1000000U);
-  uint32_t divisor = 100000U;
-  while (divisor) {
-    console_putc('0' + (fraction / divisor) % 10U);
-    divisor /= 10U;
-  }
-  console_puts(" seconds since time began.\n");
 }
 
 static void cmd_uptime(const char *args) {
@@ -893,67 +820,6 @@ static const char *usb_link_name(uint8_t state) {
     default: return "Reserved";
   }
 }
-
-static void cmd_usb_ports(void) {
-  uint8_t count;
-  if (!xhci_port_count(&count)) {
-    console_puts("USB root ports unavailable.\n");
-    return;
-  }
-  console_puts("xHCI root ports: ");
-  console_putu32(count);
-  console_putc('\n');
-  for (uint8_t n = 1; n <= count; n++) {
-    xhci_port_t port;
-    if (!xhci_port_read(n, &port)) {
-      console_puts("Unable to inspect port ");
-      console_putu32(n);
-      console_puts(".\n");
-      return;
-    }
-    console_puts("\nPort ");
-    console_putu32(n);
-    console_puts(":\n");
-    console_puts("  PORTSC       : 0x");
-    console_puthex(port.portsc, 8);
-    console_putc('\n');
-    console_puts("  Connected    : ");
-    console_puts(port.connected ? "Yes\n" : "No\n");
-    console_puts("  Enabled      : ");
-    console_puts(port.enabled ? "Yes\n" : "No\n");
-    console_puts("  Powered      : ");
-    console_puts(port.powered ? "Yes\n" : "No\n");
-    console_puts("  Overcurrent  : ");
-    console_puts(port.overcurrent ? "Yes\n" : "No\n");
-    console_puts("  Reset active : ");
-    console_puts(port.resetting ? "Yes\n" : "No\n");
-    console_puts("  Speed        : ");
-    console_puts(usb_speed_name(port.speed));
-    console_putc('\n');
-    console_puts("  Link state   : ");
-    console_puts(usb_link_name(port.link_state));
-    console_putc('\n');
-    console_puts("  Change flags :");
-    bool changed = false;
-#define PRINT_CHANGE(flag, name)                   \
-    if (port.flag) {                               \
-      console_puts(" " name);                      \
-      changed = true;                              \
-    }
-    PRINT_CHANGE(connect_change, "CSC")
-    PRINT_CHANGE(enable_change, "PEC")
-    PRINT_CHANGE(warm_reset_change, "WRC")
-    PRINT_CHANGE(overcurrent_change, "OCC")
-    PRINT_CHANGE(reset_change, "PRC")
-    PRINT_CHANGE(link_change, "PLC")
-    PRINT_CHANGE(config_error_change, "CEC")
-#undef PRINT_CHANGE
-    if (!changed)
-      console_puts(" None");
-    console_putc('\n');
-  }
-}
-
 
 static void cmd_usb_events(void) {
   xhci_event_stats_t stats;
@@ -1740,7 +1606,33 @@ static void cmd_usb_lifecycle_port(void) {
   console_printf("  xHCI owner  : %s\n", owner_name);
 }
 
-static void cmd_usb_topology(void) {
+static void usb_topology_port_detail(const xhci_port_t *port) {
+  console_printf("    PORTSC       : 0x%08x\n", (unsigned int)port->portsc);
+  console_printf("    Overcurrent  : %s\n", port->overcurrent ? "Yes" : "No");
+  console_printf("    Reset active : %s\n", port->resetting ? "Yes" : "No");
+  const struct { bool set; const char *name; } flags[] = {
+    {port->connect_change, "CSC"},
+    {port->enable_change, "PEC"},
+    {port->warm_reset_change, "WRC"},
+    {port->overcurrent_change, "OCC"},
+    {port->reset_change, "PRC"},
+    {port->link_change, "PLC"},
+    {port->config_error_change, "CEC"}
+  };
+  bool changed = false;
+  console_puts("    Change flags :");
+  for (unsigned int i = 0U; i < sizeof(flags) / sizeof(flags[0]); i++) {
+    if (!flags[i].set)
+      continue;
+    console_printf(" %s", flags[i].name);
+    changed = true;
+  }
+  if (!changed)
+    console_puts(" None");
+  console_putc('\n');
+}
+
+static void cmd_usb_topology(bool detail) {
   uint8_t total_ports = 0U;
   if (!xhci_port_count(&total_ports)) {
     console_puts("USB root-port topology unavailable.\n");
@@ -1818,6 +1710,8 @@ static void cmd_usb_topology(void) {
         console_printf( " [internal hub, slot %u, address %u]",
             (unsigned int)root.slot_id, (unsigned int)root.address);
       console_putc('\n');
+      if (detail)
+        usb_topology_port_detail(&port);
     }
     index++;
   }
@@ -2431,8 +2325,16 @@ static void cmd_usb(const char *args) {
   // The VL805 is configured at boot. Subcommands inspect
   // controller state and exercise explicit diagnostics.
   const char *other_args = args;
-  if (next_word_is(&args, "topology") && end_of_args(args)) {
-    cmd_usb_topology();
+  if (next_word_is(&args, "topology")) {
+    if (end_of_args(args)) {
+      cmd_usb_topology(false);
+      return;
+    }
+    if (next_word_is(&args, "detail") && end_of_args(args)) {
+      cmd_usb_topology(true);
+      return;
+    }
+    console_puts("Usage: usb topology [detail]\n");
     return;
   }
   if (next_word_is(&args, "hubirq")) {
@@ -2527,10 +2429,6 @@ static void cmd_usb(const char *args) {
     cmd_usb_events();
     return;
   }
-  if (next_word_is(&args, "ports") && end_of_args(args)) {
-    cmd_usb_ports();
-    return;
-  }
   if (next_word_is(&other_args, "test")) {
     if (next_word_is(&other_args, "ep0match") &&
         end_of_args(other_args)) {
@@ -2580,7 +2478,7 @@ static void cmd_usb(const char *args) {
   }
   if (!end_of_args(args)) {
     console_puts(
-        "Usage: usb [state | ports | events | changes | devices | tolopogy | "
+        "Usage: usb [state | events | changes | devices | topology | "
         "test | recover | transfers | resources | auto | hubirq | "
         "lifecycle | hubports | enumerate | enumstate]\n");
     return;
@@ -3106,52 +3004,6 @@ static void cmd_cache(const char *args) {
   console_puts((mmu.sctlr & (1ULL << 2)) ?  "Enabled\n" : "Disabled\n");
 }
 
-static void cmd_midi(const char *args) {
-  midi_message_t msg;
-  const char *p = args;
-  unsigned int channel, a, b;
-  bool valid = false;
-
-  if (next_word_is(&p, "noteon")) {
-    if (next_uint(&p, &channel) && next_uint(&p, &a) &&
-        next_uint(&p, &b) && end_of_args(p))
-      valid = midi_note_on(&msg, channel, a, b);
-
-  } else if (next_word_is(&p, "noteoff")) {
-    if (next_uint(&p, &channel) && next_uint(&p, &a) &&
-        next_uint(&p, &b) && end_of_args(p))
-      valid = midi_note_off(&msg, channel, a, b);
-
-  } else if (next_word_is(&p, "cc")) {
-    if (next_uint(&p, &channel) && next_uint(&p, &a) &&
-        next_uint(&p, &b) && end_of_args(p))
-      valid = midi_control_change(&msg, channel, a, b);
-
-  } else if (next_word_is(&p, "pc")) {
-    if (next_uint(&p, &channel) && next_uint(&p, &a) &&
-        end_of_args(p))
-      valid = midi_program_change(&msg, channel, a);
-  }
-
-  if (!valid) {
-    console_puts("Invalid MIDI command or arguments.\n");
-    console_puts("Usage:\n");
-    console_puts("  midi noteon  channel note velocity\n");
-    console_puts("  midi noteoff channel note velocity\n");
-    console_puts("  midi cc      channel controller value\n");
-    console_puts("  midi pc      channel program\n");
-    return;
-  }
-
-  console_puts("MIDI: ");
-  for (unsigned int i = 0; i < msg.length; i++) {
-    if (i)
-      console_putc(' ');
-    console_puthex8(msg.data[i]);
-  }
-  console_putc('\n');
-}
-
 typedef struct {
   const char *name;
   console_command_fn handler;
@@ -3159,21 +3011,13 @@ typedef struct {
 } console_command_t;
 
 static void cmd_memory(const char *args) {
-  if (!end_of_args(args)) {
-    console_puts("Usage: memory\n");
-    return;
-  }
-
+  (void)args;
   uint32_t base;
   uint32_t size;
-
-  console_puts("ARM memory allocation:\n");
-  if (!mailbox_get_arm_memory(&base, &size)) {
-    console_puts("  Firmware memory query failed.\n");
-    return;
-  }
-
   uint32_t revision;
+  uint32_t clock_hz;
+
+  console_puts("Firmware mailbox:\n");
   if (mailbox_get_board_revision(&revision)) {
     console_puts("  Board revision : 0x");
     console_puthex(revision, 8);
@@ -3211,8 +3055,16 @@ static void cmd_memory(const char *args) {
   } else {
     console_puts("  Board revision query failed.\n");
   }
-  console_putc('\n');
-
+  console_puts("  UART clock     : ");
+  if (mailbox_get_clock_rate(MAILBOX_CLOCK_UART, &clock_hz))
+    console_printf("%u Hz\n", (unsigned int)clock_hz);
+  else
+    console_puts("FAILED\n");
+  console_puts("\nARM memory allocation:\n");
+  if (!mailbox_get_arm_memory(&base, &size)) {
+    console_puts("  Firmware memory query failed.\n");
+    return;
+  }
   uint64_t end = (uint64_t)base + size;
   uint64_t mapped = mmu_ram_mapped_bytes();
   console_puts("  Base address : 0x");
@@ -3235,11 +3087,9 @@ static void cmd_memory(const char *args) {
 // Commands will be added here as they are implemented.
 // The NULL entry terminates the table.
 static const console_command_t commands[] = {
-  { "mailbox", cmd_mailbox, "Test firmware property mailbox communication" },
-  { "timer",  cmd_timer,  "Display system timer information" },
   { "uptime", cmd_uptime, "Show time since OrgOS started" },
   { "help",   cmd_help,   "List available commands" },
-  { "memory", cmd_memory, "Display firmware ARM memory allocation" },
+  { "memory", cmd_memory, "Inspect firmware mailbox and ARM memory" },
   { "irq", cmd_irq, "Display interrupt statistics" },
   { "fdt", cmd_fdt, "Inspect firmware Device Tree, memory and DMA" },
   { "physmem", cmd_physmem, "Display physical RAM and reservations" },
@@ -3248,7 +3098,6 @@ static const console_command_t commands[] = {
   { "page", cmd_page, "Inspect physical page statistics and run tests" },
   { "dma", cmd_dma, "Run DMA ownership and cache tests" },
   { "usb", cmd_usb, "Inspect and test USB controller and MIDI transport" },
-  { "midi", cmd_midi, "Construct and display MIDI channel messages" },
   { NULL, NULL, NULL }
 };
 
