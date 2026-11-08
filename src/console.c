@@ -1595,6 +1595,11 @@ static void cmd_usb_lifecycle_candidates(void) {
     if (info.port.result == USB_ENUM_PORT_ELIGIBLE) {
       if (info.would_admit) {
         console_puts(" [controller: ready]");
+      } else if (!info.record_ready &&
+          (info.controller.result == USB_ENUM_ADMIT_INITIAL ||
+           info.controller.result == USB_ENUM_ADMIT_RECONNECT) &&
+          info.controller.port == port) {
+        console_puts(" [records: unavailable]");
       } else if (!info.resources_ready &&
           (info.controller.result == USB_ENUM_ADMIT_INITIAL ||
            info.controller.result == USB_ENUM_ADMIT_RECONNECT) &&
