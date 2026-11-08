@@ -210,7 +210,9 @@ typedef struct {
 static bool hub_configuration_attempted;
 static bool hub_configured;
 static bool hub_interrupt_attempted;
-#define XHCI_MAX_DEVICES 2U
+// One permanent internal hub and four downstream contexts.
+// This is storage capacity, not enumeration permission.
+#define XHCI_MAX_DEVICES 5U
 static xhci_device_t devices[XHCI_MAX_DEVICES];
 #define internal_hub devices[0]
 static bool address_attempted;
@@ -1227,7 +1229,7 @@ xhci_configure_result_t xhci_configure(xhci_configure_info_t *result) {
       (state.command & (XHCI_CMD_RUN | XHCI_CMD_HCRST)) ||
       !(state.pagesize & 1U) ||
       info.max_interrupters == 0 ||
-      info.max_slots == 0)
+      info.max_slots < XHCI_MAX_DEVICES)
     return XHCI_CONFIGURE_UNSAFE_STATE;
 
   if (!xhci_dma_prepare(&controller_dma))
