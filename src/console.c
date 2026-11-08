@@ -2275,7 +2275,7 @@ static void cmd_usb_auto_ports(void) {
         (unsigned int)info.selected_port);
   else
     console_puts("  Candidate     : None\n");
-  console_printf("  Controller    : %s\n",
+  console_printf("  Legacy policy : %s\n",
       usb_enum_admission_name(info.controller.result));
   console_printf("  Would admit   : %s\n", info.would_admit ? "Yes" : "No");
   for (unsigned int port = 1U; port <= 4U; port++) {
@@ -2289,7 +2289,7 @@ static void cmd_usb_auto_ports(void) {
       console_printf(" (request %u)", (unsigned int)epoch);
     console_putc('\n');
   }
-  console_puts("  Dispatch      : Compatibility only\n");
+  console_puts("  Dispatch      : Independent per-port\n");
 }
 
 static void cmd_usb_resources(void) {

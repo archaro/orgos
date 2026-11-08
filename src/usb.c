@@ -1127,54 +1127,60 @@ static void usb_lifecycle_service(void) {
 }
 
 static void usb_auto_enum_service(void) {
-  if (!auto_enum.enabled || !auto_enum.pending || usb_lifecycle_any_armed())
+  if (!auto_enum.enabled)
     return;
 
-  // Deferred hub-change inspections are rate-limited.
-  // A new notification or completed lifecycle rearm
-  // can clear this delay and request immediate work.
+  // The per-port requests are now authoritative.
+  auto_enum.pending = auto_enum_port_pending != 0U;
+  if (!auto_enum.pending) {
+    auto_enum_next_check_us = 0ULL;
+    return;
+  }
+
+  // Enumeration and lifecycle hardware operations
+  // remain serialised. A failed lifecycle executor
+  // also prevents further automatic enumeration.
+  if (usb_lifecycle_any_armed() || usb_lifecycle_any_failed())
+    return;
+
+  // Avoid repeatedly inspecting blocked candidates
+  // at foreground-loop speed.
   if (auto_enum_next_check_us != 0ULL &&
       timer_now_us() < auto_enum_next_check_us)
     return;
 
-  usb_enum_admission_info_t admission = {0};
-
-  if (!usb_enum_admission_inspect(&admission)) {
-    auto_enum.pending = false;
-    auto_enum_next_check_us = 0ULL;
+  usb_auto_enum_select_info_t selection = {0};
+  if (!usb_auto_enum_select_inspect(&selection) || !selection.would_admit) {
+    // Keep all pending requests. Admission may become
+    // possible after another device has been released
+    // or a connection-change notification is processed.
+    auto_enum_next_check_us = timer_now_us() + USB_AUTO_ENUM_RECHECK_US;
     return;
   }
 
-  if (admission.result != USB_ENUM_ADMIT_INITIAL &&
-      admission.result != USB_ENUM_ADMIT_RECONNECT) {
-
-    // Pending hub changes can settle without a new
-    // device-generation transition. Keep the request
-    // but avoid repeatedly polling the hub at full
-    // foreground-loop speed.
-    if (admission.result == USB_ENUM_ADMIT_CHANGE_PENDING ||
-        (admission.result == USB_ENUM_ADMIT_RECONNECT_BLOCKED &&
-         admission.reconnect_reason == USB_REENUM_CHANGE_PENDING)) {
-      auto_enum_next_check_us = timer_now_us() + USB_AUTO_ENUM_RECHECK_US;
-      return;
-    }
-
-    // Other refusals consume this request. A new
-    // connection event or completed teardown can
-    // request another check, but this code must not
-    // retry a failed or resource-owning generation.
-    auto_enum.pending = false;
-    auto_enum_next_check_us = 0ULL;
+  uint8_t port = selection.selected_port;
+  uint32_t epoch = usb_auto_enum_port_request_epoch(port);
+  if (port == 0U || epoch == 0U) {
+    auto_enum_next_check_us = timer_now_us() + USB_AUTO_ENUM_RECHECK_US;
     return;
   }
 
-  // Consume the request before enumeration.
-  // Failed enumeration must never be retried
-  // automatically against the same generation.
-  auto_enum.pending = false;
-  auto_enum_next_check_us = 0ULL;
+  // The port-specific entry point repeats all final
+  // admission checks before touching hardware.
   usb_enum_info_t enumeration = {0};
-  usb_enum_result_t result = usb_enumerate(&enumeration);
+  usb_enum_result_t result = usb_enumerate_port(port, &enumeration);
+
+  // An unchanged request means that enumeration did
+  // not consume it. Preserve it for a later admission
+  // check rather than recording a failed attempt.
+  //
+  // An actual attempt consumes its connection epoch,
+  // irrespective of the enumeration result.
+  if (usb_auto_enum_port_request_epoch(port) == epoch) {
+    auto_enum_next_check_us = timer_now_us() + USB_AUTO_ENUM_RECHECK_US;
+    return;
+  }
+
   auto_enum.attempts++;
   auto_enum.last_result = (uint32_t)result;
 
@@ -1182,6 +1188,11 @@ static void usb_auto_enum_service(void) {
     auto_enum.successes++;
   else
     auto_enum.failures++;
+
+  // Other ports may still have outstanding requests.
+  // The next service pass may dispatch another port.
+  auto_enum.pending = auto_enum_port_pending != 0U;
+  auto_enum_next_check_us = 0ULL;
 }
 
 void usb_service(void) {
@@ -1929,18 +1940,18 @@ bool usb_auto_enum_select_inspect(usb_auto_enum_select_info_t *info) {
       info->selected_port = port;
   }
 
-  // Controller-wide admission is independent of
-  // local candidate selection and remains mandatory.
+  // Retain the original controller-wide admission
+  // decision for diagnostic comparison only.
+  //
+  // It no longer authorises automatic enumeration.
   if (!usb_enum_admission_inspect(&info->controller))
-    return false;
+    info->controller.result = USB_ENUM_ADMIT_PORT_FAILED;
 
-  bool controller_ready = info->controller.result == USB_ENUM_ADMIT_INITIAL ||
-      info->controller.result == USB_ENUM_ADMIT_RECONNECT;
-
-  info->would_admit = info->resources_ready &&
-      info->selected_port != 0U && controller_ready &&
-      info->controller.port == info->selected_port;
+  // Actual dispatch admission is now per-port.
+  // Lifecycle ownership remains a global barrier
+  // to enumeration until it is safely released.
+  info->would_admit = info->resources_ready && info->selected_port != 0U &&
+      !usb_lifecycle_any_armed() && !usb_lifecycle_any_failed();
 
   return true;
 }
-
