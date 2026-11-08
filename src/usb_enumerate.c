@@ -627,6 +627,7 @@ static usb_enum_result_t usb_enumerate_record(usb_managed_device_t *record,
 
   // Some enumeration operations are not safe to retry
   // following an uncertain command completion.
+  uint32_t request_epoch = usb_auto_enum_port_request_epoch(admitted_port);
   record->attempted = true;
   usb_enum_info_t state = {0};
   state.stage = USB_ENUM_STAGE_DISCOVER;
@@ -751,7 +752,7 @@ complete:
   // The attempt is now permanently associated
   // with this record until explicit rearm.
   // Consume its request regardless of result.
-  usb_auto_enum_attempt_recorded(admitted_port);
+  usb_auto_enum_attempt_recorded(admitted_port, request_epoch);
 
   return result;
 }

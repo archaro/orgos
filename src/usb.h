@@ -63,7 +63,8 @@ bool usb_auto_enum_ports_seed(uint8_t ports, uint16_t connected);
 // Called only after an enumeration attempt has
 // been recorded against its physical connection.
 // This updates request bookkeeping, not hardware.
-void usb_auto_enum_attempt_recorded(uint8_t port);
+uint32_t usb_auto_enum_port_request_epoch(uint8_t port);
+void usb_auto_enum_attempt_recorded(uint8_t port, uint32_t epoch);
 
 void usb_auto_enum_set_enabled(bool enabled);
 

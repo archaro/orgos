@@ -61,6 +61,10 @@ static usb_auto_enum_info_t auto_enum = {
 static uint16_t auto_enum_port_pending;
 static uint8_t auto_enum_next_port = 1U;
 
+// Incremented for each observed connection change.
+// Zero means that no observation has been recorded.
+static uint32_t auto_enum_port_epoch[5];
+
 // A completed notification may identify several ports.
 // Retain progress until all have been processed.
 static uint16_t change_pending_mask;
@@ -309,6 +313,36 @@ bool usb_auto_enum_ports_get_info(usb_auto_enum_ports_info_t *info) {
   return true;
 }
 
+static void usb_auto_enum_port_observe(uint8_t port, bool connected) {
+  if (port == 0U || port > 4U)
+    return;
+
+  uint16_t bit = (uint16_t)(1U << port);
+
+  // Retire the previous request, if any.
+  auto_enum_port_pending &= (uint16_t)~bit;
+
+  // Never wrap an epoch and accidentally match
+  // an earlier request. Exhaustion fails closed.
+  if (auto_enum_port_epoch[port] == UINT32_MAX)
+    return;
+
+  auto_enum_port_epoch[port]++;
+
+  if (connected)
+    auto_enum_port_pending |= bit;
+}
+
+uint32_t usb_auto_enum_port_request_epoch(uint8_t port) {
+  if (port == 0U || port > 4U)
+    return 0U;
+
+  if (!(auto_enum_port_pending & (1U << port)))
+    return 0U;
+
+  return auto_enum_port_epoch[port];
+}
+
 bool usb_auto_enum_ports_seed(uint8_t ports, uint16_t connected) {
   if (!usb_service_available() || ports == 0U || ports > 4U)
     return false;
@@ -321,8 +355,9 @@ bool usb_auto_enum_ports_seed(uint8_t ports, uint16_t connected) {
   // Our scheduler reserves bit zero and uses
   // the physical port number as its bit index.
   for (uint8_t port = 1U; port <= ports; port++) {
-    if (connected & (1U << (port - 1U)))
-      auto_enum_port_pending |= (uint16_t)(1U << port);
+    uint16_t bit = (uint16_t)(1U << port);
+    if ((connected & (1U << (port - 1U))) && !(auto_enum_port_pending & bit))
+      usb_auto_enum_port_observe(port, true);
   }
 
   // Merge rather than replace: an earlier request
@@ -330,19 +365,18 @@ bool usb_auto_enum_ports_seed(uint8_t ports, uint16_t connected) {
   return true;
 }
 
-void usb_auto_enum_attempt_recorded(uint8_t port) {
+void usb_auto_enum_attempt_recorded(uint8_t port, uint32_t epoch) {
   if (port == 0U || port > 4U)
     return;
 
-  // The attempted connection no longer has a
-  // pending request. Success and failure both
-  // consume it; recovery requires an explicit
-  // lifecycle transition.
-  auto_enum_port_pending &= (uint16_t)~(1U << port);
+  // Consume only the request observed before
+  // this enumeration attempt began.
+  if (epoch != 0U && auto_enum_port_epoch[port] == epoch)
+    auto_enum_port_pending &= (uint16_t)~(1U << port);
 
-  // Start future round-robin selection at the
-  // port following this attempted connection.
-  auto_enum_next_port = port == 4U ?  1U : (uint8_t)(port + 1U);
+  // An actual attempt advances the cursor even
+  // when there was no pending request to consume.
+  auto_enum_next_port = port == 4U ? 1U : (uint8_t)(port + 1U);
 }
 
 static void usb_auto_enum_request(void) {
@@ -487,14 +521,8 @@ static void usb_change_enqueue(uint8_t port, const usb_hub_port_t *status) {
   // The compatibility scheduler still uses its
   // existing controller-wide pending flag.
   if (status->change & 0x0001U) {
-    if (port >= 1U && port <= 4U) {
-      uint16_t bit = (uint16_t)(1U << port);
-      if (status->status & 0x0001U)
-        auto_enum_port_pending |= bit;
-      else
-        auto_enum_port_pending &= (uint16_t)~bit;
-    }
-
+    bool connected = (status->status & 0x0001U) != 0U;
+    usb_auto_enum_port_observe(port, connected);
     usb_auto_enum_request();
   }
 

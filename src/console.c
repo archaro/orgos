@@ -2336,10 +2336,14 @@ static void cmd_usb_auto_ports(void) {
   console_printf("  Would admit   : %s\n", info.would_admit ? "Yes" : "No");
   for (unsigned int port = 1U; port <= 4U; port++) {
     uint16_t bit = (uint16_t)(1U << port);
+    uint32_t epoch = usb_auto_enum_port_request_epoch((uint8_t)port);
     const char *state = "None";
     if (info.pending_ports & bit)
-      state = (info.eligible_ports & bit) ?  "Eligible" : "Blocked";
-    console_printf("  Port %u        : %s\n", port, state);
+      state = (info.eligible_ports & bit) ? "Eligible" : "Blocked";
+    console_printf("  Port %u        : %s", port, state);
+    if (epoch != 0U)
+      console_printf(" (request %u)", (unsigned int)epoch);
+    console_putc('\n');
   }
   console_puts("  Dispatch      : Compatibility only\n");
 }
