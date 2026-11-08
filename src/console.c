@@ -1957,12 +1957,18 @@ static void cmd_usb_test_midiin_stress(const char *args) {
         reset ? "OK" : "NOT READY");
     return;
   }
-  if (next_word_is(&args, "start") && end_of_args(args)) {
-    bool started = usb_midi_in_stress_start();
+  if (next_word_is(&args, "start")) {
+    usb_device_t device = {0};
+    bool selected = usb_test_midi_select(args, &device);
+    bool started = selected &&
+        usb_midi_in_stress_start_generation(device.generation);
     console_printf("USB-MIDI IN stress: %s\n",
         started ? "STARTED" : "NOT READY");
-    if (started)
+    if (started) {
+      console_printf("  Generation: %u\n", (unsigned int)device.generation);
+      console_printf("  Slot      : %u\n", (unsigned int)device.slot_id);
       console_puts("Send 600 test messages from Windows.\n");
+    }
     return;
   }
   if (next_word_is(&args, "status") && end_of_args(args)) {
@@ -2014,7 +2020,8 @@ static void cmd_usb_test_midiin_stress(const char *args) {
           "Too few separate USB transfers; retry with slower MIDI.\n");
     return;
   }
-  console_puts("Usage: usb test midiin stress [start | status | reset]\n");
+  console_puts(
+      "Usage: usb test midiin stress [start [generation] | status | reset]\n");
 }
 
 static const char *usb_bulk_in_arm_result_name(
@@ -2040,23 +2047,44 @@ static const char *usb_bulk_in_arm_result_name(
 }
 
 static void cmd_usb_test_midiin(const char *args) {
-  const char *stress_args = args;
-  if (next_word_is(&stress_args, "stress")) {
-    cmd_usb_test_midiin_stress(stress_args);
+  const char *sub_args = args;
+  if (next_word_is(&sub_args, "stress")) {
+    cmd_usb_test_midiin_stress(sub_args);
     return;
   }
-  // The manual receiver commands operate on the
-  // currently tracked downstream device.
+  // Identify the requested operation before
+  // resolving its optional device generation.
+  enum { MIDI_IN_STREAM, MIDI_IN_READ, MIDI_IN_STATUS } action;
+  sub_args = args;
+  if (next_word_is(&sub_args, "stream")) {
+    action = MIDI_IN_STREAM;
+  } else if (next_word_is(&sub_args, "read")) {
+    action = MIDI_IN_READ;
+  } else if (next_word_is(&sub_args, "status")) {
+    action = MIDI_IN_STATUS;
+  } else {
+    console_puts("Usage: usb test midiin "
+        "[stream [generation] | read [generation] | "
+        "status [generation] | stress]\n");
+    return;
+  }
   usb_device_t device = {0};
-  bool have_slot = usb_get_device(&device) && device.slot_id != 0U;
-  if (next_word_is(&args, "stream") && end_of_args(args)) {
-    usb_enum_info_t enumeration = {0};
-    if (!have_slot ||
-        device.state != USB_DEVICE_ACTIVE ||
-        !usb_get_enumeration(&enumeration) ||
-        enumeration.result != USB_ENUM_OK ||
-        enumeration.slot_id != device.slot_id) {
-      console_puts("No active USB-MIDI device.\n");
+  if (!usb_test_midi_select(sub_args, &device)) {
+    console_puts( "No active USB-MIDI device or invalid generation.\n");
+    return;
+  }
+  console_printf("USB-MIDI IN target: generation %u, slot %u\n",
+      (unsigned int)device.generation, (unsigned int)device.slot_id);
+  // The stress diagnostic owns the receive queue
+  // only for its recorded device incarnation.
+  // Other generations may use their own receivers.
+  usb_midi_in_stress_info_t stress = {0};
+  bool stress_owns_receiver = usb_midi_in_stress_get_info(&stress) &&
+      stress.state != USB_MIDI_IN_STRESS_IDLE &&
+      stress.generation == device.generation;
+  if (action == MIDI_IN_STREAM) {
+    if (stress_owns_receiver) {
+      console_puts("USB-MIDI IN stream owned by stress test.\n");
       return;
     }
     xhci_bulk_in_arm_result_t result =
@@ -2065,58 +2093,62 @@ static void cmd_usb_test_midiin(const char *args) {
         usb_bulk_in_arm_result_name(result), (unsigned int)result);
     return;
   }
-  if (next_word_is(&args, "read") && end_of_args(args)) {
-    usb_midi_in_stress_info_t stress = {0};
-    if (usb_midi_in_stress_get_info(&stress) &&
-        stress.state != USB_MIDI_IN_STRESS_IDLE) {
+  if (action == MIDI_IN_READ) {
+    // Never remove a transfer from the stress
+    // diagnostic's own receive queue.
+    if (stress_owns_receiver) {
       console_puts("USB-MIDI IN stream owned by stress test.\n");
       return;
     }
     xhci_bulk_in_info_t info = {0};
-    if (!have_slot || !xhci_bulk_in_stream_read(device.slot_id, &info)) {
+    if (!xhci_bulk_in_stream_read(device.slot_id, &info)) {
       console_puts("USB-MIDI IN queue empty.\n");
       return;
     }
-    console_printf("USB-MIDI IN transfer:\n");
+    // An xHCI receive completion must identify
+    // the slot from which it was consumed.
+    if (info.slot_id != device.slot_id) {
+      console_puts("USB-MIDI IN transfer: SLOT MISMATCH\n");
+      return;
+    }
+    console_puts("USB-MIDI IN transfer:\n");
     console_printf("  Completion : %u\n", (unsigned int)info.completion_code);
     console_printf("  TRB        : %016llx\n",
         (unsigned long long)info.transfer_trb);
     console_printf("  Received   : %u bytes\n", (unsigned int)info.received);
     if (info.received % 4U != 0U)
       console_puts("  Warning: incomplete USB-MIDI packet.\n");
-    for (uint32_t i = 0U; i + 3U < info.received; i += 4U) {
+    for (uint32_t i = 0U;
+        i + 3U < info.received; i += 4U) {
       console_printf("  Packet %u: %02x %02x %02x %02x\n",
           (unsigned int)(i / 4U), (unsigned int)info.data[i],
-          (unsigned int)info.data[i + 1U], (unsigned int)info.data[i + 2U],
+          (unsigned int)info.data[i + 1U],
+          (unsigned int)info.data[i + 2U],
           (unsigned int)info.data[i + 3U]);
     }
     return;
   }
-  if (next_word_is(&args, "status") && end_of_args(args)) {
-    xhci_bulk_in_stream_stats_t stats = {0};
-    if (!have_slot ||
-        !xhci_bulk_in_stream_get_stats(device.slot_id, &stats) ||
-        !stats.started) {
-      console_puts("USB-MIDI IN stream: NOT STARTED\n");
-      return;
-    }
-    console_printf("USB-MIDI IN stream: %s\n",
-        stats.failed ? "FAILED" : stats.paused ? "PAUSED" : "RUNNING");
-    console_printf("  Queue depth : %u / %u\n",
-        (unsigned int)stats.queue_depth, XHCI_BULK_IN_QUEUE_CAPACITY);
-    console_printf("  Queue peak  : %u\n", (unsigned int)stats.queue_peak);
-    console_printf("  Transfers   : %llu\n",
-        (unsigned long long)stats.transfers);
-    console_printf("  Bytes       : %llu\n", (unsigned long long)stats.bytes);
-    console_printf("  Ring wraps  : %u\n", (unsigned int)stats.ring_wraps);
-    console_printf("  Full pauses : %u\n", (unsigned int)stats.pauses);
-    console_printf("  Last code   : %u\n",
-        (unsigned int)stats.last_completion_code);
-    console_printf("  Last arm    : %u\n",
-        (unsigned int)stats.last_arm_result);
+  // MIDI_IN_STATUS: the selected active generation
+  // owns the stream whose statistics we inspect.
+  xhci_bulk_in_stream_stats_t stats = {0};
+  if (!xhci_bulk_in_stream_get_stats(device.slot_id, &stats) ||
+      !stats.started) {
+    console_puts("USB-MIDI IN stream: NOT STARTED\n");
     return;
   }
-  console_puts("Usage: usb test midiin [status | stream | read | stress]\n");
+  console_printf("USB-MIDI IN stream: %s\n",
+      stats.failed ? "FAILED" : stats.paused ? "PAUSED" : "RUNNING");
+  console_printf("  Queue depth : %u / %u\n",
+      (unsigned int)stats.queue_depth, XHCI_BULK_IN_QUEUE_CAPACITY);
+  console_printf("  Queue peak  : %u\n", (unsigned int)stats.queue_peak);
+  console_printf("  Transfers   : %llu\n",
+      (unsigned long long)stats.transfers);
+  console_printf("  Bytes       : %llu\n", (unsigned long long)stats.bytes);
+  console_printf("  Ring wraps  : %u\n", (unsigned int)stats.ring_wraps);
+  console_printf("  Full pauses : %u\n", (unsigned int)stats.pauses);
+  console_printf("  Last code   : %u\n",
+      (unsigned int)stats.last_completion_code);
+  console_printf("  Last arm    : %u\n", (unsigned int)stats.last_arm_result);
 }
 
 static void cmd_usb_test_midiwrap(const char *args) {
