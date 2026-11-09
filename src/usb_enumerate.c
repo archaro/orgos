@@ -531,8 +531,8 @@ static usb_enum_result_t usb_enumerate_record(usb_managed_device_t *record,
     return USB_ENUM_NOT_READY;
 
   // An attempted enumeration belongs to its
-  // selected record, not to the compatibility
-  // device or some other physical connection.
+  // selected physical connection, not to
+  // another managed device.
   if (record->attempted) {
     *info = record->enumeration;
     return USB_ENUM_ALREADY_ATTEMPTED;
@@ -866,11 +866,9 @@ static bool usb_enumeration_recovery_begin_record(
 
   usb_recovery_info_t recovery = {0};
 
-  // Inspection must concern this exact record,
-  // not whichever device happens to be exposed
-  // through the compatibility interface.
-  if (!usb_enumeration_recovery_inspect_record(
-      record, &recovery))
+  // Inspect exactly this managed record.
+  // Never substitute another device incarnation.
+  if (!usb_enumeration_recovery_inspect_record(record, &recovery))
     return false;
 
   if (recovery.result != USB_RECOVERY_READY &&

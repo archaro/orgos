@@ -17,13 +17,9 @@ typedef enum {
   USB_ENUM_OK,
   USB_ENUM_NOT_READY,
   USB_ENUM_ALREADY_ATTEMPTED,
-  USB_ENUM_HUB_CONFIG_FAILED,
-  USB_ENUM_HUB_CONTEXT_FAILED,
-  USB_ENUM_HUB_POWER_FAILED,
-  USB_ENUM_PORT_FAILED,
+  USB_ENUM_PORT_FAILED = 6,
   USB_ENUM_DEVICE_NOT_FOUND,
-  USB_ENUM_MULTIPLE_DEVICES,
-  USB_ENUM_UNSUPPORTED_SPEED,
+  USB_ENUM_UNSUPPORTED_SPEED = 9,
   USB_ENUM_RESET_FAILED,
   USB_ENUM_SLOT_FAILED,
   USB_ENUM_PREPARE_FAILED,
@@ -98,8 +94,7 @@ bool usb_get_enumeration_generation(
 bool usb_get_enumeration_at(unsigned int index, usb_enum_info_t *info);
 // Read a managed device by table index.
 // Returns false for an unused or out-of-range
-// entry. Never falls back to the compatibility
-// record and never exposes mutable state.
+// entry and never exposes mutable state.
 bool usb_get_device_at(unsigned int index, usb_device_t *device);
 // Inspect the enumeration attempt associated
 // with one physical downstream connection.

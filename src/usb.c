@@ -47,11 +47,9 @@ static usb_auto_enum_info_t auto_enum = {
   .pending = true
 };
 
-// Future multi-port scheduling state.
-//
-// This bookkeeping does not authorise enumeration.
-// The existing controller-wide admission path
-// remains the only operational scheduler.
+// Retain connection requests by physical port.
+// A disconnection cancels an unprocessed request.
+// Wake the per-port scheduler after a change.
 static uint16_t auto_enum_port_pending;
 static uint8_t auto_enum_next_port = 1U;
 
@@ -497,9 +495,7 @@ static void usb_change_enqueue(uint8_t port, const usb_hub_port_t *status) {
 
   // Retain connection requests by physical port.
   // A disconnection cancels an unprocessed request.
-  //
-  // The compatibility scheduler still uses its
-  // existing controller-wide pending flag.
+  // Wake the per-port scheduler after a change.
   if (status->change & 0x0001U) {
     bool connected = (status->status & 0x0001U) != 0U;
     usb_auto_enum_port_observe(port, connected);

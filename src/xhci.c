@@ -3355,12 +3355,11 @@ static xhci_bulk_in_retire_result_t xhci_bulk_in_stream_retire_device(
   return XHCI_BULK_IN_RETIRE_OK;
 }
 
-// Compatibility entry points for the current
-// single managed downstream device.
+// Public Bulk IN operations resolve downstream
+// device contexts by hardware slot ID.
 //
-// Device selection will move into the USB core
-// once multiple device contexts are admitted.
-
+// The stream service visits every assigned
+// downstream context independently.
 xhci_in_reconcile_result_t xhci_bulk_in_quiesced_reconcile( uint8_t slot_id) {
   xhci_device_t *device = xhci_downstream_by_slot(slot_id);
   return xhci_bulk_in_quiesced_reconcile_device(device);
@@ -3500,9 +3499,7 @@ xhci_hub_result_t xhci_hub_configure(
   return XHCI_HUB_OK;
 }
 
-xhci_address_result_t xhci_address_device(
-    xhci_address_info_t *result) {
-
+xhci_address_result_t xhci_address_device( xhci_address_info_t *result) {
   if (!result)
     return XHCI_ADDRESS_NOT_READY;
 
@@ -3525,14 +3522,12 @@ xhci_address_result_t xhci_address_device(
     return XHCI_ADDRESS_NOT_READY;
 
   xhci_port_t port;
-  if (!xhci_port_read(1U, &port) ||
-      !port.connected || !port.enabled || !port.powered ||
-      port.resetting || port.speed != 3U)
+  if (!xhci_port_read(1U, &port) || !port.connected || !port.enabled ||
+      !port.powered || port.resetting || port.speed != 3U)
     return XHCI_ADDRESS_NOT_READY;
 
   xhci_info_t controller;
-  if (!xhci_probe(&controller) ||
-      internal_hub_slot > controller.max_slots)
+  if (!xhci_probe(&controller) || internal_hub_slot > controller.max_slots)
     return XHCI_ADDRESS_NOT_READY;
 
   result->slot_id = internal_hub_slot;
@@ -3620,9 +3615,8 @@ xhci_address_result_t xhci_address_downstream(
   // in the xHCI Output Slot Context.
   if (!hub_configured || !internal_hub.addressed || !device->prepared ||
       device->addressed || device->slot_id == 0U ||
-      device->hub_slot != internal_hub.slot_id ||
-      !controller_running || !controller_verified ||
-      command_outstanding || command_ring_failed)
+      device->hub_slot != internal_hub.slot_id || !controller_running ||
+      !controller_verified || command_outstanding || command_ring_failed)
     return XHCI_ADDRESS_NOT_READY;
 
   if (device->input.owner != DMA_OWNER_DEVICE ||
@@ -3738,9 +3732,8 @@ xhci_ep0_update_result_t xhci_downstream_ep0_update(uint8_t slot_id,
   if (device->lifecycle.ep0_update_attempted)
     return XHCI_EP0_UPDATE_ALREADY_ATTEMPTED;
 
-  if (!device->prepared || !device->addressed ||
-      device->slot_id == 0U || !controller_running ||
-      !controller_verified || command_outstanding ||
+  if (!device->prepared || !device->addressed || device->slot_id == 0U ||
+      !controller_running || !controller_verified || command_outstanding ||
       command_ring_failed || device->ep0_active ||
       device->ep0_failed || max_packet_size != 64U)
     return XHCI_EP0_UPDATE_NOT_READY;
@@ -3876,8 +3869,7 @@ static bool xhci_ep0_prepare(xhci_device_t *device,
   for (unsigned int i = first; i < usable; i++) {
     ring[i].parameter = 0U;
     ring[i].status = 0U;
-    ring[i].control =
-        (XHCI_TRB_NOOP_TRANSFER << XHCI_TRB_TYPE_SHIFT) |
+    ring[i].control = (XHCI_TRB_NOOP_TRANSFER << XHCI_TRB_TYPE_SHIFT) |
         (device->ep0_cycle ? XHCI_TRB_CYCLE : 0U);
   }
 
@@ -3918,9 +3910,8 @@ static bool xhci_ep0_advance(xhci_device_t *device,
 }
 
 
-static xhci_control_result_t xhci_control_transfer(
-    xhci_device_t *device, const xhci_setup_packet_t *setup,
-    xhci_control_info_t *result) {
+static xhci_control_result_t xhci_control_transfer( xhci_device_t *device,
+    const xhci_setup_packet_t *setup, xhci_control_info_t *result) {
 
   if (!result)
     return XHCI_CONTROL_NOT_READY;
@@ -3935,11 +3926,9 @@ static xhci_control_result_t xhci_control_transfer(
 
   bool has_data = setup->length != 0U;
   unsigned int count = has_data ? 3U : 2U;
-  if (!device->addressed || !device->prepared ||
-      device->slot_id == 0U || !controller_running ||
-      !controller_verified || command_outstanding ||
-      command_ring_failed || device->ep0_active ||
-      device->ep0_failed)
+  if (!device->addressed || !device->prepared || device->slot_id == 0U ||
+      !controller_running || !controller_verified || command_outstanding ||
+      command_ring_failed || device->ep0_active || device->ep0_failed)
     return XHCI_CONTROL_NOT_READY;
 
   if (device->ep0_ring.owner != DMA_OWNER_DEVICE)
@@ -3989,10 +3978,8 @@ static xhci_control_result_t xhci_control_transfer(
   xhci_trb_t *ring = device->ep0_ring.virtual;
 
   uint64_t packet = (uint64_t)setup->request_type |
-      ((uint64_t)setup->request << 8) |
-      ((uint64_t)setup->value << 16) |
-      ((uint64_t)setup->index << 32) |
-      ((uint64_t)setup->length << 48);
+      ((uint64_t)setup->request << 8) | ((uint64_t)setup->value << 16) |
+      ((uint64_t)setup->index << 32) | ((uint64_t)setup->length << 48);
   ring[first].parameter = packet;
   ring[first].status = 8U;
   ring[first].control =
@@ -4002,8 +3989,7 @@ static xhci_control_result_t xhci_control_transfer(
   if (has_data) {
     ring[first + 1U].parameter = buffer->bus;
     ring[first + 1U].status = setup->length;
-    ring[first + 1U].control =
-        (XHCI_TRB_DATA_STAGE << XHCI_TRB_TYPE_SHIFT) |
+    ring[first + 1U].control = (XHCI_TRB_DATA_STAGE << XHCI_TRB_TYPE_SHIFT) |
         XHCI_TRB_DIR_IN | cycle_bit;
   }
 
@@ -4222,9 +4208,8 @@ xhci_noop_result_t xhci_noop(xhci_noop_info_t *result) {
   return XHCI_NOOP_UNAVAILABLE;
 }
 
-xhci_interrupt_config_result_t xhci_hub_interrupt_configure(
-    uint8_t address, uint16_t mps, uint8_t interval,
-    xhci_interrupt_config_info_t *info) {
+xhci_interrupt_config_result_t xhci_hub_interrupt_configure(uint8_t address,
+    uint16_t mps, uint8_t interval, xhci_interrupt_config_info_t *info) {
 
   if (!info)
     return XHCI_INTERRUPT_CONFIG_NOT_READY;
@@ -4235,9 +4220,8 @@ xhci_interrupt_config_result_t xhci_hub_interrupt_configure(
     return XHCI_INTERRUPT_CONFIG_ALREADY_ATTEMPTED;
 
   xhci_device_t *device = &internal_hub;
-  if (!hub_configured || !device->prepared ||
-      !device->addressed || device->slot_id == 0U ||
-      !controller_running || !controller_verified ||
+  if (!hub_configured || !device->prepared || !device->addressed ||
+      device->slot_id == 0U || !controller_running || !controller_verified ||
       command_outstanding || command_ring_failed ||
       device->ep0_active || device->ep0_failed)
     return XHCI_INTERRUPT_CONFIG_NOT_READY;
@@ -4258,8 +4242,7 @@ xhci_interrupt_config_result_t xhci_hub_interrupt_configure(
     return XHCI_INTERRUPT_CONFIG_NOT_READY;
 
   cache_info_t cache;
-  if (!cache_get_info(&cache) ||
-      cache.data_line_size == 0U ||
+  if (!cache_get_info(&cache) || cache.data_line_size == 0U ||
       cache.data_line_size > PAGE_SIZE ||
       (cache.data_line_size & (cache.data_line_size - 1U)))
     return XHCI_INTERRUPT_CONFIG_DMA_FAILED;
@@ -4370,9 +4353,7 @@ bool xhci_hub_notify_get_info(xhci_hub_notify_info_t *info) {
   return hub_notify_started;
 }
 
-static bool xhci_hub_notify_publish(
-    unsigned int index, size_t line) {
-
+static bool xhci_hub_notify_publish(unsigned int index, size_t line) {
   xhci_trb_t *ring = internal_hub.interrupt_ring.virtual;
   uintptr_t address = (uintptr_t)&ring[index];
   address &= ~(uintptr_t)(line - 1U);
@@ -4411,15 +4392,13 @@ static bool xhci_hub_notify_advance(size_t line) {
 
 static xhci_hub_notify_result_t xhci_hub_notify_arm(void) {
   xhci_device_t *device = &internal_hub;
-  if (!device->interrupt_ready ||
-      !controller_running || !controller_verified ||
-      dispatch_fault != XHCI_DISPATCH_NONE ||
+  if (!device->interrupt_ready || !controller_running ||
+      !controller_verified || dispatch_fault != XHCI_DISPATCH_NONE ||
       device->interrupt_ring.owner != DMA_OWNER_DEVICE)
     return XHCI_HUB_NOTIFY_NOT_READY;
 
   cache_info_t cache;
-  if (!cache_get_info(&cache) ||
-      cache.data_line_size == 0U ||
+  if (!cache_get_info(&cache) || cache.data_line_size == 0U ||
       cache.data_line_size > PAGE_SIZE ||
       (cache.data_line_size & (cache.data_line_size - 1U)))
     return XHCI_HUB_NOTIFY_NOT_READY;
@@ -4607,13 +4586,11 @@ bool xhci_downstream_ep0_fault_reclaimable(uint8_t slot_id) {
   if (!device)
     return false;
 
-  if (device->slot_id == 0U || !device->addressed ||
-      !controller_running || !controller_verified ||
-      command_outstanding || command_ring_failed ||
+  if (device->slot_id == 0U || !device->addressed || !controller_running ||
+      !controller_verified || command_outstanding || command_ring_failed ||
       dispatch_fault != XHCI_DISPATCH_NONE || device->lifecycle.slot_disabled ||
-      device->ep0_active || !device->ep0_failed ||
-      !device->ep0_submitted || !device->ep0_completion_seen ||
-      device->ep0_completion_code == 0U ||
+      device->ep0_active || !device->ep0_failed || !device->ep0_submitted ||
+      !device->ep0_completion_seen || device->ep0_completion_code == 0U ||
       device->ep0_completion_code == XHCI_COMPLETION_SUCCESS)
     return false;
 
@@ -4806,8 +4783,8 @@ xhci_cleanup_result_t xhci_downstream_cleanup(
   device->bulk_out_ready = false;
   device->prepared = false;
   device->addressed = false;
-
   device->lifecycle.cleaned = true;
+
   return XHCI_CLEANUP_OK;
 }
 
@@ -4832,9 +4809,8 @@ xhci_stop_result_t xhci_downstream_stop_bulk_out(
 
   if (!device->lifecycle.quiesced || device->lifecycle.slot_disabled ||
       !device->addressed || !device->bulk_out_ready ||
-      device->slot_id == 0U || !controller_running ||
-      !controller_verified || command_outstanding ||
-      command_ring_failed)
+      device->slot_id == 0U || !controller_running || !controller_verified ||
+      command_outstanding || command_ring_failed)
     return XHCI_STOP_NOT_READY;
 
   // This first operation is restricted to an idle
@@ -4970,8 +4946,7 @@ xhci_stop_result_t xhci_downstream_stop_bulk_in(
     .parameter = 0U,
     .status = 0U,
     .control = (XHCI_TRB_STOP_ENDPOINT << XHCI_TRB_TYPE_SHIFT) |
-        ((uint32_t)XHCI_BULK_IN_DCI << 16) |
-        ((uint32_t)device->slot_id << 24)
+        ((uint32_t)XHCI_BULK_IN_DCI << 16) | ((uint32_t)device->slot_id << 24)
   };
 
   device->lifecycle.stop_in_attempted = true;
@@ -5032,7 +5007,6 @@ xhci_stop_result_t xhci_downstream_stop_bulk_in(
 
 xhci_disable_result_t xhci_downstream_disable(uint8_t slot_id,
     xhci_disable_info_t *info) {
-
 
   if (!info)
     return XHCI_DISABLE_NOT_READY;

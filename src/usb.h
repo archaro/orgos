@@ -191,10 +191,9 @@ bool usb_enum_port_dispatch_ready(uint8_t port);
 
 // Port-local enumeration prerequisites.
 //
-// ELIGIBLE describes only the physical connection.
-// Enumeration additionally requires resource and
-// managed-record admission. The compatibility
-// entry point retains controller-wide admission.
+// Eligibility describes the physical connection.
+// Enumeration additionally requires managed-record,
+// resource and lifecycle admission.
 typedef enum {
   USB_ENUM_PORT_ELIGIBLE,
   USB_ENUM_PORT_SERVICE_FAILED,
