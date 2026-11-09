@@ -1226,13 +1226,17 @@ bool usb_enumeration_rearm_rejected(uint8_t port) {
       record->device.generation != 0U || record->device.slot_id != 0U)
     return false;
 
-  // This recovery path is exclusively for an
-  // unsupported-speed rejection before Enable
-  // Slot was attempted.
+  // Reclaim a failed discovery attempt only when
+  // no downstream xHCI slot was ever requested.
   //
-  // An uncertain Enable Slot command outcome
-  // must never be discarded by this mechanism.
-  if (record->enumeration.result != USB_ENUM_UNSUPPORTED_SPEED ||
+  // Unsupported speed, debounce failure and reset
+  // failure all occur before Enable Slot. A failed
+  // or uncertain Enable Slot outcome must never
+  // be discarded by this recovery path.
+  usb_enum_result_t result = record->enumeration.result;
+  if ((result != USB_ENUM_UNSUPPORTED_SPEED &&
+       result != USB_ENUM_DEBOUNCE_FAILED &&
+       result != USB_ENUM_RESET_FAILED) ||
       record->enumeration.hub_port != port ||
       record->enumeration.slot_attempted ||
       record->enumeration.slot_confirmed ||
