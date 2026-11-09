@@ -1689,31 +1689,21 @@ static bool usb_test_midi_active_generation(
 }
 
 static bool usb_test_midi_select(const char *args, usb_device_t *device) {
-  if (!args || !device)
+
+  if (!device)
     return false;
+
   *device = (usb_device_t){0};
+
   uint32_t generation = 0U;
-  if (end_of_args(args)) {
-    // Preserve the original console behaviour:
-    // no argument selects the compatibility record.
-    usb_device_t compatibility = {0};
-    if (!usb_get_device(&compatibility))
-      return false;
-    generation = compatibility.generation;
-  } else {
-    unsigned int requested = 0U;
-    // Exactly one positive decimal generation.
-    // Reject trailing words and integer overflow.
-    if (!next_uint(&args, &requested) || !end_of_args(args) ||
-        requested == 0U)
-      return false;
-    generation = (uint32_t)requested;
-  }
-  return usb_test_midi_active_generation( generation, 0U, device);
+  if (!usb_parse_generation(args, &generation))
+    return false;
+
+  return usb_test_midi_active_generation(generation, 0U, device);
 }
 
-static bool usb_test_midi_out_select(const char *args,
-    usb_device_t *device, usb_midi_config_t *midi, unsigned int *cable) {
+static bool usb_test_midi_out_select(const char *args, usb_device_t *device,
+    usb_midi_config_t *midi, unsigned int *cable) {
 
   if (!args || !device || !midi || !cable)
     return false;
@@ -1723,33 +1713,30 @@ static bool usb_test_midi_out_select(const char *args,
   *cable = 0U;
 
   const char *p = args;
-  unsigned int generation = 0U;
-  if (next_uint(&p, &generation)) {
-    if (generation == 0U)
-      return false;
-  } else {
-    // Preserve the existing no-generation
-    // compatibility-device selection.
-    usb_device_t compatibility = {0};
-    if (!usb_get_device(&compatibility))
-      return false;
+  unsigned int requested = 0U;
 
-    generation = compatibility.generation;
+  // Every USB-MIDI OUT test must identify
+  // a specific device incarnation.
+  if (!next_uint(&p, &requested) || requested == 0U)
+    return false;
+
+  uint32_t generation = (uint32_t)requested;
+
+  // The virtual cable is optional.
+  // Cable zero remains the default.
+  if (!end_of_args(p)) {
+    if (!next_word_is(&p, "cable") || !next_uint(&p, cable) ||
+        !end_of_args(p))
+      return false;
   }
 
-  // The cable keyword avoids ambiguity with
-  // the optional device generation.
-  if (!end_of_args(p) && (!next_word_is(&p, "cable") ||
-       !next_uint(&p, cable) || !end_of_args(p)))
+  if (!usb_test_midi_active_generation(generation, 0U, device))
     return false;
 
-  if (!usb_test_midi_active_generation((uint32_t)generation, 0U, device))
-    return false;
-
-  // Use the enumeration record belonging to
-  // this exact device incarnation.
+  // Read the MIDI configuration associated
+  // with the selected device incarnation.
   usb_enum_info_t enumeration = {0};
-  if (!usb_get_enumeration_generation( device->generation, &enumeration) ||
+  if (!usb_get_enumeration_generation(generation, &enumeration) ||
       enumeration.result != USB_ENUM_OK ||
       enumeration.slot_id != device->slot_id ||
       enumeration.hub_port != device->parent_port)
@@ -1765,7 +1752,7 @@ static void cmd_usb_test_midiout(const char *args) {
   unsigned int cable = 0U;
   if (!usb_test_midi_out_select(args, &device, &midi, &cable)) {
     console_puts("No active USB-MIDI device or invalid arguments.\n");
-    console_puts("Usage: usb test midiout [generation] [cable N]\n");
+    console_puts("Usage: usb test midiout <generation> [cable N]\n");
     return;
   }
   const uint8_t on_message[3] = {
@@ -1837,9 +1824,11 @@ static void cmd_usb_test_midiin_stress(const char *args) {
   }
   if (next_word_is(&args, "start")) {
     usb_device_t device = {0};
-    bool selected = usb_test_midi_select(args, &device);
-    bool started = selected &&
-        usb_midi_in_stress_start_generation(device.generation);
+    if (!usb_test_midi_select(args, &device)) {
+      console_puts("Usage: usb test midiin stress start <generation>\n");
+      return;
+    }
+    bool started = usb_midi_in_stress_start_generation(device.generation);
     console_printf("USB-MIDI IN stress: %s\n",
         started ? "STARTED" : "NOT READY");
     if (started) {
@@ -1898,8 +1887,8 @@ static void cmd_usb_test_midiin_stress(const char *args) {
           "Too few separate USB transfers; retry with slower MIDI.\n");
     return;
   }
-  console_puts(
-      "Usage: usb test midiin stress [start [generation] | status | reset]\n");
+    console_puts("Usage: usb test midiin stress "
+      "[start <generation> | status | reset]\n");
 }
 
 static const char *usb_bulk_in_arm_result_name(
@@ -1931,7 +1920,7 @@ static void cmd_usb_test_midiin(const char *args) {
     return;
   }
   // Identify the requested operation before
-  // resolving its optional device generation.
+  // resolving its mandatory device generation.
   enum { MIDI_IN_STREAM, MIDI_IN_READ, MIDI_IN_STATUS } action;
   sub_args = args;
   if (next_word_is(&sub_args, "stream")) {
@@ -1942,13 +1931,14 @@ static void cmd_usb_test_midiin(const char *args) {
     action = MIDI_IN_STATUS;
   } else {
     console_puts("Usage: usb test midiin "
-        "[stream [generation] | read [generation] | "
-        "status [generation] | stress]\n");
+        "[stream | read | status] <generation>\n");
     return;
   }
   usb_device_t device = {0};
   if (!usb_test_midi_select(sub_args, &device)) {
-    console_puts( "No active USB-MIDI device or invalid generation.\n");
+    console_puts("No active USB-MIDI device or invalid generation.\n");
+    console_puts("Usage: usb test midiin "
+        "[stream | read | status] <generation>\n");
     return;
   }
   console_printf("USB-MIDI IN target: generation %u, slot %u\n",
@@ -2035,7 +2025,7 @@ static void cmd_usb_test_midiwrap(const char *args) {
   unsigned int cable = 0U;
   if (!usb_test_midi_out_select( args, &device, &midi, &cable)) {
     console_puts("No active USB-MIDI device or invalid arguments.\n");
-    console_puts("Usage: usb test midiwrap [generation] [cable N]\n");
+    console_puts("Usage: usb test midiwrap <generation> [cable N]\n");
     return;
   }
   const uint8_t message[3] = {0xbfU, 0x66U, 0x00U};
