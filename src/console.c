@@ -1236,23 +1236,37 @@ static const char *usb_recovery_result_name(
   }
 }
 
-static void cmd_usb_recover_status(void) {
-  usb_recovery_info_t info = {0};
-  if (!usb_enumeration_recovery_inspect(&info)) {
-    console_puts("USB recovery inspection failed.\n");
+static bool usb_parse_generation(const char *args, uint32_t *generation) {
+  if (!args || !generation)
+    return false;
+  unsigned int value = 0U;
+  if (!next_uint(&args, &value) || value == 0U || !end_of_args(args))
+    return false;
+  *generation = (uint32_t)value;
+  return true;
+}
+
+static void cmd_usb_recover_status(const char *args) {
+  uint32_t generation = 0U;
+  if (!usb_parse_generation(args, &generation)) {
+    console_puts("Usage: usb recover status <generation>\n");
     return;
   }
-  console_puts("USB enumeration recovery:\n");
+  usb_recovery_info_t info = {0};
+  if (!usb_enumeration_recovery_inspect_generation(generation, &info)) {
+    console_puts("USB recovery generation unavailable.\n");
+    return;
+  }
+  console_printf("USB enumeration recovery (generation %u):\n",
+      (unsigned int)generation);
   console_printf("  Decision   : %s\n",
       usb_recovery_result_name(info.result));
-  console_printf("  Generation : %u\n", (unsigned int)info.generation);
   console_printf("  Slot       : %u\n", (unsigned int)info.slot_id);
   console_printf("  Submitted  : %s\n", info.ep0_submitted ? "Yes" : "No");
   console_printf("  Completed  : %s\n",
       info.ep0_completion_seen ? "Yes" : "No");
   console_printf("  Code       : %u\n",
       (unsigned int)info.ep0_completion_code);
-
   if (info.ep0_state_valid) {
     console_printf("  EP0 state  : %s (%u)\n",
         xhci_ep_state_name(info.ep0_state), (unsigned int)info.ep0_state);
@@ -1261,42 +1275,58 @@ static void cmd_usb_recover_status(void) {
   }
 }
 
-static void cmd_usb_recover(void) {
+static void cmd_usb_recover(const char *args) {
+  uint32_t generation = 0U;
+  if (!usb_parse_generation(args, &generation)) {
+    console_puts("Usage: usb recover <generation>\n");
+    return;
+  }
   if (!usb_service_available()) {
     console_puts("USB recovery: SERVICE UNAVAILABLE\n");
     return;
   }
-  usb_device_t device = {0};
   usb_recovery_info_t recovery = {0};
-  if (!usb_get_device(&device) || device.generation == 0U ||
-      !usb_enumeration_recovery_inspect_generation(device.generation, &recovery) ||
+  if (!usb_enumeration_recovery_inspect_generation(generation, &recovery) ||
       (recovery.result != USB_RECOVERY_READY &&
        recovery.result != USB_RECOVERY_READY_EP0_ERROR)) {
     console_puts("USB recovery: NOT READY\n");
     return;
   }
-  if (!usb_enumeration_recovery_begin_generation(
-      device.generation)) {
+  if (!usb_enumeration_recovery_begin_generation(generation)) {
     console_puts("USB recovery: FAILED\n");
     return;
   }
-  if (!usb_lifecycle_arm_generation(device.generation)) {
+  if (!usb_lifecycle_arm_generation(generation)) {
     console_puts("USB recovery: QUIESCED, NOT ARMED\n");
     return;
   }
-  console_puts("USB recovery: STARTED\n");
+  console_printf("USB recovery: STARTED (generation %u)\n",
+      (unsigned int)generation);
 }
 
-static void cmd_usb_transfers(void) {
+static void cmd_usb_transfers(const char *args) {
+  uint32_t generation = 0U;
+  if (!usb_parse_generation(args, &generation)) {
+    console_puts("Usage: usb transfers <generation>\n");
+    return;
+  }
   usb_device_t device = {0};
+  usb_device_t slot_owner = {0};
   xhci_downstream_transfer_state_t state = {0};
-
-  if (!usb_get_device(&device) || device.slot_id == 0U ||
-      !xhci_downstream_transfer_state(device.slot_id, &state)) {
+  if (!usb_get_device_by_generation(generation, &device) ||
+      device.slot_id == 0U ||
+      !usb_get_device_by_slot(device.slot_id, &slot_owner) ||
+      slot_owner.generation != generation ||
+      slot_owner.root_port != device.root_port ||
+      slot_owner.parent_slot != device.parent_slot ||
+      slot_owner.parent_port != device.parent_port ||
+      !xhci_downstream_transfer_state(device.slot_id, &state) ||
+      state.slot_id != device.slot_id) {
     console_puts("Transfer state unavailable.\n");
     return;
   }
-  console_puts("Downstream xHCI transfers:\n");
+  console_printf("Downstream xHCI transfers (generation %u):\n",
+      (unsigned int)generation);
   console_printf("  Slot          : %u\n", (unsigned int)state.slot_id);
   console_printf("  Quiesced      : %s\n", state.quiesced ? "Yes" : "No");
   console_printf("  Active waiters: %u\n",
@@ -2525,15 +2555,11 @@ static void cmd_usb(const char *args) {
     return;
   }
   if (next_word_is(&args, "recover")) {
-    if (end_of_args(args)) {
-      cmd_usb_recover();
+    if (next_word_is(&args, "status")) {
+      cmd_usb_recover_status(args);
       return;
     }
-    if (next_word_is(&args, "status") && end_of_args(args)) {
-      cmd_usb_recover_status();
-      return;
-    }
-    console_puts("Usage: usb recover [status]\n");
+    cmd_usb_recover(args);
     return;
   }
   if (next_word_is(&args, "lifecycle")) {
@@ -2565,8 +2591,8 @@ static void cmd_usb(const char *args) {
     cmd_usb_resources();
     return;
   }
-  if (next_word_is(&args, "transfers") && end_of_args(args)) {
-    cmd_usb_transfers();
+  if (next_word_is(&args, "transfers")) {
+    cmd_usb_transfers(args);
     return;
   }
   if (next_word_is(&args, "changes")) {
