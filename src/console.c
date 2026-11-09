@@ -723,27 +723,9 @@ static void usb_test_delay_ms(uint32_t milliseconds) {
   }
 }
 
-static void cmd_usb_test_quiesce(void) {
-  bool quiesced = usb_device_test_quiesce();
-  console_printf("USB test quiesce: %s\n", quiesced ? "OK" : "NOT READY");
-}
-
 static void cmd_usb_test_ep0match(void) {
   bool passed = xhci_ep0_match_selftest();
   console_printf("EP0 TD matching: %s\n", passed ? "PASS" : "FAILED");
-}
-
-static void cmd_usb_test_enumabort(void) {
-  bool armed = usb_enumeration_test_abort_arm();
-  console_printf("USB enumeration test abort: %s\n",
-      armed ? "ARMED" : "NOT READY");
-}
-
-static void cmd_usb_test_enumconfigabort(void) {
-  bool armed = usb_enumeration_test_config_abort_arm();
-
-  console_printf("USB configuration test abort: %s\n",
-      armed ? "ARMED" : "NOT READY");
 }
 
 static void cmd_usb_test_noops(void) {
@@ -2395,24 +2377,9 @@ static void cmd_usb(const char *args) {
       cmd_usb_test_ep0match();
       return;
     }
-    if (next_word_is(&other_args, "enumabort") &&
-        end_of_args(other_args)) {
-      cmd_usb_test_enumabort();
-      return;
-    }
-    if (next_word_is(&other_args, "enumconfigabort") &&
-        end_of_args(other_args)) {
-      cmd_usb_test_enumconfigabort();
-      return;
-    }
     if (next_word_is(&other_args, "noops") &&
         end_of_args(other_args)) {
       cmd_usb_test_noops();
-      return;
-    }
-    if (next_word_is(&other_args, "quiesce") &&
-        end_of_args(other_args)) {
-      cmd_usb_test_quiesce();
       return;
     }
     if (next_word_is(&other_args, "midiout")) {
@@ -2428,8 +2395,8 @@ static void cmd_usb(const char *args) {
       return;
     }
     console_puts(
-        "Usage: usb test [ep0match | enumabort | enumconfigabort | "
-        "noops | quiesce | midiout | midiwrap | midiin]\n");
+        "Usage: usb test [ep0match | "
+        "noops | midiout | midiwrap | midiin]\n");
     return;
   }
   if (next_word_is(&args, "state") && end_of_args(args)) {

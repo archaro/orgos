@@ -30,15 +30,6 @@ typedef struct {
 // Released records may be reused after lifecycle teardown.
 static usb_managed_device_t managed_devices[USB_MANAGED_DEVICE_CAPACITY];
 
-// Legacy compatibility owner for the original
-// single-device inspection and test interfaces.
-// Independent enumeration and the multi-device
-// inventory use explicitly selected records.
-static usb_managed_device_t *const managed_device = &managed_devices[0];
-
-static bool test_abort_after_address;
-static bool test_abort_after_config;
-
 // Generations must be unique across all device
 // incarnations, regardless of physical port.
 static uint32_t device_generation;
@@ -606,14 +597,6 @@ static usb_enum_result_t usb_enumerate_record(usb_managed_device_t *record,
 
   state.stage = USB_ENUM_STAGE_DEVICE_DESCRIPTOR;
 
-  // Diagnostic: leave a confirmed, addressed
-  // downstream slot for controlled recovery.
-  if (test_abort_after_address) {
-    test_abort_after_address = false;
-    result = USB_ENUM_TEST_ABORT;
-    goto complete;
-  }
-
   result = read_device(&state);
   if (result != USB_ENUM_OK)
     goto complete;
@@ -626,15 +609,6 @@ static usb_enum_result_t usb_enumerate_record(usb_managed_device_t *record,
   result = read_configuration(&state);
   if (result != USB_ENUM_OK)
     goto complete;
-
-  // Diagnostic: descriptor transfers and parsing
-  // succeeded, but enumeration stops before the
-  // device configuration is selected.
-  if (test_abort_after_config) {
-    test_abort_after_config = false;
-    result = USB_ENUM_TEST_CONFIG_ABORT;
-    goto complete;
-  }
 
   state.stage = USB_ENUM_STAGE_SELECT_CONFIGURATION;
   result = select_configuration(&state);
@@ -712,14 +686,6 @@ usb_enum_result_t usb_enumerate_port(uint8_t port, usb_enum_info_t *info) {
   // enumeration. Its attempt and connection-epoch
   // bookkeeping remain unchanged.
   return usb_enumerate_record(record, &root, port, hub.ports, info);
-}
-
-bool usb_get_device(usb_device_t *device) {
-  if (!device || !managed_device->valid)
-    return false;
-
-  *device = managed_device->device;
-  return true;
 }
 
 bool usb_get_device_at( unsigned int index, usb_device_t *device) {
@@ -877,15 +843,6 @@ static bool usb_enumeration_recovery_inspect_record(
   return true;
 }
 
-bool usb_enumeration_recovery_inspect(
-    usb_recovery_info_t *info) {
-
-  // Compatibility inspection also handles failures
-  // which occurred before a generation was assigned.
-  return usb_enumeration_recovery_inspect_record(
-      managed_device, info);
-}
-
 bool usb_enumeration_recovery_inspect_generation(
     uint32_t generation, usb_recovery_info_t *info) {
 
@@ -941,41 +898,6 @@ static bool usb_enumeration_recovery_begin_record(
 bool usb_enumeration_recovery_begin_generation(uint32_t generation) {
   return usb_enumeration_recovery_begin_record(
       usb_managed_by_generation(generation));
-}
-
-bool usb_device_test_quiesce(void) {
-  if (!managed_device->valid || managed_device->device.state != USB_DEVICE_ACTIVE ||
-      managed_device->device.slot_id == 0U ||
-      xhci_downstream_is_quiesced(managed_device->device.slot_id))
-    return false;
-
-  xhci_downstream_transfer_state_t state = {0};
-  if (!xhci_downstream_transfer_state(managed_device->device.slot_id, &state))
-    return false;
-
-  // Require exactly one outstanding Bulk IN
-  // transfer, with no other active operations.
-  if (state.slot_id != managed_device->device.slot_id || !state.bulk_in_started ||
-      !state.bulk_in_pending || state.bulk_in_completed ||
-      state.bulk_in_failed || state.active_waiters != 1U ||
-      state.ep0_active || state.bulk_out_active)
-    return false;
-
-  // Verify that the endpoint is Running before
-  // deliberately interrupting its operation.
-  if (!state.endpoint_states_valid || state.bulk_in_ep_state != 1U)
-    return false;
-
-  // This is an irreversible transition for
-  // the current device generation.
-  if (!xhci_downstream_quiesce(managed_device->device.slot_id))
-    return false;
-
-  // Present the same software lifecycle state
-  // as an actual downstream disconnection.
-  managed_device->device.state = USB_DEVICE_DISCONNECTING;
-
-  return true;
 }
 
 void usb_device_port_changed(uint8_t port, uint16_t status, uint16_t change) {
@@ -1139,24 +1061,6 @@ bool usb_enumeration_rearm_rejected(uint8_t port) {
   // Discard only this enumeration-attempt record.
   *record = (usb_managed_device_t){0};
 
-  return true;
-}
-
-bool usb_enumeration_test_abort_arm(void) {
-  if (managed_device->attempted || test_abort_after_address ||
-      test_abort_after_config)
-    return false;
-
-  test_abort_after_address = true;
-  return true;
-}
-
-bool usb_enumeration_test_config_abort_arm(void) {
-  if (managed_device->attempted || test_abort_after_address ||
-      test_abort_after_config)
-    return false;
-
-  test_abort_after_config = true;
   return true;
 }
 

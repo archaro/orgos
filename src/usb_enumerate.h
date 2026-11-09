@@ -37,9 +37,7 @@ typedef enum {
   USB_ENUM_BULK_CONFIG_FAILED,
   USB_ENUM_SET_INTERFACE_FAILED,
   USB_ENUM_MIDI_QUIRK_FAILED,
-  USB_ENUM_DEBOUNCE_FAILED,
-  USB_ENUM_TEST_ABORT,
-  USB_ENUM_TEST_CONFIG_ABORT
+  USB_ENUM_DEBOUNCE_FAILED
 } usb_enum_result_t;
 
 typedef enum {
@@ -98,7 +96,6 @@ bool usb_get_enumeration_generation(
 // record index, including attempts which failed
 // before generation or slot assignment.
 bool usb_get_enumeration_at(unsigned int index, usb_enum_info_t *info);
-bool usb_get_device(usb_device_t *device);
 // Read a managed device by table index.
 // Returns false for an unused or out-of-range
 // entry. Never falls back to the compatibility
@@ -143,15 +140,12 @@ typedef struct {
   uint8_t ep0_state;
 } usb_recovery_info_t;
 
-bool usb_enumeration_recovery_inspect(usb_recovery_info_t *info);
-// Generation-specific recovery interfaces.
-// These reject unknown device incarnations and
-// never fall back to the compatibility record.
+// Recovery inspection for one explicitly selected
+// device incarnation. Unknown generations are rejected.
 bool usb_enumeration_recovery_inspect_generation(
     uint32_t generation, usb_recovery_info_t *info);
 bool usb_enumeration_recovery_begin_generation( uint32_t generation);
 
-bool usb_device_test_quiesce(void);
 void usb_device_port_changed(uint8_t port, uint16_t status, uint16_t change);
 // Teardown operations selected by the lifecycle
 // executor's retained device incarnation.
@@ -159,5 +153,3 @@ bool usb_device_finalize_disconnect_generation(
     uint32_t generation, uint8_t slot_id);
 bool usb_enumeration_rearm_generation(uint32_t generation);
 bool usb_enumeration_rearm_rejected(uint8_t port);
-bool usb_enumeration_test_abort_arm(void);
-bool usb_enumeration_test_config_abort_arm(void);
