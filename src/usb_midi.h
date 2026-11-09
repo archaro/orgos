@@ -20,6 +20,27 @@ typedef struct {
 
 #define USB_MIDI_MAX_CABLES 16U
 
+// One decoded USB-MIDI 1.0 event packet.
+//
+// The length field identifies the valid bytes
+// in data[]. Unused entries are zeroed.
+//
+// CIN is retained because it distinguishes
+// complete messages from SysEx fragments.
+typedef struct {
+  uint8_t cable;
+  uint8_t cin;
+  uint8_t length;
+  uint8_t data[3];
+} usb_midi_event_t;
+
+// Decode one four-byte USB-MIDI event packet.
+//
+// Reserved CIN values are rejected. This does
+// not validate MIDI message semantics or assemble
+// multi-packet SysEx messages.
+bool usb_midi_decode_packet(const uint8_t packet[4], usb_midi_event_t *event);
+
 // Encode one USB-MIDI 1.0 event packet for a
 // device's advertised Bulk OUT virtual cable.
 //

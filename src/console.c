@@ -3011,6 +3011,77 @@ static void cmd_memory(const char *args) {
   }
 }
 
+static int midi_hex_digit(char c) {
+  if (c >= '0' && c <= '9')
+    return c - '0';
+
+  if (c >= 'a' && c <= 'f')
+    return c - 'a' + 10;
+
+  if (c >= 'A' && c <= 'F')
+    return c - 'A' + 10;
+
+  return -1;
+}
+
+static bool midi_next_hex_byte(const char **input,
+    uint8_t *value) {
+
+  if (!input || !*input || !value)
+    return false;
+
+  const char *p = *input;
+
+  while (*p == ' ' || *p == '\t')
+    p++;
+
+  int high = midi_hex_digit(p[0]);
+
+  if (high < 0)
+    return false;
+
+  int low = midi_hex_digit(p[1]);
+
+  if (low < 0)
+    return false;
+
+  if (p[2] != '\0' && p[2] != ' ' && p[2] != '\t')
+    return false;
+
+  *value = (uint8_t)((high << 4) | low);
+  *input = p + 2;
+
+  return true;
+}
+
+static void cmd_midi(const char *args) {
+  uint8_t packet[4] = {0};
+  if (!next_word_is(&args, "decode") ||
+      !midi_next_hex_byte(&args, &packet[0]) ||
+      !midi_next_hex_byte(&args, &packet[1]) ||
+      !midi_next_hex_byte(&args, &packet[2]) ||
+      !midi_next_hex_byte(&args, &packet[3]) ||
+      !end_of_args(args)) {
+    console_puts("Usage: midi decode <hh> <hh> <hh> <hh>\n");
+    return;
+  }
+  usb_midi_event_t event = {0};
+  if (!usb_midi_decode_packet(packet, &event)) {
+    console_puts("USB-MIDI: reserved or invalid CIN.\n");
+    return;
+  }
+  console_puts("USB-MIDI decoded event:\n");
+  console_printf("  Cable  : %u\n", (unsigned int)event.cable);
+  console_printf("  CIN    : 0x%01x\n", (unsigned int)event.cin);
+  console_printf("  Length : %u\n", (unsigned int)event.length);
+  console_puts("  Data   :");
+  for (unsigned int i = 0U; i < event.length; i++) {
+    console_putc(' ');
+    console_puthex(event.data[i], 2U);
+  }
+  console_putc('\n');
+}
+
 // Commands will be added here as they are implemented.
 // The NULL entry terminates the table.
 static const console_command_t commands[] = {
@@ -3025,6 +3096,7 @@ static const console_command_t commands[] = {
   { "page", cmd_page, "Inspect physical page statistics and run tests" },
   { "dma", cmd_dma, "Run DMA ownership and cache tests" },
   { "usb", cmd_usb, "Inspect and test USB controller and MIDI transport" },
+  { "midi", cmd_midi, "Decode USB-MIDI event packets" },
   { NULL, NULL, NULL }
 };
 

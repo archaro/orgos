@@ -27,6 +27,43 @@ bool usb_midi_out_packet(const usb_midi_config_t *config, unsigned int cable,
   return true;
 }
 
+bool usb_midi_decode_packet(const uint8_t packet[4],
+    usb_midi_event_t *event) {
+
+  // USB-MIDI 1.0, Table 4-1:
+  // valid MIDI data bytes for each CIN.
+  // CIN 0 and 1 are reserved.
+  static const uint8_t cin_lengths[16] = {
+    0U, 0U, 2U, 3U,
+    3U, 1U, 2U, 3U,
+    3U, 3U, 3U, 3U,
+    2U, 2U, 3U, 1U
+  };
+
+  if (!event)
+    return false;
+
+  *event = (usb_midi_event_t){0};
+
+  if (!packet)
+    return false;
+
+  uint8_t cable = packet[0] >> 4U;
+  uint8_t cin = packet[0] & 0x0fU;
+
+  uint8_t length = cin_lengths[cin];
+  if (length == 0U)
+    return false;
+
+  event->cable = cable;
+  event->cin = cin;
+  event->length = length;
+  for (uint8_t i = 0U; i < length; i++)
+    event->data[i] = packet[i + 1U];
+
+  return true;
+}
+
 bool usb_midi_parse_config(const uint8_t *data,
     unsigned int length, usb_midi_config_t *result) {
 
