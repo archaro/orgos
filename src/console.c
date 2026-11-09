@@ -1369,43 +1369,6 @@ static void cmd_usb_transfers(const char *args) {
   }
 }
 
-static const char *usb_reenum_result_name(usb_reenum_result_t result) {
-  switch (result) {
-    case USB_REENUM_READY:
-      return "Ready";
-    case USB_REENUM_SERVICE_FAILED:
-      return "USB service unavailable";
-    case USB_REENUM_HUB_FAILED:
-      return "Hub monitoring failed";
-    case USB_REENUM_NO_HISTORY:
-      return "No previous generation";
-    case USB_REENUM_DEVICE_OWNED:
-      return "Previous device still owns resources";
-    case USB_REENUM_EXECUTOR_ACTIVE:
-      return "Lifecycle executor active";
-    case USB_REENUM_EXECUTOR_FAILED:
-      return "Lifecycle executor failed";
-    case USB_REENUM_NOT_REARMED:
-      return "Enumeration not rearmed";
-    case USB_REENUM_XHCI_BUSY:
-      return "xHCI teardown incomplete";
-    case USB_REENUM_PORT_UNAVAILABLE:
-      return "Port status unavailable";
-    case USB_REENUM_DISCONNECTED:
-      return "Port disconnected";
-    case USB_REENUM_NOT_POWERED:
-      return "Port not powered";
-    case USB_REENUM_CHANGE_PENDING:
-      return "Hub changes pending";
-    case USB_REENUM_MULTIPLE_DEVICES:
-      return "Multiple connected devices";
-    case USB_REENUM_UNMANAGED_ROOT:
-      return "Only unmanaged root-port devices connected";
-    default:
-      return "Unknown";
-  }
-}
-
 static const char *usb_lifecycle_action_name(usb_lifecycle_action_t action) {
   switch (action) {
     case USB_LIFECYCLE_IDLE: return "Idle";
@@ -1420,180 +1383,6 @@ static const char *usb_lifecycle_action_name(usb_lifecycle_action_t action) {
     case USB_LIFECYCLE_BLOCKED: return "Blocked";
     default: return "Unknown";
   }
-}
-
-static const char *usb_enum_admission_name(usb_enum_admission_result_t result) {
-  switch (result) {
-    case USB_ENUM_ADMIT_INITIAL:
-      return "Ready for initial enumeration";
-    case USB_ENUM_ADMIT_RECONNECT:
-      return "Ready for re-enumeration";
-    case USB_ENUM_ADMIT_SERVICE_FAILED:
-      return "USB service unavailable";
-    case USB_ENUM_ADMIT_HUB_FAILED:
-      return "Hub monitoring failed";
-    case USB_ENUM_ADMIT_HUB_NOT_READY:
-      return "Hub not initialised";
-    case USB_ENUM_ADMIT_ALREADY_ATTEMPTED:
-      return "Enumeration already attempted";
-    case USB_ENUM_ADMIT_XHCI_BUSY:
-      return "xHCI downstream state busy";
-    case USB_ENUM_ADMIT_NO_DEVICE:
-      return "No connected device";
-    case USB_ENUM_ADMIT_MULTIPLE_DEVICES:
-      return "Multiple connected devices";
-    case USB_ENUM_ADMIT_PORT_FAILED:
-      return "Port inspection failed";
-    case USB_ENUM_ADMIT_CHANGE_PENDING:
-      return "Hub change pending";
-    case USB_ENUM_ADMIT_RECONNECT_BLOCKED:
-      return "Re-enumeration blocked";
-    case USB_ENUM_ADMIT_UNMANAGED_ROOT:
-      return "No managed device; unmanaged root device present";
-    default:
-      return "Unknown";
-  }
-}
-
-static void cmd_usb_lifecycle_admission(void) {
-  usb_enum_admission_info_t info = {0};
-  if (!usb_enum_admission_inspect(&info)) {
-    console_puts("Enumeration admission unavailable.\n");
-    return;
-  }
-  console_puts("USB enumeration admission:\n");
-  console_printf("  Decision       : %s\n",
-      usb_enum_admission_name(info.result));
-  if (info.result == USB_ENUM_ADMIT_ALREADY_ATTEMPTED)
-    console_puts( "  Note           : Result already recorded; "
-        "see usb enumstate.\n");
-  usb_device_t device = {0};
-  if (usb_get_device(&device)) {
-    console_printf("  Device state   : %s\n",
-        usb_device_state_name(device.state));
-    console_printf("  Generation     : %u\n",
-        (unsigned int)device.generation);
-    console_printf("  Tracked port  : %u\n",
-        (unsigned int)device.parent_port);
-  } else {
-    console_puts("  Previous device: None\n");
-  }
-  if (info.result == USB_ENUM_ADMIT_INITIAL ||
-      info.result == USB_ENUM_ADMIT_RECONNECT) {
-    console_printf("  Candidate port : %u\n", (unsigned int)info.port);
-  }
-  if (info.result == USB_ENUM_ADMIT_INITIAL ||
-      info.result == USB_ENUM_ADMIT_RECONNECT ||
-      info.result == USB_ENUM_ADMIT_NO_DEVICE ||
-      info.result == USB_ENUM_ADMIT_MULTIPLE_DEVICES ||
-      info.result == USB_ENUM_ADMIT_UNMANAGED_ROOT) {
-    console_printf("  Hub devices    : %u\n",
-        (unsigned int)info.connected_count);
-    console_printf("  Other roots    : %u\n",
-        (unsigned int)info.unmanaged_root_count);
-  }
-  if (info.result == USB_ENUM_ADMIT_RECONNECT_BLOCKED) {
-    console_printf("  Reason         : %s\n",
-        usb_reenum_result_name(info.reconnect_reason));
-    if (info.reconnect_reason == USB_REENUM_MULTIPLE_DEVICES ||
-        info.reconnect_reason == USB_REENUM_DISCONNECTED ||
-        info.reconnect_reason == USB_REENUM_UNMANAGED_ROOT) {
-      console_printf("  Hub devices    : %u\n",
-          (unsigned int)info.connected_count);
-      console_printf("  Other roots    : %u\n",
-          (unsigned int)info.unmanaged_root_count);
-    }
-  }
-}
-
-static const char *usb_enum_port_result_name(
-    usb_enum_port_result_t result) {
-
-  switch (result) {
-    case USB_ENUM_PORT_ELIGIBLE:
-      return "Eligible";
-    case USB_ENUM_PORT_SERVICE_FAILED:
-      return "Service unavailable";
-    case USB_ENUM_PORT_HUB_FAILED:
-      return "Hub monitoring failed";
-    case USB_ENUM_PORT_HUB_NOT_READY:
-      return "Hub unavailable";
-    case USB_ENUM_PORT_INVALID:
-      return "Invalid port";
-    case USB_ENUM_PORT_STATUS_FAILED:
-      return "Port status unavailable";
-    case USB_ENUM_PORT_CHANGE_PENDING:
-      return "Change pending";
-    case USB_ENUM_PORT_DISCONNECTED:
-      return "Disconnected";
-    case USB_ENUM_PORT_NOT_POWERED:
-      return "Not powered";
-    case USB_ENUM_PORT_OVERCURRENT:
-      return "Overcurrent";
-    case USB_ENUM_PORT_RESETTING:
-      return "Resetting";
-    case USB_ENUM_PORT_AMBIGUOUS:
-      return "Ambiguous ownership";
-    case USB_ENUM_PORT_ALREADY_ATTEMPTED:
-      return "Enumeration attempted";
-    case USB_ENUM_PORT_DEVICE_OWNED:
-      return "Managed device owns port";
-    case USB_ENUM_PORT_UNSAFE_HISTORY:
-      return "Uncertain device history";
-    case USB_ENUM_PORT_XHCI_OWNED:
-      return "xHCI context owned";
-    case USB_ENUM_PORT_XHCI_UNCERTAIN:
-      return "Uncertain xHCI ownership";
-    default:
-      return "Unknown";
-  }
-}
-
-static void cmd_usb_lifecycle_candidates(void) {
-  usb_hub_init_info_t hub = {0};
-  if (!usb_hub_get_init_info(&hub) || hub.result != USB_HUB_INIT_OK ||
-      hub.ports == 0U || hub.ports > 4U) {
-    console_puts("USB downstream hub unavailable.\n");
-    return;
-  }
-  console_puts("USB enumeration candidates:\n");
-  for (uint8_t port = 1U; port <= hub.ports; port++) {
-    usb_enum_candidate_info_t info = {0};
-    if (!usb_enum_candidate_inspect(port, &info)) {
-      console_printf("  Port %u: Inspection failed\n", (unsigned int)port);
-      continue;
-    }
-    console_printf("  Port %u: %s",
-        (unsigned int)port, usb_enum_port_result_name(info.port.result));
-    if (info.port.generation != 0U)
-      console_printf(" (generation %u)", (unsigned int)info.port.generation);
-    if (info.port.result == USB_ENUM_PORT_ELIGIBLE) {
-      if (info.would_admit) {
-        console_puts(" [controller: ready]");
-      } else if (!info.record_ready &&
-          (info.controller.result == USB_ENUM_ADMIT_INITIAL ||
-           info.controller.result == USB_ENUM_ADMIT_RECONNECT) &&
-          info.controller.port == port) {
-        console_puts(" [records: unavailable]");
-      } else if (!info.resources_ready &&
-          (info.controller.result == USB_ENUM_ADMIT_INITIAL ||
-           info.controller.result == USB_ENUM_ADMIT_RECONNECT) &&
-           info.controller.port == port) {
-        console_puts(" [resources: unavailable]");
-      } else if (
-          info.controller.result == USB_ENUM_ADMIT_INITIAL ||
-          info.controller.result == USB_ENUM_ADMIT_RECONNECT) {
-        console_printf(" [controller selects port %u]",
-            (unsigned int)info.controller.port);
-      } else {
-        console_printf(" [controller: %s]",
-            usb_enum_admission_name(info.controller.result));
-      }
-    }
-    console_putc('\n');
-  }
-  console_puts("Legacy controller-wide candidate assessment only; "
-      "automatic enumeration uses usb auto ports.\n");
 }
 
 static const char *usb_lifecycle_run_name(
@@ -2424,8 +2213,6 @@ static void cmd_usb_auto_ports(void) {
         (unsigned int)info.selected_port);
   else
     console_puts("  Candidate     : None\n");
-  console_printf("  Legacy policy : %s\n",
-      usb_enum_admission_name(info.controller.result));
   console_printf("  Would admit   : %s\n", info.would_admit ? "Yes" : "No");
   for (unsigned int port = 1U; port <= 4U; port++) {
     uint16_t bit = (uint16_t)(1U << port);
@@ -2560,17 +2347,8 @@ static void cmd_usb(const char *args) {
       cmd_usb_lifecycle_port(args);
       return;
     }
-    if (next_word_is(&args, "admission") && end_of_args(args)) {
-      cmd_usb_lifecycle_admission();
-      return;
-    }
-    if (next_word_is(&args, "candidates") && end_of_args(args)) {
-      cmd_usb_lifecycle_candidates();
-      return;
-    }
-    console_puts(
-        "Usage: usb lifecycle [status <generation> | port <generation> | "
-        "admission | candidates]\n");
+    console_puts("Usage: usb lifecycle "
+        "[status <generation> | port <generation>]\n");
     return;
   }
   if (next_word_is(&args, "resources") && end_of_args(args)) {

@@ -288,27 +288,12 @@ typedef struct {
 // enumeration, lifecycle or ownership state.
 bool usb_enum_port_inspect(uint8_t port, usb_enum_port_info_t *info);
 
-// Read-only combination of port-local eligibility
-// and the existing controller-wide admission policy.
+// Read-only snapshot of independent per-port
+// automatic enumeration scheduling.
 //
-// would_admit is a diagnostic assessment, not
-// authorisation to begin enumeration. The observations
-// are not an atomic hardware snapshot.
-typedef struct {
-  usb_enum_port_info_t port;
-  usb_enum_admission_info_t controller;
-  bool resources_ready;
-  bool record_ready;
-  bool would_admit;
-} usb_enum_candidate_info_t;
-
-bool usb_enum_candidate_inspect(
-    uint8_t port, usb_enum_candidate_info_t *info);
-
-// Read-only preview of future multi-port scheduling.
-//
-// The selected port satisfies local eligibility,
-// but that does not grant controller admission.
+// This is diagnostic information, not permission
+// to enumerate. Final admission is checked again
+// immediately before hardware operations.
 typedef struct {
   uint16_t pending_ports;
   uint16_t eligible_ports;
@@ -317,7 +302,6 @@ typedef struct {
   uint8_t selected_port;
   unsigned int free_contexts;
   unsigned int waiter_headroom;
-  usb_enum_admission_info_t controller;
   bool resources_ready;
   bool would_admit;
 } usb_auto_enum_select_info_t;

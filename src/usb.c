@@ -1813,53 +1813,6 @@ bool usb_enum_port_dispatch_ready(uint8_t port) {
   return usb_enum_resource_ready(&contexts, &waiters);
 }
 
-bool usb_enum_candidate_inspect(
-    uint8_t port, usb_enum_candidate_info_t *info) {
-
-  if (!info)
-    return false;
-
-  *info = (usb_enum_candidate_info_t){0};
-
-  // Establish the selected port's local state.
-  if (!usb_enum_port_inspect(port, &info->port))
-    return false;
-
-  // Independently obtain the existing
-  // controller-wide admission decision.
-  if (!usb_enum_admission_inspect(&info->controller))
-    return false;
-
-  unsigned int free_contexts = 0U;
-  unsigned int waiter_headroom = 0U;
-
-  info->resources_ready = usb_enum_resource_ready(
-      &free_contexts, &waiter_headroom);
-
-  if (info->port.result == USB_ENUM_PORT_ELIGIBLE) {
-    usb_init_info_t root = {0};
-
-    if (!usb_get_init_info(&root) || root.result != USB_INIT_OK ||
-        root.root_port == 0U || root.slot_id == 0U)
-      return false;
-
-    info->record_ready = usb_managed_record_available(
-        root.root_port, root.slot_id, port);
-  }
-
-  bool controller_ready = info->controller.result == USB_ENUM_ADMIT_INITIAL ||
-      info->controller.result == USB_ENUM_ADMIT_RECONNECT;
-
-  // Both decisions must concern the same port.
-  // A READY decision for another port never
-  // authorises this candidate.
-  info->would_admit = info->port.result == USB_ENUM_PORT_ELIGIBLE &&
-      controller_ready && info->controller.port == port &&
-      info->resources_ready && info->record_ready;
-
-  return true;
-}
-
 bool usb_auto_enum_select_inspect(usb_auto_enum_select_info_t *info) {
   if (!info)
     return false;
@@ -1916,13 +1869,6 @@ bool usb_auto_enum_select_inspect(usb_auto_enum_select_info_t *info) {
     if (info->selected_port == 0U)
       info->selected_port = port;
   }
-
-  // Retain the original controller-wide admission
-  // decision for diagnostic comparison only.
-  //
-  // It no longer authorises automatic enumeration.
-  if (!usb_enum_admission_inspect(&info->controller))
-    info->controller.result = USB_ENUM_ADMIT_PORT_FAILED;
 
   // Actual dispatch admission is now per-port.
   // Lifecycle ownership remains a global barrier
