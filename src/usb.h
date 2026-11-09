@@ -189,66 +189,6 @@ bool usb_lifecycle_port_inspect_generation(
 // The caller must still perform final record selection.
 bool usb_enum_port_dispatch_ready(uint8_t port);
 
-typedef enum {
-  USB_REENUM_READY,
-  USB_REENUM_SERVICE_FAILED,
-  USB_REENUM_HUB_FAILED,
-  USB_REENUM_NO_HISTORY,
-  USB_REENUM_DEVICE_OWNED,
-  USB_REENUM_EXECUTOR_ACTIVE,
-  USB_REENUM_EXECUTOR_FAILED,
-  USB_REENUM_NOT_REARMED,
-  USB_REENUM_XHCI_BUSY,
-  USB_REENUM_PORT_UNAVAILABLE,
-  USB_REENUM_DISCONNECTED,
-  USB_REENUM_NOT_POWERED,
-  USB_REENUM_CHANGE_PENDING,
-  USB_REENUM_MULTIPLE_DEVICES,
-  USB_REENUM_UNMANAGED_ROOT
-} usb_reenum_result_t;
-
-typedef struct {
-  usb_reenum_result_t result;
-  uint32_t generation;
-  uint8_t port;
-  uint8_t previous_port;
-  uint8_t connected_count;
-  usb_device_state_t device_state;
-  uint16_t port_status;
-  uint16_t port_change;
-  bool enumeration_attempted;
-  uint8_t unmanaged_root_count;
-} usb_reenum_info_t;
-
-bool usb_reenum_inspect(usb_reenum_info_t *info);
-
-typedef enum {
-  USB_ENUM_ADMIT_INITIAL,
-  USB_ENUM_ADMIT_RECONNECT,
-  USB_ENUM_ADMIT_SERVICE_FAILED,
-  USB_ENUM_ADMIT_HUB_FAILED,
-  USB_ENUM_ADMIT_HUB_NOT_READY,
-  USB_ENUM_ADMIT_ALREADY_ATTEMPTED,
-  USB_ENUM_ADMIT_XHCI_BUSY,
-  USB_ENUM_ADMIT_NO_DEVICE,
-  USB_ENUM_ADMIT_MULTIPLE_DEVICES,
-  USB_ENUM_ADMIT_PORT_FAILED,
-  USB_ENUM_ADMIT_CHANGE_PENDING,
-  USB_ENUM_ADMIT_RECONNECT_BLOCKED,
-  USB_ENUM_ADMIT_UNMANAGED_ROOT
-} usb_enum_admission_result_t;
-
-typedef struct {
-  usb_enum_admission_result_t result;
-  usb_reenum_result_t reconnect_reason;
-  uint32_t generation;
-  uint8_t port;
-  uint8_t connected_count;
-  uint8_t unmanaged_root_count;
-} usb_enum_admission_info_t;
-
-bool usb_enum_admission_inspect(usb_enum_admission_info_t *info);
-
 // Port-local enumeration prerequisites.
 //
 // ELIGIBLE describes only the physical connection.

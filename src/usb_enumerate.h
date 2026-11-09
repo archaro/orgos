@@ -79,13 +79,10 @@ typedef struct {
   xhci_control_result_t ep0_result;
 } usb_enum_info_t;
 
-usb_enum_result_t usb_enumerate(usb_enum_info_t *info);
-
-// Explicit enumeration of one internal hub port.
-// Does not impose the compatibility whole-hub
-// single-device restriction.
+// Enumerate one independently admitted internal
+// hub port, without whole-hub device restrictions.
 //
-// Only a successfully admitted connection can
+// Only a safely admitted physical connection can
 // acquire a managed-device record or xHCI slot.
 usb_enum_result_t usb_enumerate_port(uint8_t port, usb_enum_info_t *info);
 
