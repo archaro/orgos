@@ -18,9 +18,10 @@
 #include "xhci.h"
 #include "usb.h"
 #include "usb_hub.h"
+#include "usb_enumerate.h"
 #include "usb_midi.h"
 #include "usb_midi_rx.h"
-#include "usb_enumerate.h"
+#include "midi_monitor.h"
 #include "usb_midi_test.h"
 
 #define CONSOLE_LINE_SIZE 256
@@ -3162,6 +3163,61 @@ static void cmd_midi_rx(const char *args) {
   console_putc('\n');
 }
 
+static void cmd_midi_monitor(const char *args) {
+  enum { MONITOR_START, MONITOR_STOP, MONITOR_STATUS } action;
+  if (next_word_is(&args, "start")) {
+    action = MONITOR_START;
+  } else if (next_word_is(&args, "stop")) {
+    action = MONITOR_STOP;
+  } else if (next_word_is(&args, "status")) {
+    action = MONITOR_STATUS;
+  } else {
+    console_puts("Usage: midi monitor "
+        "[start | stop | status] <generation>\n");
+    return;
+  }
+  uint32_t generation = 0U;
+  if (!usb_parse_generation(args, &generation)) {
+    console_puts("Usage: midi monitor "
+        "[start | stop | status] <generation>\n");
+    return;
+  }
+  if (action == MONITOR_START) {
+    bool started = midi_monitor_start(generation);
+    console_printf("MIDI monitor: %s\n", started ? "ATTACHED" : "NOT READY");
+    return;
+  }
+  if (action == MONITOR_STOP) {
+    bool stopped = midi_monitor_stop(generation);
+    console_printf("MIDI monitor: %s\n", stopped ? "DETACHED" : "NOT READY");
+    return;
+  }
+  midi_monitor_info_t info = {0};
+  if (!midi_monitor_get_info(generation, &info)) {
+    console_puts("MIDI monitor unavailable.\n");
+    return;
+  }
+  console_printf("MIDI monitor (generation %u):\n", (unsigned int)generation);
+  console_printf("  Attached : %s\n", info.attached ? "Yes" : "No");
+  console_printf("  Events   : %llu\n", (unsigned long long)info.events);
+  for (unsigned int cable = 0U; cable < USB_MIDI_MAX_CABLES; cable++) {
+    if (info.by_cable[cable] == 0U)
+      continue;
+    console_printf("  Cable %u  : %llu events\n",
+        cable, (unsigned long long)info.by_cable[cable]);
+  }
+  if (!info.have_last)
+    return;
+  console_printf("  Last     : cable %u, CIN 0x%x\n",
+      (unsigned int)info.last.cable, (unsigned int)info.last.cin);
+  console_puts("  Data     :");
+  for (unsigned int i = 0U; i < info.last.length; i++) {
+    console_putc(' ');
+    console_puthex(info.last.data[i], 2U);
+  }
+  console_putc('\n');
+}
+
 static void cmd_midi(const char *args) {
   if (next_word_is(&args, "decode")) {
     cmd_midi_decode(args);
@@ -3171,7 +3227,11 @@ static void cmd_midi(const char *args) {
     cmd_midi_rx(args);
     return;
   }
-  console_puts("Usage: midi [decode | rx]\n");
+  if (next_word_is(&args, "monitor")) {
+    cmd_midi_monitor(args);
+    return;
+  }
+  console_puts("Usage: midi [decode | rx | monitor]\n");
 }
 
 // Commands will be added here as they are implemented.
@@ -3188,7 +3248,7 @@ static const console_command_t commands[] = {
   { "page", cmd_page, "Inspect physical page statistics and run tests" },
   { "dma", cmd_dma, "Run DMA ownership and cache tests" },
   { "usb", cmd_usb, "Inspect and test USB controller and MIDI transport" },
-  { "midi", cmd_midi, "Decode and receive USB-MIDI events" },
+  { "midi", cmd_midi, "Decode, receive and monitor USB-MIDI events" },
   { NULL, NULL, NULL }
 };
 

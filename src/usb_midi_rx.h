@@ -44,6 +44,24 @@ bool usb_midi_rx_get_info(uint32_t generation, usb_midi_rx_info_t *info);
 // active device's receive queue.
 bool usb_midi_rx_read(uint32_t generation, usb_midi_event_t *event);
 
+// Return true only when the event has been accepted.
+// Returning false retains the event at the FIFO head.
+//
+// Callbacks execute in the USB foreground service.
+// They must not block, recurse into usb_service(),
+// or change the receiver's subscription.
+typedef bool (*usb_midi_rx_consumer_t)(uint32_t generation,
+    const usb_midi_event_t *event, void *context);
+
+// Attach exactly one consumer to an active receiver.
+// The consumer exclusively owns its event FIFO.
+bool usb_midi_rx_subscribe(uint32_t generation,
+    usb_midi_rx_consumer_t consumer, void *context);
+
+// Release only the specified consumer's subscription.
+bool usb_midi_rx_unsubscribe(uint32_t generation,
+    usb_midi_rx_consumer_t consumer, void *context);
+
 // Service all persistent receivers.
 // Called from the USB foreground service loop.
 void usb_midi_rx_service(void);

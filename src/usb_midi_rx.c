@@ -16,6 +16,8 @@ typedef struct {
   usb_midi_rx_info_t info;
   usb_midi_event_t queue[USB_MIDI_RX_QUEUE_CAPACITY];
   unsigned int head;
+  usb_midi_rx_consumer_t consumer;
+  void *consumer_context;
   usb_midi_event_t staged[MIDI_EVENTS_PER_TRANSFER];
   unsigned int staged_index;
   unsigned int staged_count;
@@ -173,7 +175,6 @@ bool usb_midi_rx_get_info(uint32_t generation, usb_midi_rx_info_t *info) {
 }
 
 bool usb_midi_rx_read(uint32_t generation, usb_midi_event_t *event) {
-
   if (!event)
     return false;
 
@@ -182,13 +183,46 @@ bool usb_midi_rx_read(uint32_t generation, usb_midi_event_t *event) {
   unsigned int index = 0U;
   usb_midi_rx_record_t *rx = rx_find(generation, &index);
 
-  if (!rx || rx->info.state != USB_MIDI_RX_RUNNING ||
-      !rx_owner_matches(index, rx) || rx->info.queue_depth == 0U)
+    if (!rx || rx->info.state != USB_MIDI_RX_RUNNING ||
+      !rx_owner_matches(index, rx) || rx->consumer ||
+      rx->info.queue_depth == 0U)
     return false;
 
   *event = rx->queue[rx->head];
   rx->head = (rx->head + 1U) % USB_MIDI_RX_QUEUE_CAPACITY;
   rx->info.queue_depth--;
+
+  return true;
+}
+
+bool usb_midi_rx_subscribe(uint32_t generation,
+    usb_midi_rx_consumer_t consumer, void *context) {
+
+  if (!consumer)
+    return false;
+
+  unsigned int index = 0U;
+  usb_midi_rx_record_t *rx = rx_find(generation, &index);
+  if (!rx || rx->info.state != USB_MIDI_RX_RUNNING ||
+      rx->consumer || !rx_owner_matches(index, rx))
+    return false;
+
+  rx->consumer = consumer;
+  rx->consumer_context = context;
+
+  return true;
+}
+
+bool usb_midi_rx_unsubscribe(uint32_t generation,
+    usb_midi_rx_consumer_t consumer, void *context) {
+
+  usb_midi_rx_record_t *rx = rx_find(generation, NULL);
+  if (!rx || !consumer || rx->consumer != consumer ||
+      rx->consumer_context != context)
+    return false;
+
+  rx->consumer = NULL;
+  rx->consumer_context = NULL;
 
   return true;
 }
@@ -275,6 +309,23 @@ void usb_midi_rx_service(void) {
 
       if (rx->info.queue_depth > rx->info.queue_peak)
         rx->info.queue_peak = rx->info.queue_depth;
+    }
+
+    // Deliver queued events to the exclusive
+    // consumer in FIFO order.
+    //
+    // A declined event remains at the head.
+    // The next service pass may retry it.
+    if (rx->info.state != USB_MIDI_RX_RUNNING || !rx->consumer)
+      continue;
+
+    while (rx->info.queue_depth != 0U) {
+      const usb_midi_event_t *event = &rx->queue[rx->head];
+      if (!rx->consumer(rx->info.generation, event, rx->consumer_context))
+        break;
+
+      rx->head = (rx->head + 1U) % USB_MIDI_RX_QUEUE_CAPACITY;
+      rx->info.queue_depth--;
     }
   }
 }
