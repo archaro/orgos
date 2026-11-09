@@ -480,13 +480,6 @@ static usb_enum_result_t configure_bulk( usb_enum_info_t *state) {
   return USB_ENUM_OK;
 }
 
-bool usb_get_enumeration(usb_enum_info_t *info) {
-  if (!info)
-    return false;
-  *info = managed_device->enumeration;
-  return managed_device->attempted;
-}
-
 bool usb_get_enumeration_generation(
     uint32_t generation, usb_enum_info_t *info) {
 

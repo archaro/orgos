@@ -1143,13 +1143,26 @@ static const char *xhci_ep_state_name(uint8_t state) {
   }
 }
 
-static void cmd_usb_enumstate(void) {
-  usb_enum_info_t info = {0};
-  if (!usb_get_enumeration(&info)) {
-    console_puts("No enumeration attempt recorded.\n");
+static void cmd_usb_enumstate(const char *args) {
+  unsigned int index = 0U;
+  if (!next_word_is(&args, "record") || !next_uint(&args, &index) ||
+      !end_of_args(args) || index >= USB_MANAGED_DEVICE_CAPACITY) {
+    console_puts("Usage: usb enumstate record <0-3>\n");
     return;
   }
-  console_puts("USB enumeration state:\n");
+  usb_enum_info_t info = {0};
+  if (!usb_get_enumeration_at(index, &info)) {
+    console_printf("No enumeration attempt recorded for record %u.\n", index);
+    return;
+  }
+  usb_device_t device = {0};
+  bool have_device = usb_get_device_at(index, &device);
+  console_printf("USB enumeration state (record %u):\n", index);
+  if (have_device && device.generation != 0U) {
+    console_printf("  Generation   : %u\n", (unsigned int)device.generation);
+  } else {
+    console_puts("  Generation   : Not assigned\n");
+  }
   console_printf("  Result       : %u\n", (unsigned int)info.result);
   console_printf("  Detail       : 0x%08x\n", (unsigned int)info.detail);
   console_printf("  Stage        : %s\n", usb_enum_stage_name(info.stage));
@@ -1165,25 +1178,34 @@ static void cmd_usb_enumstate(void) {
   console_printf("  EP0 failed   : %s\n",
       info.ep0_operation_failed ? "Yes" : "No");
   console_printf("  EP0 result   : %u\n", (unsigned int)info.ep0_result);
+  // Inspect hardware endpoint state only when
+  // the slot still belongs to this exact record.
+  usb_device_t owner = {0};
   xhci_downstream_transfer_state_t transfers = {0};
-  if (xhci_downstream_transfer_state(info.slot_id, &transfers) &&
-      transfers.slot_id == info.slot_id && info.slot_id != 0U) {
-    if (transfers.ep0_state_valid) {
-      console_printf("  EP0 endpoint : %s (%u)\n",
-          xhci_ep_state_name(transfers.ep0_state),
-          (unsigned int)transfers.ep0_state);
-    } else {
-      console_puts("  EP0 endpoint : Unavailable\n");
-    }
-    console_printf("  EP0 submitted: %s\n",
-        transfers.ep0_submitted ? "Yes" : "No");
-    console_printf("  EP0 complete : %s\n",
-        transfers.ep0_completion_seen ? "Yes" : "No");
-    console_printf("  EP0 code     : %u\n",
-        (unsigned int)transfers.ep0_completion_code);
-    console_printf("  EP0 latched  : %s\n",
-        transfers.ep0_failed ? "Yes" : "No");
+  if (info.slot_id == 0U || !have_device || device.slot_id != info.slot_id ||
+      !usb_get_device_by_slot(info.slot_id, &owner) ||
+      owner.generation != device.generation ||
+      owner.root_port != device.root_port ||
+      owner.parent_slot != device.parent_slot ||
+      owner.parent_port != device.parent_port ||
+      !xhci_downstream_transfer_state(info.slot_id, &transfers) ||
+      transfers.slot_id != info.slot_id)
+    return;
+  if (transfers.ep0_state_valid) {
+    console_printf("  EP0 endpoint : %s (%u)\n",
+        xhci_ep_state_name(transfers.ep0_state),
+        (unsigned int)transfers.ep0_state);
+  } else {
+    console_puts("  EP0 endpoint : Unavailable\n");
   }
+  console_printf("  EP0 submitted: %s\n",
+      transfers.ep0_submitted ? "Yes" : "No");
+  console_printf("  EP0 complete : %s\n",
+      transfers.ep0_completion_seen ? "Yes" : "No");
+  console_printf("  EP0 code     : %u\n",
+      (unsigned int)transfers.ep0_completion_code);
+  console_printf("  EP0 latched  : %s\n",
+      transfers.ep0_failed ? "Yes" : "No");
 }
 
 static const char *usb_recovery_result_name(
@@ -2365,8 +2387,8 @@ static void cmd_usb(const char *args) {
     cmd_usb_enumerate(args);
     return;
   }
-  if (next_word_is(&args, "enumstate") && end_of_args(args)) {
-    cmd_usb_enumstate();
+  if (next_word_is(&args, "enumstate")) {
+    cmd_usb_enumstate(args);
     return;
   }
   if (next_word_is(&args, "hubports") && end_of_args(args)) {
