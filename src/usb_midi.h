@@ -18,6 +18,17 @@ typedef struct {
   bool out_found;
 } usb_midi_config_t;
 
+#define USB_MIDI_MAX_CABLES 16U
+
+// Encode one USB-MIDI 1.0 event packet for a
+// device's advertised Bulk OUT virtual cable.
+//
+// The caller supplies the correct CIN and three
+// MIDI payload bytes, including any required
+// zero padding.
+bool usb_midi_out_packet(const usb_midi_config_t *config, unsigned int cable,
+    unsigned int cin, const uint8_t message[3], uint8_t packet[4]);
+
 bool usb_midi_parse_config(const uint8_t *data,
     unsigned int length, usb_midi_config_t *result);
 

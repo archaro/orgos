@@ -8,6 +8,25 @@ static uint16_t read_u16(const uint8_t *p) {
   return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
 }
 
+bool usb_midi_out_packet(const usb_midi_config_t *config, unsigned int cable,
+    unsigned int cin, const uint8_t message[3], uint8_t packet[4]) {
+  if (!config || !message || !packet || !config->out_found ||
+      config->bulk_out_jacks == 0U ||
+      config->bulk_out_jacks > USB_MIDI_MAX_CABLES ||
+      cable >= config->bulk_out_jacks || cin > 0x0fU)
+    return false;
+
+  // USB-MIDI 1.0 packet header:
+  // bits 7..4 = virtual cable number
+  // bits 3..0 = Code Index Number (CIN)
+  packet[0] = (uint8_t)((cable << 4U) | cin);
+  packet[1] = message[0];
+  packet[2] = message[1];
+  packet[3] = message[2];
+
+  return true;
+}
+
 bool usb_midi_parse_config(const uint8_t *data,
     unsigned int length, usb_midi_config_t *result) {
 

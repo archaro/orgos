@@ -1900,16 +1900,84 @@ static bool usb_test_midi_select(const char *args, usb_device_t *device) {
   return usb_test_midi_active_generation( generation, 0U, device);
 }
 
+static bool usb_test_midi_out_select(const char *args,
+    usb_device_t *device, usb_midi_config_t *midi, unsigned int *cable) {
+
+  if (!args || !device || !midi || !cable)
+    return false;
+
+  *device = (usb_device_t){0};
+  *midi = (usb_midi_config_t){0};
+  *cable = 0U;
+
+  const char *p = args;
+  unsigned int generation = 0U;
+  if (next_uint(&p, &generation)) {
+    if (generation == 0U)
+      return false;
+  } else {
+    // Preserve the existing no-generation
+    // compatibility-device selection.
+    usb_device_t compatibility = {0};
+    if (!usb_get_device(&compatibility))
+      return false;
+
+    generation = compatibility.generation;
+  }
+
+  // The cable keyword avoids ambiguity with
+  // the optional device generation.
+  if (!end_of_args(p) && (!next_word_is(&p, "cable") ||
+       !next_uint(&p, cable) || !end_of_args(p)))
+    return false;
+
+  if (!usb_test_midi_active_generation((uint32_t)generation, 0U, device))
+    return false;
+
+  // Use the enumeration record belonging to
+  // this exact device incarnation.
+  usb_enum_info_t enumeration = {0};
+  if (!usb_get_enumeration_generation( device->generation, &enumeration) ||
+      enumeration.result != USB_ENUM_OK ||
+      enumeration.slot_id != device->slot_id ||
+      enumeration.hub_port != device->parent_port)
+    return false;
+
+  *midi = enumeration.midi;
+  return true;
+}
+
 static void cmd_usb_test_midiout(const char *args) {
   usb_device_t device = {0};
-  if (!usb_test_midi_select(args, &device)) {
-    console_puts( "No active USB-MIDI device or invalid generation.\n");
+  usb_midi_config_t midi = {0};
+  unsigned int cable = 0U;
+  if (!usb_test_midi_out_select(args, &device, &midi, &cable)) {
+    console_puts("No active USB-MIDI device or invalid arguments.\n");
+    console_puts("Usage: usb test midiout [generation] [cable N]\n");
     return;
   }
-  console_printf("USB-MIDI target: generation %u, slot %u\n",
-      (unsigned int)device.generation, (unsigned int)device.slot_id);
-  const uint8_t note_on[4] = {0x09U, 0x90U, 0x3cU, 0x64U};
-  const uint8_t note_off[4] = {0x08U, 0x80U, 0x3cU, 0x00U};
+  const uint8_t on_message[3] = {
+    0x90U, 0x3cU, 0x64U
+  };
+  const uint8_t off_message[3] = {
+    0x80U, 0x3cU, 0x00U
+  };
+  uint8_t note_on[4] = {0};
+  uint8_t note_off[4] = {0};
+  if (!usb_midi_out_packet(&midi, cable, 0x09U, on_message, note_on) ||
+      !usb_midi_out_packet(&midi, cable, 0x08U, off_message, note_off)) {
+    console_printf("USB-MIDI cable %u unavailable "
+        "(Bulk OUT jacks: %u, maximum supported: %u).\n",
+        cable, (unsigned int)midi.bulk_out_jacks, USB_MIDI_MAX_CABLES);
+    return;
+  }
+  console_printf("USB-MIDI target: generation %u, slot %u, cable %u\n",
+      (unsigned int)device.generation, (unsigned int)device.slot_id, cable);
+  console_printf("  Available cables: %u\n",
+      (unsigned int)midi.bulk_out_jacks);
+  console_printf("  Note On packet : %02x %02x %02x %02x\n",
+      (unsigned int)note_on[0], (unsigned int)note_on[1],
+      (unsigned int)note_on[2], (unsigned int)note_on[3]);
   xhci_bulk_out_info_t info = {0};
   console_puts("USB-MIDI Note On...\n");
   xhci_bulk_out_result_t result = xhci_downstream_bulk_out(
@@ -1924,16 +1992,17 @@ static void cmd_usb_test_midiout(const char *args) {
     return;
   }
   usb_test_delay_ms(250U);
-  // The delay separates two hardware operations.
-  // Never send Note Off to a different incarnation
-  // which might have acquired the original slot.
+  // Never send Note Off to a different device
+  // incarnation which has reused the old slot.
   usb_device_t current = {0};
   if (!usb_test_midi_active_generation(
           device.generation, device.slot_id, &current)) {
-    console_puts(
-        "USB-MIDI Note On/Off: FAILED (device ownership changed)\n");
+    console_puts("USB-MIDI Note On/Off: FAILED (device ownership changed)\n");
     return;
   }
+  console_printf("  Note Off packet: %02x %02x %02x %02x\n",
+      (unsigned int)note_off[0], (unsigned int)note_off[1],
+      (unsigned int)note_off[2], (unsigned int)note_off[3]);
   console_puts("USB-MIDI Note Off...\n");
   info = (xhci_bulk_out_info_t){0};
   result = xhci_downstream_bulk_out(
@@ -1943,8 +2012,7 @@ static void cmd_usb_test_midiout(const char *args) {
       (unsigned int)info.completion_code);
   console_printf("  TRB             : %016llx\n",
       (unsigned long long)info.transfer_trb);
-  console_printf("USB-MIDI Note On/Off: %s\n",
-      result == XHCI_BULK_OUT_OK &&
+  console_printf("USB-MIDI Note On/Off: %s\n", result == XHCI_BULK_OUT_OK &&
       info.completion_code == 1U ? "PASS" : "FAILED");
 }
 
@@ -2151,12 +2219,23 @@ static void cmd_usb_test_midiin(const char *args) {
 
 static void cmd_usb_test_midiwrap(const char *args) {
   usb_device_t device = {0};
-  if (!usb_test_midi_select(args, &device)) {
-    console_puts( "No active USB-MIDI device or invalid generation.\n");
+  usb_midi_config_t midi = {0};
+  unsigned int cable = 0U;
+  if (!usb_test_midi_out_select( args, &device, &midi, &cable)) {
+    console_puts("No active USB-MIDI device or invalid arguments.\n");
+    console_puts("Usage: usb test midiwrap [generation] [cable N]\n");
     return;
   }
-  console_printf("USB-MIDI target: generation %u, slot %u\n",
-      (unsigned int)device.generation, (unsigned int)device.slot_id);
+  const uint8_t message[3] = {0xbfU, 0x66U, 0x00U};
+  uint8_t packet[4] = {0};
+  if (!usb_midi_out_packet( &midi, cable, 0x0bU, message, packet)) {
+    console_printf("USB-MIDI cable %u unavailable "
+        "(Bulk OUT jacks: %u, maximum supported: %u).\n",
+        cable, (unsigned int)midi.bulk_out_jacks, USB_MIDI_MAX_CABLES);
+    return;
+  }
+  console_printf("USB-MIDI target: generation %u, slot %u, cable %u\n",
+      (unsigned int)device.generation, (unsigned int)device.slot_id, cable);
   const unsigned int transfers = 520U;
   const unsigned int ring_entries = 255U;
   const uint64_t trb_size = 16U;
@@ -2165,8 +2244,7 @@ static void cmd_usb_test_midiwrap(const char *args) {
   unsigned int completed = 0U;
   unsigned int wraps = 0U;
   uint64_t started = timer_now_us();
-  console_printf("USB-MIDI ring-wrap stress test (%u transfers)\n",
-      transfers);
+  console_printf("USB-MIDI ring-wrap stress test (%u transfers)\n", transfers);
   console_puts("  WARNING: Sends real MIDI OUT messages: "
       "channel 16, CC 102.\n");
   for (unsigned int i = 0U; i < transfers; i++) {
@@ -2175,17 +2253,19 @@ static void cmd_usb_test_midiwrap(const char *args) {
     usb_device_t current = {0};
     if (!usb_test_midi_active_generation(
             device.generation, device.slot_id, &current)) {
-      console_printf( "Transfer %u: device ownership changed\n", i + 1U);
+      console_printf("Transfer %u: device ownership changed\n", i + 1U);
       break;
     }
-    // Cable 0, Control Change, channel 16, controller 102.
-    uint8_t packet[4] = { 0x0bU, 0xbfU, 0x66U, (uint8_t)(i & 0x7fU) };
+    // The header retains its selected virtual
+    // cable and Control Change CIN. Only the
+    // controller value changes per transfer.
+    packet[3] = (uint8_t)(i & 0x7fU);
     xhci_bulk_out_info_t info = {0};
     xhci_bulk_out_result_t result = xhci_downstream_bulk_out(
         device.slot_id, packet, sizeof(packet), &info);
     if (result != XHCI_BULK_OUT_OK) {
       console_printf("Transfer %u failed: %u, completion %u\n",
-          i + 1U, (unsigned int)result, info.completion_code);
+          i + 1U, (unsigned int)result, (unsigned int)info.completion_code);
       break;
     }
     if (info.completion_code != 1U ||
@@ -2194,9 +2274,9 @@ static void cmd_usb_test_midiwrap(const char *args) {
       break;
     }
     if (i == 0U) {
-      // The DMA ring occupies one aligned 4 KiB page.
-      // Earlier MIDI transfers may have advanced its index.
-      ring_base = info.transfer_trb & ~((uint64_t)PAGE_SIZE - 1U);
+      // The DMA ring occupies one aligned page.
+      // Earlier transfers may have advanced it.
+      ring_base = info.transfer_trb & ~((uint64_t)PAGE_SIZE - 1ULL);
       first_index = (unsigned int)
           ((info.transfer_trb - ring_base) / trb_size);
       if (first_index >= ring_entries) {
@@ -2208,7 +2288,7 @@ static void cmd_usb_test_midiwrap(const char *args) {
     uint64_t expected = ring_base +
         (uint64_t)(absolute_index % ring_entries) * trb_size;
     if (info.transfer_trb != expected) {
-      console_printf("Transfer %u: incorrect TRB address\n", i + 1U);
+      console_printf( "Transfer %u: incorrect TRB address\n", i + 1U);
       console_printf("  Expected: %016llx\n", (unsigned long long)expected);
       console_printf("  Actual  : %016llx\n",
           (unsigned long long)info.transfer_trb);
@@ -2217,10 +2297,11 @@ static void cmd_usb_test_midiwrap(const char *args) {
     completed++;
     if (i != 0U && absolute_index % ring_entries == 0U) {
       wraps++;
-      console_printf("  Wrap %u: transfer %u, TRB %016llx\n", wraps, i + 1U,
-          (unsigned long long)info.transfer_trb);
+      console_printf("  Wrap %u: transfer %u, TRB %016llx\n",
+          wraps, i + 1U, (unsigned long long)info.transfer_trb);
     }
-    // Allow the adapter's physical DIN output to keep up.
+    // Allow the adapter's physical DIN output
+    // to keep up with the test traffic.
     usb_test_delay_ms(4U);
   }
   uint64_t elapsed = timer_now_us() - started;
@@ -2229,7 +2310,7 @@ static void cmd_usb_test_midiwrap(const char *args) {
   console_printf("  Elapsed   : %llu ms\n",
       (unsigned long long)(elapsed / 1000ULL));
   console_printf("USB-MIDI ring-wrap: %s\n",
-      completed == transfers && wraps >= 2U ? "PASS" : "FAILED");
+      completed == transfers && wraps >= 2U ?  "PASS" : "FAILED");
 }
 
 static void cmd_usb_changes(void) {
