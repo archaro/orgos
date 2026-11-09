@@ -85,9 +85,7 @@ typedef struct {
   bool in_completed;
 } usb_lifecycle_info_t;
 
-bool usb_lifecycle_inspect(usb_lifecycle_info_t *info);
-// Inspect the lifecycle of a specific device
-// incarnation, without compatibility fallback.
+// Inspect the lifecycle of a specific device incarnation
 bool usb_lifecycle_inspect_generation(
     uint32_t generation, usb_lifecycle_info_t *info);
 
@@ -130,7 +128,6 @@ typedef struct {
 // executors. Hardware operations remain serial.
 bool usb_lifecycle_arm_generation(uint32_t generation);
 
-bool usb_lifecycle_get_run_info(usb_lifecycle_run_info_t *info);
 // Read-only inspection of a lifecycle executor
 // belonging to a specific device incarnation.
 bool usb_lifecycle_get_run_info_generation(
@@ -181,7 +178,10 @@ typedef struct {
   bool powered;
 } usb_lifecycle_port_info_t;
 
-bool usb_lifecycle_port_inspect(usb_lifecycle_port_info_t *info);
+// Inspect the physical hub port associated with
+// a specific managed device incarnation.
+bool usb_lifecycle_port_inspect_generation(
+    uint32_t generation, usb_lifecycle_port_info_t *info);
 
 // Read-only preflight for independent port enumeration.
 // Checks local eligibility, managed-record capacity,

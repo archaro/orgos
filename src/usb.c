@@ -41,12 +41,6 @@ static usb_lifecycle_run_info_t lifecycle_runs[USB_LIFECYCLE_RUN_CAPACITY];
 // per pass, even when several runs are armed.
 static unsigned int lifecycle_next_index;
 
-// Most recently armed lifecycle executor.
-// Retained for the existing single-run diagnostic
-// interface; it does not determine scheduling
-// or ownership.
-static usb_lifecycle_run_info_t *lifecycle_last_run = &lifecycle_runs[0];
-
 static uint64_t auto_enum_next_check_us;
 static usb_auto_enum_info_t auto_enum = {
   .enabled = true,
@@ -756,23 +750,6 @@ static bool usb_lifecycle_inspect_record(const usb_device_t *device,
   return true;
 }
 
-bool usb_lifecycle_inspect(usb_lifecycle_info_t *info) {
-  if (!info)
-    return false;
-
-  *info = (usb_lifecycle_info_t){0};
-  usb_device_t device = {0};
-  if (!usb_get_device(&device))
-    return true;
-
-  usb_enum_info_t enumeration = {0};
-  bool attempted = usb_get_enumeration(&enumeration);
-  usb_lifecycle_run_info_t *run =
-      usb_lifecycle_by_generation(device.generation);
-
-  return usb_lifecycle_inspect_record(&device, run, attempted, info);
-}
-
 bool usb_lifecycle_inspect_generation(
     uint32_t generation, usb_lifecycle_info_t *info) {
 
@@ -792,14 +769,6 @@ bool usb_lifecycle_inspect_generation(
   usb_lifecycle_run_info_t *run = usb_lifecycle_by_generation(generation);
 
   return usb_lifecycle_inspect_record( &device, run, attempted, info);
-}
-
-bool usb_lifecycle_get_run_info(usb_lifecycle_run_info_t *info) {
-  if (!info)
-    return false;
-
-  *info = *lifecycle_last_run;
-  return true;
 }
 
 bool usb_lifecycle_get_run_info_generation(
@@ -876,8 +845,6 @@ bool usb_lifecycle_arm_generation(uint32_t generation) {
     .observed_generation = generation,
     .slot_id = device.slot_id
   };
-
-  lifecycle_last_run = run;
 
   return true;
 }
@@ -1245,36 +1212,46 @@ void usb_service(void) {
   usb_auto_enum_service();
 }
 
-bool usb_lifecycle_port_inspect(usb_lifecycle_port_info_t *info) {
-  if (!info)
+bool usb_lifecycle_port_inspect_generation(
+    uint32_t generation, usb_lifecycle_port_info_t *info) {
+
+  if (!info || generation == 0U)
     return false;
 
   *info = (usb_lifecycle_port_info_t){0};
 
   usb_device_t device = {0};
-  if (!usb_get_device(&device))
+  if (!usb_get_device_by_generation(generation, &device) ||
+      device.root_port == 0U || device.parent_slot == 0U ||
+      device.parent_port == 0U || device.parent_port >= 16U)
+    return false;
+
+  // Ensure the physical connection still belongs
+  // to the requested device incarnation.
+  usb_device_t connection = {0};
+  if (!usb_get_device_by_connection(device.root_port, device.parent_slot,
+          device.parent_port, &connection) ||
+      connection.generation != generation ||
+      connection.slot_id != device.slot_id)
     return false;
 
   uint8_t port = device.parent_port;
-  if (port == 0U || port >= 16U)
-    return false;
-
   usb_hub_port_t current = {0};
+
   if (usb_hub_port_status(port, &current) != USB_HUB_OK)
     return false;
 
-  info->generation = device.generation;
+  info->generation = generation;
   info->port = port;
   info->current_status = current.status;
   info->current_change = current.change;
 
-  // Hub port status bit 0 is CurrentConnectStatus.
+  // Hub status bit 0 is CurrentConnectStatus.
   // Bit 8 is PortPower.
   info->connected = (current.status & 0x0001U) != 0U;
   info->powered = (current.status & 0x0100U) != 0U;
 
   const usb_change_event_t *last = &last_port_change[port];
-
   if (last->sequence != 0U) {
     info->notification_seen = true;
     info->last_sequence = last->sequence;

@@ -1596,26 +1596,6 @@ static void cmd_usb_lifecycle_candidates(void) {
       "automatic enumeration uses usb auto ports.\n");
 }
 
-static void cmd_usb_lifecycle_current(void) {
-  usb_lifecycle_info_t info = {0};
-  if (!usb_lifecycle_inspect(&info)) {
-    console_puts("USB lifecycle unavailable.\n");
-    return;
-  }
-  console_puts("USB current lifecycle:\n");
-  console_printf("  Generation   : %u\n", (unsigned int)info.generation);
-  console_printf("  Slot         : %u\n", (unsigned int)info.slot_id);
-  console_printf("  Quiesced     : %s\n", info.quiesced ? "Yes" : "No");
-  console_printf("  Disabled     : %s\n", info.slot_disabled ? "Yes" : "No");
-  console_printf("  Cleaned      : %s\n", info.cleaned ? "Yes" : "No");
-  console_printf("  Waiters      : %u\n", (unsigned int)info.waiters);
-  console_printf("  IN started   : %s\n", info.in_started ? "Yes" : "No");
-  console_printf("  IN pending   : %s\n", info.in_pending ? "Yes" : "No");
-  console_printf("  IN completed : %s\n", info.in_completed ? "Yes" : "No");
-  console_printf("  Next action  : %s\n",
-      usb_lifecycle_action_name(info.next));
-}
-
 static const char *usb_lifecycle_run_name(
     usb_lifecycle_run_state_t state) {
   switch (state) {
@@ -1651,48 +1631,57 @@ static const char *usb_lifecycle_fault_name(usb_lifecycle_fault_t fault) {
 }
 
 static void cmd_usb_lifecycle_status(const char *args) {
-  usb_lifecycle_run_info_t info = {0};
-  if (end_of_args(args)) {
-    // Preserve the existing compatibility view.
-    cmd_usb_lifecycle_current();
-    console_putc('\n');
-    if (!usb_lifecycle_get_run_info(&info)) {
-      console_puts("USB lifecycle executor unavailable.\n");
-      return;
-    }
-    console_puts("USB lifecycle executor (last run):\n");
-  } else {
-    unsigned int generation = 0U;
-    if (!next_uint(&args, &generation) || !end_of_args(args) ||
-        generation == 0U) {
-      console_puts("Usage: usb lifecycle status [generation]\n");
-      return;
-    }
-    if (!usb_lifecycle_get_run_info_generation((uint32_t)generation, &info)) {
-      console_puts("USB lifecycle generation unavailable.\n");
-      return;
-    }
-    console_printf("USB lifecycle executor (generation %u):\n", generation);
+  uint32_t generation = 0U;
+  if (!usb_parse_generation(args, &generation)) {
+    console_puts("Usage: usb lifecycle status <generation>\n");
+    return;
   }
-  console_printf("  State       : %s\n", usb_lifecycle_run_name(info.state));
-  console_printf("  Generation  : %u\n", (unsigned int)info.generation);
-  console_printf("  Steps       : %u\n", (unsigned int)info.steps);
+  usb_lifecycle_info_t state = {0};
+  if (!usb_lifecycle_inspect_generation(generation, &state)) {
+    console_puts("USB lifecycle generation unavailable.\n");
+    return;
+  }
+  console_printf("USB lifecycle (generation %u):\n",
+      (unsigned int)generation);
+  console_printf("  Slot         : %u\n", (unsigned int)state.slot_id);
+  console_printf("  Quiesced     : %s\n", state.quiesced ? "Yes" : "No");
+  console_printf("  Disabled     : %s\n", state.slot_disabled ? "Yes" : "No");
+  console_printf("  Cleaned      : %s\n", state.cleaned ? "Yes" : "No");
+  console_printf("  Waiters      : %u\n", (unsigned int)state.waiters);
+  console_printf("  IN started   : %s\n", state.in_started ? "Yes" : "No");
+  console_printf("  IN pending   : %s\n", state.in_pending ? "Yes" : "No");
+  console_printf("  IN completed : %s\n", state.in_completed ? "Yes" : "No");
+  console_printf("  Next action  : %s\n",
+      usb_lifecycle_action_name(state.next));
+  usb_lifecycle_run_info_t run = {0};
+  if (!usb_lifecycle_get_run_info_generation(generation, &run)) {
+    console_puts("\n  Executor     : None recorded\n");
+    return;
+  }
+  console_puts("\nLifecycle executor:\n");
+  console_printf("  State       : %s\n", usb_lifecycle_run_name(run.state));
+  console_printf("  Generation  : %u\n", (unsigned int)run.generation);
+  console_printf("  Steps       : %u\n", (unsigned int)run.steps);
   console_printf("  Last action : %s\n",
-      usb_lifecycle_action_name(info.last_action));
-  console_printf("  Last result : %u\n", (unsigned int)info.last_result);
-  console_printf("  Succeeded   : %s\n", info.last_succeeded ? "Yes" : "No");
-  console_printf("  Fault       : %s\n",
-      usb_lifecycle_fault_name(info.fault));
-  console_printf("  Slot        : %u\n", (unsigned int)info.slot_id);
+      usb_lifecycle_action_name(run.last_action));
+  console_printf("  Last result : %u\n", (unsigned int)run.last_result);
+  console_printf("  Succeeded   : %s\n", run.last_succeeded ? "Yes" : "No");
+  console_printf("  Fault       : %s\n", usb_lifecycle_fault_name(run.fault));
+  console_printf("  Slot        : %u\n", (unsigned int)run.slot_id);
   console_printf("  Observed gen: %u\n",
-      (unsigned int)info.observed_generation);
-  console_printf("  Command     : %u\n", (unsigned int)info.command_result);
-  console_printf("  Completion  : %u\n", (unsigned int)info.completion_code);
+      (unsigned int)run.observed_generation);
+  console_printf("  Command     : %u\n", (unsigned int)run.command_result);
+  console_printf("  Completion  : %u\n", (unsigned int)run.completion_code);
 }
 
-static void cmd_usb_lifecycle_port(void) {
+static void cmd_usb_lifecycle_port(const char *args) {
+  uint32_t generation = 0U;
+  if (!usb_parse_generation(args, &generation)) {
+    console_puts("Usage: usb lifecycle port <generation>\n");
+    return;
+  }
   usb_lifecycle_port_info_t info = {0};
-  if (!usb_lifecycle_port_inspect(&info)) {
+  if (!usb_lifecycle_port_inspect_generation(generation, &info)) {
     console_puts("USB lifecycle port unavailable.\n");
     return;
   }
@@ -2563,12 +2552,12 @@ static void cmd_usb(const char *args) {
     return;
   }
   if (next_word_is(&args, "lifecycle")) {
-    if (end_of_args(args)) {
-      cmd_usb_lifecycle_status("");
-      return;
-    }
     if (next_word_is(&args, "status")) {
       cmd_usb_lifecycle_status(args);
+      return;
+    }
+    if (next_word_is(&args, "port")) {
+      cmd_usb_lifecycle_port(args);
       return;
     }
     if (next_word_is(&args, "admission") && end_of_args(args)) {
@@ -2579,12 +2568,9 @@ static void cmd_usb(const char *args) {
       cmd_usb_lifecycle_candidates();
       return;
     }
-    if (next_word_is(&args, "port") && end_of_args(args)) {
-      cmd_usb_lifecycle_port();
-      return;
-    }
-    console_puts("Usage: usb lifecycle [status [generation] | "
-                 "admission | candidates | port]\n");
+    console_puts(
+        "Usage: usb lifecycle [status <generation> | port <generation> | "
+        "admission | candidates]\n");
     return;
   }
   if (next_word_is(&args, "resources") && end_of_args(args)) {
