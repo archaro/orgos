@@ -6,6 +6,7 @@
 #include "usb.h"
 #include "usb_hub.h"
 #include "usb_enumerate.h"
+#include "usb_midi_rx.h"
 #include "usb_midi_test.h"
 
 #define USB_ROOT_PORT 1U
@@ -1194,6 +1195,10 @@ void usb_service(void) {
 
   // Service the diagnostic MIDI receiver, if active.
   usb_midi_in_stress_service();
+
+  // Decode completed Bulk IN transfers belonging
+  // to persistent USB-MIDI receivers.
+  usb_midi_rx_service();
 
   // A disconnected, successfully enumerated device
   // is automatically admitted to lifecycle teardown.

@@ -19,6 +19,7 @@
 #include "usb.h"
 #include "usb_hub.h"
 #include "usb_midi.h"
+#include "usb_midi_rx.h"
 #include "usb_enumerate.h"
 #include "usb_midi_test.h"
 
@@ -1932,6 +1933,14 @@ static void cmd_usb_test_midiin(const char *args) {
   bool stress_owns_receiver = usb_midi_in_stress_get_info(&stress) &&
       stress.state != USB_MIDI_IN_STRESS_IDLE &&
       stress.generation == device.generation;
+  // Persistent receivers own their xHCI queues.
+  // Diagnostic commands may inspect stream
+  // statistics, but must not start or drain them.
+  if (action != MIDI_IN_STATUS &&
+      usb_midi_rx_owns_generation(device.generation)) {
+    console_puts("USB-MIDI IN stream owned by persistent receiver.\n");
+    return;
+  }
   if (action == MIDI_IN_STREAM) {
     if (stress_owns_receiver) {
       console_puts("USB-MIDI IN stream owned by stress test.\n");
@@ -3054,10 +3063,9 @@ static bool midi_next_hex_byte(const char **input,
   return true;
 }
 
-static void cmd_midi(const char *args) {
+static void cmd_midi_decode(const char *args) {
   uint8_t packet[4] = {0};
-  if (!next_word_is(&args, "decode") ||
-      !midi_next_hex_byte(&args, &packet[0]) ||
+  if (!midi_next_hex_byte(&args, &packet[0]) ||
       !midi_next_hex_byte(&args, &packet[1]) ||
       !midi_next_hex_byte(&args, &packet[2]) ||
       !midi_next_hex_byte(&args, &packet[3]) ||
@@ -3082,6 +3090,90 @@ static void cmd_midi(const char *args) {
   console_putc('\n');
 }
 
+static const char *midi_rx_state_name(usb_midi_rx_state_t state) {
+  switch (state) {
+    case USB_MIDI_RX_IDLE: return "Idle";
+    case USB_MIDI_RX_RUNNING: return "Running";
+    case USB_MIDI_RX_DISCONNECTED: return "Disconnected";
+    case USB_MIDI_RX_FAILED: return "Failed";
+    default: return "Unknown";
+  }
+}
+
+static void cmd_midi_rx(const char *args) {
+  enum { RX_START, RX_STATUS, RX_READ } action;
+  if (next_word_is(&args, "start")) {
+    action = RX_START;
+  } else if (next_word_is(&args, "status")) {
+    action = RX_STATUS;
+  } else if (next_word_is(&args, "read")) {
+    action = RX_READ;
+  } else {
+    console_puts("Usage: midi rx [start | status | read] <generation>\n");
+    return;
+  }
+  uint32_t generation = 0U;
+  if (!usb_parse_generation(args, &generation)) {
+    console_puts("Usage: midi rx [start | status | read] <generation>\n");
+    return;
+  }
+  if (action == RX_START) {
+    bool started = usb_midi_rx_start_generation(generation);
+    console_printf("MIDI receiver: %s\n", started ? "STARTED" : "NOT READY");
+    return;
+  }
+  if (action == RX_STATUS) {
+    usb_midi_rx_info_t info = {0};
+    if (!usb_midi_rx_get_info(generation, &info)) {
+      console_puts("MIDI receiver unavailable.\n");
+      return;
+    }
+    console_printf("MIDI receiver (generation %u):\n",
+        (unsigned int)generation);
+    console_printf("  State      : %s\n", midi_rx_state_name(info.state));
+    console_printf("  Slot       : %u\n", (unsigned int)info.slot_id);
+    console_printf("  IN cables  : %u\n", (unsigned int)info.cables);
+    console_printf("  Transfers  : %llu\n",
+        (unsigned long long)info.transfers);
+    console_printf("  Events     : %llu\n", (unsigned long long)info.events);
+    console_printf("  Rejected   : %llu\n",
+        (unsigned long long)info.rejected);
+    console_printf("  Staged     : %u\n", info.staged);
+    console_printf("  Queue      : %u / %u\n",
+        info.queue_depth, USB_MIDI_RX_QUEUE_CAPACITY);
+    console_printf("  Queue peak : %u\n", info.queue_peak);
+    return;
+  }
+  usb_midi_event_t event = {0};
+  if (!usb_midi_rx_read(generation, &event)) {
+    console_puts("No decoded MIDI event available.\n");
+    return;
+  }
+  console_printf("MIDI RX event (generation %u):\n",
+      (unsigned int)generation);
+  console_printf("  Cable  : %u\n", (unsigned int)event.cable);
+  console_printf("  CIN    : 0x%01x\n", (unsigned int)event.cin);
+  console_printf("  Length : %u\n", (unsigned int)event.length);
+  console_puts("  Data   :");
+  for (unsigned int i = 0U; i < event.length; i++) {
+    console_putc(' ');
+    console_puthex(event.data[i], 2U);
+  }
+  console_putc('\n');
+}
+
+static void cmd_midi(const char *args) {
+  if (next_word_is(&args, "decode")) {
+    cmd_midi_decode(args);
+    return;
+  }
+  if (next_word_is(&args, "rx")) {
+    cmd_midi_rx(args);
+    return;
+  }
+  console_puts("Usage: midi [decode | rx]\n");
+}
+
 // Commands will be added here as they are implemented.
 // The NULL entry terminates the table.
 static const console_command_t commands[] = {
@@ -3096,7 +3188,7 @@ static const console_command_t commands[] = {
   { "page", cmd_page, "Inspect physical page statistics and run tests" },
   { "dma", cmd_dma, "Run DMA ownership and cache tests" },
   { "usb", cmd_usb, "Inspect and test USB controller and MIDI transport" },
-  { "midi", cmd_midi, "Decode USB-MIDI event packets" },
+  { "midi", cmd_midi, "Decode and receive USB-MIDI events" },
   { NULL, NULL, NULL }
 };
 
