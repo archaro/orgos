@@ -23,6 +23,7 @@
 #include "usb_midi_rx.h"
 #include "midi_monitor.h"
 #include "midi_auto.h"
+#include "midi_short.h"
 #include "usb_midi_test.h"
 
 #define CONSOLE_LINE_SIZE 256
@@ -3221,13 +3222,11 @@ static void cmd_midi_monitor(const char *args) {
 
 static void cmd_midi_auto(const char *args) {
   const char *p = args;
-
   if (next_word_is(&p, "on") && end_of_args(p)) {
     midi_auto_set_enabled(true);
     console_puts("Automatic MIDI reception: ON\n");
     return;
   }
-
   p = args;
   if (next_word_is(&p, "off") && end_of_args(p)) {
     midi_auto_set_enabled(false);
@@ -3235,7 +3234,6 @@ static void cmd_midi_auto(const char *args) {
     console_puts("Existing receivers retain their ownership.\n");
     return;
   }
-
   p = args;
   if (end_of_args(args) || (next_word_is(&p, "status") && end_of_args(p))) {
 
@@ -3250,15 +3248,51 @@ static void cmd_midi_auto(const char *args) {
     console_printf("  Started    : %u\n", (unsigned int)info.started);
     console_printf("  Skipped    : %u\n", (unsigned int)info.skipped);
     console_printf("  Failed     : %u\n", (unsigned int)info.failed);
-
     if (info.attempts != 0U)
       console_printf("  Last gen   : %u\n",
           (unsigned int)info.last_generation);
-
     return;
   }
-
   console_puts("Usage: midi auto [on | off | status]\n");
+}
+
+static void cmd_midi_parse(const char *args) {
+  const char *probe = args;
+  uint8_t byte = 0U;
+  unsigned int bytes = 0U;
+
+  // Validate the entire input before producing
+  // any diagnostic output.
+  while (!end_of_args(probe)) {
+    if (!midi_next_hex_byte(&probe, &byte)) {
+      console_puts("Usage: midi parse <hh> [hh ...]\n");
+      return;
+    }
+    bytes++;
+  }
+  if (bytes == 0U) {
+    console_puts("Usage: midi parse <hh> [hh ...]\n");
+    return;
+  }
+  midi_short_parser_t parser = {0};
+  unsigned int messages = 0U;
+  console_puts("MIDI short-message parser:\n");
+  const char *p = args;
+  while (!end_of_args(p)) {
+    midi_next_hex_byte(&p, &byte);
+    midi_short_message_t message = {0};
+    if (!midi_short_parser_feed(&parser, byte, &message))
+      continue;
+    console_puts("  ");
+    console_puthex(message.status, 2U);
+    for (unsigned int i = 1U; i < message.length; i++) {
+      console_putc(' ');
+      console_puthex(message.data[i - 1U], 2U);
+    }
+    console_putc('\n');
+    messages++;
+  }
+  console_printf("Short messages: %u\n", messages);
 }
 
 static void cmd_midi(const char *args) {
@@ -3278,7 +3312,11 @@ static void cmd_midi(const char *args) {
     cmd_midi_auto(args);
     return;
   }
-  console_puts("Usage: midi [decode | rx | monitor | auto]\n");
+  if (next_word_is(&args, "parse")) {
+    cmd_midi_parse(args);
+    return;
+  }
+  console_puts("Usage: midi [decode | rx | monitor | auto | parse]\n");
 }
 
 // Commands will be added here as they are implemented.
