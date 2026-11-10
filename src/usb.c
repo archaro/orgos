@@ -8,6 +8,7 @@
 #include "usb_enumerate.h"
 #include "usb_midi_rx.h"
 #include "usb_midi_test.h"
+#include "midi_auto.h"
 
 #define USB_ROOT_PORT 1U
 #define USB_HIGH_SPEED 3U
@@ -1211,6 +1212,11 @@ void usb_service(void) {
   // Enumerate only when a connection or a completed
   // teardown has requested a fresh admission check.
   usb_auto_enum_service();
+
+  // Start automatic MIDI reception only after
+  // enumeration has established device ownership.
+  // Existing diagnostic streams are never displaced.
+  midi_auto_service();
 }
 
 bool usb_lifecycle_port_inspect_generation(

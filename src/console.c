@@ -22,6 +22,7 @@
 #include "usb_midi.h"
 #include "usb_midi_rx.h"
 #include "midi_monitor.h"
+#include "midi_auto.h"
 #include "usb_midi_test.h"
 
 #define CONSOLE_LINE_SIZE 256
@@ -3218,6 +3219,48 @@ static void cmd_midi_monitor(const char *args) {
   console_putc('\n');
 }
 
+static void cmd_midi_auto(const char *args) {
+  const char *p = args;
+
+  if (next_word_is(&p, "on") && end_of_args(p)) {
+    midi_auto_set_enabled(true);
+    console_puts("Automatic MIDI reception: ON\n");
+    return;
+  }
+
+  p = args;
+  if (next_word_is(&p, "off") && end_of_args(p)) {
+    midi_auto_set_enabled(false);
+    console_puts("Automatic MIDI reception: OFF\n");
+    console_puts("Existing receivers retain their ownership.\n");
+    return;
+  }
+
+  p = args;
+  if (end_of_args(args) || (next_word_is(&p, "status") && end_of_args(p))) {
+
+    midi_auto_info_t info = {0};
+    if (!midi_auto_get_info(&info)) {
+      console_puts("Automatic MIDI reception unavailable.\n");
+      return;
+    }
+    console_puts("Automatic MIDI reception:\n");
+    console_printf("  Enabled    : %s\n", info.enabled ? "Yes" : "No");
+    console_printf("  Attempts   : %u\n", (unsigned int)info.attempts);
+    console_printf("  Started    : %u\n", (unsigned int)info.started);
+    console_printf("  Skipped    : %u\n", (unsigned int)info.skipped);
+    console_printf("  Failed     : %u\n", (unsigned int)info.failed);
+
+    if (info.attempts != 0U)
+      console_printf("  Last gen   : %u\n",
+          (unsigned int)info.last_generation);
+
+    return;
+  }
+
+  console_puts("Usage: midi auto [on | off | status]\n");
+}
+
 static void cmd_midi(const char *args) {
   if (next_word_is(&args, "decode")) {
     cmd_midi_decode(args);
@@ -3231,7 +3274,11 @@ static void cmd_midi(const char *args) {
     cmd_midi_monitor(args);
     return;
   }
-  console_puts("Usage: midi [decode | rx | monitor]\n");
+  if (next_word_is(&args, "auto")) {
+    cmd_midi_auto(args);
+    return;
+  }
+  console_puts("Usage: midi [decode | rx | monitor | auto]\n");
 }
 
 // Commands will be added here as they are implemented.
@@ -3248,7 +3295,7 @@ static const console_command_t commands[] = {
   { "page", cmd_page, "Inspect physical page statistics and run tests" },
   { "dma", cmd_dma, "Run DMA ownership and cache tests" },
   { "usb", cmd_usb, "Inspect and test USB controller and MIDI transport" },
-  { "midi", cmd_midi, "Decode, receive and monitor USB-MIDI events" },
+  { "midi", cmd_midi, "Decode, receive and monitor MIDI" },
   { NULL, NULL, NULL }
 };
 
