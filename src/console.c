@@ -23,7 +23,7 @@
 #include "usb_midi_rx.h"
 #include "midi_monitor.h"
 #include "midi_auto.h"
-#include "midi_short.h"
+#include "midi_stream.h"
 #include "usb_midi_test.h"
 
 #define CONSOLE_LINE_SIZE 256
@@ -3256,43 +3256,120 @@ static void cmd_midi_auto(const char *args) {
   console_puts("Usage: midi auto [on | off | status]\n");
 }
 
-static void cmd_midi_parse(const char *args) {
-  const char *probe = args;
-  uint8_t byte = 0U;
-  unsigned int bytes = 0U;
+static midi_stream_parser_t console_stream_parser;
 
-  // Validate the entire input before producing
-  // any diagnostic output.
-  while (!end_of_args(probe)) {
-    if (!midi_next_hex_byte(&probe, &byte)) {
-      console_puts("Usage: midi parse <hh> [hh ...]\n");
-      return;
-    }
-    bytes++;
+static bool midi_valid_byte_list(const char *args) {
+  uint8_t byte = 0U;
+  bool found = false;
+  while (!end_of_args(args)) {
+    if (!midi_next_hex_byte(&args, &byte))
+      return false;
+    found = true;
   }
-  if (bytes == 0U) {
+  return found;
+}
+
+static unsigned int midi_console_emit(
+    const midi_stream_output_t *output, bool show_sysex) {
+  unsigned int short_count = 0U;
+  for (unsigned int i = 0U; i < output->count; i++) {
+    const midi_stream_event_t *event = &output->events[i];
+    if (event->type == MIDI_STREAM_SHORT) {
+      const midi_short_message_t *message = &event->message;
+      console_puts("  ");
+      console_puthex(message->status, 2U);
+      for (unsigned int j = 1U; j < message->length; j++) {
+        console_putc(' ');
+        console_puthex(message->data[j - 1U], 2U);
+      }
+      console_putc('\n');
+      short_count++;
+      continue;
+    }
+    if (!show_sysex)
+      continue;
+    switch (event->type) {
+      case MIDI_STREAM_SYSEX_BEGIN:
+        console_puts("  SysEx BEGIN\n");
+        break;
+      case MIDI_STREAM_SYSEX_DATA:
+        console_puts("  SysEx DATA ");
+        console_puthex(event->byte, 2U);
+        console_putc('\n');
+        break;
+      case MIDI_STREAM_SYSEX_END:
+        console_puts("  SysEx END\n");
+        break;
+      case MIDI_STREAM_SYSEX_ABORT:
+        console_puts("  SysEx ABORT");
+        if (event->byte != 0U) {
+          console_puts(" (status ");
+          console_puthex(event->byte, 2U);
+          console_putc(')');
+        }
+        console_putc('\n');
+        break;
+      default:
+        break;
+    }
+  }
+  return short_count;
+}
+
+static unsigned int midi_console_feed(midi_stream_parser_t *parser,
+    const char *args, bool show_sysex) {
+  unsigned int short_count = 0U;
+  while (!end_of_args(args)) {
+    uint8_t byte = 0U;
+    // The complete argument list was validated
+    // before this function was called.
+    if (!midi_next_hex_byte(&args, &byte))
+      break;
+    midi_stream_output_t output = {0};
+    if (!midi_stream_parser_feed(parser, byte, &output))
+      break;
+    short_count += midi_console_emit(&output, show_sysex);
+  }
+  return short_count;
+}
+
+static void cmd_midi_parse(const char *args) {
+  if (!midi_valid_byte_list(args)) {
     console_puts("Usage: midi parse <hh> [hh ...]\n");
     return;
   }
-  midi_short_parser_t parser = {0};
-  unsigned int messages = 0U;
+  midi_stream_parser_t parser = {0};
   console_puts("MIDI short-message parser:\n");
-  const char *p = args;
-  while (!end_of_args(p)) {
-    midi_next_hex_byte(&p, &byte);
-    midi_short_message_t message = {0};
-    if (!midi_short_parser_feed(&parser, byte, &message))
-      continue;
-    console_puts("  ");
-    console_puthex(message.status, 2U);
-    for (unsigned int i = 1U; i < message.length; i++) {
-      console_putc(' ');
-      console_puthex(message.data[i - 1U], 2U);
-    }
-    console_putc('\n');
-    messages++;
-  }
+  unsigned int messages = midi_console_feed(&parser, args, false);
   console_printf("Short messages: %u\n", messages);
+}
+
+static void cmd_midi_stream(const char *args) {
+  const char *p = args;
+  if (next_word_is(&p, "reset") && end_of_args(p)) {
+    midi_stream_output_t output = {0};
+    midi_stream_parser_cancel(&console_stream_parser, &output);
+    midi_console_emit(&output, true);
+    console_puts("MIDI stream parser reset.\n");
+    return;
+  }
+  p = args;
+  if (next_word_is(&p, "status") && end_of_args(p)) {
+    console_puts("MIDI stream parser state:\n");
+    console_printf("  SysEx   : %s\n",
+        console_stream_parser.in_sysex ? "Yes" : "No");
+    console_printf("  Running : 0x%02x\n",
+        (unsigned int)console_stream_parser.running_status);
+    console_printf("  Active  : 0x%02x\n",
+        (unsigned int)console_stream_parser.active_status);
+    return;
+  }
+  if (!midi_valid_byte_list(args)) {
+    console_puts("Usage: midi stream [reset | status | <hh> [hh ...]]\n");
+    return;
+  }
+  console_puts("MIDI stream events:\n");
+  midi_console_feed(&console_stream_parser, args, true);
 }
 
 static void cmd_midi(const char *args) {
@@ -3316,7 +3393,11 @@ static void cmd_midi(const char *args) {
     cmd_midi_parse(args);
     return;
   }
-  console_puts("Usage: midi [decode | rx | monitor | auto | parse]\n");
+  if (next_word_is(&args, "stream")) {
+    cmd_midi_stream(args);
+    return;
+  }
+  console_puts("Usage: midi [decode | rx | monitor | auto | parse | stream]\n");
 }
 
 // Commands will be added here as they are implemented.
