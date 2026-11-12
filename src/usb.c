@@ -9,6 +9,7 @@
 #include "usb_midi_rx.h"
 #include "usb_midi_test.h"
 #include "midi_auto.h"
+#include "midi_input.h"
 
 #define USB_ROOT_PORT 1U
 #define USB_HIGH_SPEED 3U
@@ -1200,6 +1201,10 @@ void usb_service(void) {
   // Decode completed Bulk IN transfers belonging
   // to persistent USB-MIDI receivers.
   usb_midi_rx_service();
+
+  // Reconcile MIDI parser ownership with the
+  // live USB device generations.
+  midi_input_service();
 
   // A disconnected, successfully enumerated device
   // is automatically admitted to lifecycle teardown.

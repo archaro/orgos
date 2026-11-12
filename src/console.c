@@ -23,6 +23,7 @@
 #include "usb_midi_rx.h"
 #include "midi_monitor.h"
 #include "midi_auto.h"
+#include "midi_input.h"
 #include "midi_stream.h"
 #include "usb_midi_test.h"
 
@@ -3372,6 +3373,79 @@ static void cmd_midi_stream(const char *args) {
   midi_console_feed(&console_stream_parser, args, true);
 }
 
+static void cmd_midi_input(const char *args) {
+  enum { INPUT_START, INPUT_STOP, INPUT_STATUS } action;
+
+  if (next_word_is(&args, "start")) {
+    action = INPUT_START;
+  } else if (next_word_is(&args, "stop")) {
+    action = INPUT_STOP;
+  } else if (next_word_is(&args, "status")) {
+    action = INPUT_STATUS;
+  } else {
+    console_puts("Usage: midi input [start | stop | status] <generation>\n");
+    return;
+  }
+
+  uint32_t generation = 0U;
+
+  if (!usb_parse_generation(args, &generation)) {
+    console_puts("Usage: midi input [start | stop | status] <generation>\n");
+    return;
+  }
+
+  if (action == INPUT_START) {
+    bool started = midi_input_start_generation(generation);
+    console_printf("MIDI input: %s\n", started ? "ATTACHED" : "NOT READY");
+    return;
+  }
+
+  if (action == INPUT_STOP) {
+    bool stopped = midi_input_stop_generation(generation);
+    console_printf("MIDI input: %s\n", stopped ? "DETACHED" : "NOT READY");
+    return;
+  }
+
+  midi_input_info_t info = {0};
+
+  if (!midi_input_get_info(generation, &info)) {
+    console_puts("MIDI input unavailable.\n");
+    return;
+  }
+
+  console_printf("MIDI input (generation %u):\n", (unsigned int)generation);
+  console_printf("  Attached    : %s\n", info.attached ? "Yes" : "No");
+  console_printf("  Lost        : %s\n", info.lost ? "Yes" : "No");
+  console_printf("  Cables      : %u\n", (unsigned int)info.cables);
+  console_printf("  Packets     : %llu\n", (unsigned long long)info.packets);
+  console_printf("  Malformed   : %llu\n",
+      (unsigned long long)info.malformed);
+  console_printf("  Short       : %llu\n",
+      (unsigned long long)info.short_messages);
+  console_printf("  SysEx begin : %llu\n",
+      (unsigned long long)info.sysex_begins);
+  console_printf("  SysEx bytes : %llu\n",
+      (unsigned long long)info.sysex_bytes);
+  console_printf("  SysEx end   : %llu\n",
+      (unsigned long long)info.sysex_ends);
+  console_printf("  SysEx abort : %llu\n",
+      (unsigned long long)info.sysex_aborts);
+
+  if (!info.have_last)
+    return;
+
+  console_printf("  Last cable  : %u\n", (unsigned int)info.last_cable);
+  console_puts("  Last event:\n");
+
+  // Reuse the existing stream-event formatter.
+  midi_stream_output_t output = {
+    .count = 1U
+  };
+
+  output.events[0] = info.last;
+  midi_console_emit(&output, true);
+}
+
 static void cmd_midi(const char *args) {
   if (next_word_is(&args, "decode")) {
     cmd_midi_decode(args);
@@ -3397,7 +3471,11 @@ static void cmd_midi(const char *args) {
     cmd_midi_stream(args);
     return;
   }
-  console_puts("Usage: midi [decode | rx | monitor | auto | parse | stream]\n");
+  if (next_word_is(&args, "input")) {
+    cmd_midi_input(args);
+    return;
+  }
+  console_puts("Usage: midi [decode | rx | monitor | auto | parse | stream | input]\n");
 }
 
 // Commands will be added here as they are implemented.

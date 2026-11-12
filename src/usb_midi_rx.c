@@ -184,9 +184,9 @@ bool usb_midi_rx_read(uint32_t generation, usb_midi_event_t *event) {
   usb_midi_rx_record_t *rx = rx_find(generation, &index);
 
     if (!rx || rx->info.state != USB_MIDI_RX_RUNNING ||
-      !rx_owner_matches(index, rx) || rx->consumer ||
-      rx->info.queue_depth == 0U)
-    return false;
+        !rx_owner_matches(index, rx) || rx->consumer ||
+        rx->info.queue_depth == 0U)
+      return false;
 
   *event = rx->queue[rx->head];
   rx->head = (rx->head + 1U) % USB_MIDI_RX_QUEUE_CAPACITY;
