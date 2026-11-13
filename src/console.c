@@ -24,6 +24,7 @@
 #include "midi_monitor.h"
 #include "midi_auto.h"
 #include "midi_input.h"
+#include "midi_output.h"
 #include "midi_stream.h"
 #include "usb_midi_test.h"
 
@@ -1709,6 +1710,11 @@ static bool usb_test_midi_out_select(const char *args, usb_device_t *device,
 
   uint32_t generation = (uint32_t)requested;
 
+  if (midi_output_owns_generation(generation)) {
+    console_puts("Bulk OUT owned by the MIDI output service.\n");
+    return false;
+  }
+
   // The virtual cable is optional.
   // Cable zero remains the default.
   if (!end_of_args(p)) {
@@ -1860,6 +1866,10 @@ static void cmd_usb_test_midiasync(const char *args) {
   if (!usb_parse_generation(args, &generation)) {
     console_puts("Usage: usb test midiasync "
         "[start | status | reap] <generation>\n");
+    return;
+  }
+  if (midi_output_owns_generation(generation)) {
+    console_puts("Bulk OUT owned by the MIDI output service.\n");
     return;
   }
   usb_device_t device = {0};
@@ -3556,6 +3566,131 @@ static void cmd_midi_input(const char *args) {
   midi_console_emit(&output, true);
 }
 
+static const char *midi_output_state_name(midi_output_state_t state) {
+  switch (state) {
+    case MIDI_OUTPUT_IDLE: return "Idle";
+    case MIDI_OUTPUT_RUNNING: return "Running";
+    case MIDI_OUTPUT_STOPPED: return "Stopped";
+    case MIDI_OUTPUT_DISCONNECTED: return "Disconnected";
+    case MIDI_OUTPUT_FAILED: return "Failed";
+    default: return "Unknown";
+  }
+}
+
+static void cmd_midi_output(const char *args) {
+  const char *p = args;
+  if (next_word_is(&p, "send")) {
+    unsigned int generation = 0U;
+    unsigned int cable = 0U;
+    uint8_t bytes[3] = {0};
+    unsigned int count = 0U;
+    if (!next_uint(&p, &generation) || generation == 0U ||
+        !next_uint(&p, &cable)) {
+      console_puts("Usage: midi output send "
+          "<generation> <cable> <hh> [hh ...]\n");
+      return;
+    }
+    while (!end_of_args(p)) {
+      if (count == 3U || !midi_next_hex_byte(&p, &bytes[count])) {
+        console_puts("Usage: midi output send "
+            "<generation> <cable> <hh> [hh ...]\n");
+        return;
+      }
+      count++;
+    }
+    if (count == 0U) {
+      console_puts("Missing MIDI message.\n");
+      return;
+    }
+    midi_short_message_t message = {
+      .status = bytes[0],
+      .length = (uint8_t)count
+    };
+    if (count > 1U)
+      message.data[0] = bytes[1];
+    if (count > 2U)
+      message.data[1] = bytes[2];
+    bool queued = midi_output_enqueue_short(generation, cable, &message);
+    console_printf("MIDI output: %s\n", queued ? "QUEUED" : "NOT QUEUED");
+    return;
+  }
+  if (next_word_is(&p, "test")) {
+    unsigned int generation = 0U;
+    unsigned int count = 0U;
+    if (!next_uint(&p, &generation) || generation == 0U ||
+        !next_uint(&p, &count) || count == 0U ||
+        count > 128U || !end_of_args(p)) {
+      console_puts( "Usage: midi output test <generation> <count 1..128>\n");
+      return;
+    }
+    console_puts("WARNING: Sends real MIDI OUT messages: "
+        "channel 16, CC 102.\n");
+    unsigned int accepted = 0U;
+    for (unsigned int i = 0U; i < count; i++) {
+      midi_short_message_t message = {
+        .status = 0xbfU,
+        .data = {0x66U, (uint8_t)(i & 0x7fU)},
+        .length = 3U
+      };
+      if (midi_output_enqueue_short(generation, 0U, &message))
+        accepted++;
+    }
+    console_printf("  Accepted : %u\n", accepted);
+    console_printf("  Rejected : %u\n", count - accepted);
+    return;
+  }
+  enum { OUTPUT_START, OUTPUT_STOP, OUTPUT_STATUS } action;
+  if (next_word_is(&args, "start")) {
+    action = OUTPUT_START;
+  } else if (next_word_is(&args, "stop")) {
+    action = OUTPUT_STOP;
+  } else if (next_word_is(&args, "status")) {
+    action = OUTPUT_STATUS;
+  } else {
+    console_puts("Usage: midi output "
+        "[start | stop | status | send | test]\n");
+    return;
+  }
+  uint32_t generation = 0U;
+  if (!usb_parse_generation(args, &generation)) {
+    console_puts("Usage: midi output "
+        "[start | stop | status] <generation>\n");
+    return;
+  }
+  if (action == OUTPUT_START) {
+    bool started = midi_output_start_generation(generation);
+    console_printf("MIDI output: %s\n", started ? "STARTED" : "NOT READY");
+    return;
+  }
+  if (action == OUTPUT_STOP) {
+    bool stopped = midi_output_stop_generation(generation);
+    console_printf("MIDI output: %s\n", stopped ? "STOPPED" : "NOT READY");
+    return;
+  }
+  midi_output_info_t info = {0};
+  if (!midi_output_get_info(generation, &info)) {
+    console_puts("MIDI output unavailable.\n");
+    return;
+  }
+  console_printf("MIDI output (generation %u):\n", (unsigned int)generation);
+  console_printf("  State       : %s\n", midi_output_state_name(info.state));
+  console_printf("  Slot        : %u\n", (unsigned int)info.slot_id);
+  console_printf("  OUT cables  : %u\n", (unsigned int)info.cables);
+  console_printf("  Accepted    : %llu\n", (unsigned long long)info.accepted);
+  console_printf("  Confirmed   : %llu\n",
+      (unsigned long long)info.confirmed);
+  console_printf("  Transfers   : %llu\n",
+      (unsigned long long)info.transfers);
+  console_printf("  Failures    : %llu\n", (unsigned long long)info.failures);
+  console_printf("  Queue       : %u / %u\n",
+      info.queue_depth, MIDI_OUTPUT_QUEUE_CAPACITY);
+  console_printf("  Queue peak  : %u\n", info.queue_peak);
+  console_printf("  In flight   : %u packets\n", info.in_flight);
+  console_printf("  Full rejects: %llu\n",
+      (unsigned long long)info.full_rejections);
+  console_printf("  Last error  : %u\n", (unsigned int)info.last_error);
+}
+
 static void cmd_midi(const char *args) {
   if (next_word_is(&args, "decode")) {
     cmd_midi_decode(args);
@@ -3581,7 +3716,11 @@ static void cmd_midi(const char *args) {
     cmd_midi_input(args);
     return;
   }
-  console_puts("Usage: midi [decode | rx | monitor | auto | stream | input]\n");
+  if (next_word_is(&args, "output")) {
+    cmd_midi_output(args);
+    return;
+  }
+  console_puts("Usage: midi [decode | rx | monitor | auto | stream | input | output]\n");
 }
 
 // Commands will be added here as they are implemented.

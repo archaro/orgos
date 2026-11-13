@@ -3,6 +3,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "midi_stream.h"
+
 typedef struct {
   uint8_t configuration;
   uint8_t midi_interface;
@@ -49,6 +51,14 @@ bool usb_midi_decode_packet(const uint8_t packet[4], usb_midi_event_t *event);
 // zero padding.
 bool usb_midi_out_packet(const usb_midi_config_t *config, unsigned int cable,
     unsigned int cin, const uint8_t message[3], uint8_t packet[4]);
+
+// Encode a complete MIDI short message into a
+// USB-MIDI 1.0 event packet.
+//
+// Rejects SysEx, invalid statuses, incorrect lengths
+// and non-seven-bit data bytes.
+bool usb_midi_short_packet(const usb_midi_config_t *config, unsigned int cable,
+    const midi_short_message_t *message, uint8_t packet[4]);
 
 bool usb_midi_parse_config(const uint8_t *data,
     unsigned int length, usb_midi_config_t *result);

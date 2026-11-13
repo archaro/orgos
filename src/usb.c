@@ -10,6 +10,7 @@
 #include "usb_midi_test.h"
 #include "midi_auto.h"
 #include "midi_input.h"
+#include "midi_output.h"
 
 #define USB_ROOT_PORT 1U
 #define USB_HIGH_SPEED 3U
@@ -1198,6 +1199,10 @@ void usb_service(void) {
   // Finalise nonblocking Bulk OUT transfers whose
   // completion events have reached their waiters.
   xhci_bulk_out_async_service();
+
+  // Reconcile completed MIDI transmissions and
+  // submit the next eligible output batch.
+  midi_output_service();
 
   // Service the diagnostic MIDI receiver, if active.
   usb_midi_in_stress_service();

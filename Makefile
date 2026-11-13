@@ -4,6 +4,8 @@ CROSS   ?= aarch64-linux-gnu-
 CC      := $(CROSS)gcc
 LD      := $(CROSS)ld
 OBJCOPY := $(CROSS)objcopy
+HOSTCC     ?= cc
+HOSTCFLAGS ?= -std=gnu17 -Wall -Wextra -Werror -O2
 
 SRC_DIR := src
 OBJ_DIR := obj
@@ -47,7 +49,7 @@ ASFLAGS := \
 
 LDFLAGS := -T link.ld
 
-.PHONY: all clean
+.PHONY: all clean check
 
 all: $(TARGET)
 
@@ -68,6 +70,14 @@ $(OBJ_DIR):
 
 clean:
 	rm -rf $(OBJ_DIR) $(TARGET)
+
+check: | $(OBJ_DIR)
+	$(HOSTCC) $(HOSTCFLAGS) -I$(SRC_DIR) \
+		tests/midi_output_test.c \
+		$(SRC_DIR)/midi_output.c \
+		$(SRC_DIR)/usb_midi.c \
+		-o $(OBJ_DIR)/midi_output_test
+	$(OBJ_DIR)/midi_output_test
 
 -include $(DEPS)
 

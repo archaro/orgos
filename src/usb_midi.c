@@ -27,6 +27,63 @@ bool usb_midi_out_packet(const usb_midi_config_t *config, unsigned int cable,
   return true;
 }
 
+bool usb_midi_short_packet(const usb_midi_config_t *config, unsigned int cable,
+    const midi_short_message_t *message, uint8_t packet[4]) {
+
+  if (!message || !packet)
+    return false;
+
+  uint8_t status = message->status;
+  uint8_t length = 0U;
+  uint8_t cin = 0U;
+  if (status >= 0x80U && status <= 0xefU) {
+    cin = status >> 4U;
+    length = cin == 0xcU || cin == 0xdU ? 2U : 3U;
+  } else {
+    switch (status) {
+      case 0xf1U:
+      case 0xf3U:
+        cin = 0x2U;
+        length = 2U;
+        break;
+      case 0xf2U:
+        cin = 0x3U;
+        length = 3U;
+        break;
+      case 0xf6U:
+      case 0xf7U:
+        cin = 0x5U;
+        length = 1U;
+        break;
+      case 0xf8U:
+      case 0xfaU:
+      case 0xfbU:
+      case 0xfcU:
+      case 0xfeU:
+      case 0xffU:
+        cin = 0xfU;
+        length = 1U;
+        break;
+      default:
+        return false;
+    }
+  }
+
+  if (message->length != length)
+    return false;
+
+  for (unsigned int i = 0U; i + 1U < length; i++) {
+    if (message->data[i] >= 0x80U)
+      return false;
+  }
+
+  uint8_t bytes[3] = {status, 0U, 0U};
+  for (unsigned int i = 1U; i < length; i++)
+    bytes[i] = message->data[i - 1U];
+
+  return usb_midi_out_packet(config, cable, cin, bytes, packet);
+}
+
 bool usb_midi_decode_packet(const uint8_t packet[4],
     usb_midi_event_t *event) {
 
