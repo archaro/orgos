@@ -1851,7 +1851,6 @@ static xhci_dispatch_result_t xhci_dispatch_one(void) {
       continue;
 
     // A duplicate completion is a protocol error.
-    // A duplicate completion is a protocol error.
     if (waiter->completed) {
       event_stats.duplicate_events++;
       return xhci_dispatch_unhandled(&event);
@@ -2783,180 +2782,50 @@ xhci_bulk_out_result_t xhci_downstream_bulk_out(uint8_t slot_id,
 
   *result = (xhci_bulk_out_info_t){0};
 
-  // Resolve the slot before accessing any device-owned
-  // transfer state or DMA resources.
-  xhci_device_t *device = xhci_downstream_by_slot(slot_id);
-  if (!device)
-    return XHCI_BULK_OUT_NOT_READY;
+  // Use the same submission path as an asynchronous
+  // client. The synchronous API differs only in
+  // waiting for the definitive outcome.
+  xhci_bulk_out_result_t started =
+      xhci_bulk_out_async_start(slot_id, data, length);
 
-  if (!data || device->lifecycle.quiesced || !device->bulk_out_ready ||
-      device->bulk_out_active || device->bulk_out_failed ||
-      device->bulk_out_async.state != XHCI_BULK_OUT_ASYNC_IDLE ||
-      !controller_running || !controller_verified || command_outstanding ||
-      command_ring_failed || device->bulk_out_ring.owner != DMA_OWNER_DEVICE)
-    return XHCI_BULK_OUT_NOT_READY;
+  if (started != XHCI_BULK_OUT_OK)
+    return started;
 
-  if (length == 0U || length > 64U)
-    return XHCI_BULK_OUT_INVALID_LENGTH;
+  for (;;) {
+    // Dispatch hardware events, including completions
+    // for unrelated active Bulk IN receivers.
+    xhci_dispatch_wait_step();
 
-  xhci_info_t controller;
-  xhci_port_t port;
+    // Convert dispatched completions into terminal
+    // transaction states. This also checks timeouts.
+    xhci_bulk_out_async_service();
 
-  if (!xhci_probe(&controller) ||
-      !xhci_port_read(device->root_port, &port) ||
-      !port.connected || !port.enabled || !port.powered ||
-      port.resetting || port.speed != 3U)
-    return XHCI_BULK_OUT_NOT_READY;
+    xhci_bulk_out_async_info_t state = {0};
 
-  cache_info_t cache;
-  if (!cache_get_info(&cache) ||
-      cache.data_line_size == 0U ||
-      cache.data_line_size > PAGE_SIZE ||
-      (cache.data_line_size & (cache.data_line_size - 1U)))
-    return XHCI_BULK_OUT_NOT_READY;
+    if (!xhci_bulk_out_async_get(slot_id, &state))
+      return XHCI_BULK_OUT_EVENT_FAILED;
 
-  dma_buffer_t *buffer = &device->bulk_out_buffer;
+    *result = state.transfer;
 
-  if (!buffer->pages && !dma_alloc(64U, 64U, buffer))
-    return XHCI_BULK_OUT_ALLOCATION_FAILED;
+    if (state.state == XHCI_BULK_OUT_ASYNC_COMPLETE ||
+        state.state == XHCI_BULK_OUT_ASYNC_FAILED) {
 
-  uint8_t *bytes = buffer->virtual;
-  for (uint32_t i = 0U; i < length; i++)
-    bytes[i] = data[i];
+      // Only definitive outcomes may be acknowledged.
+      if (!xhci_bulk_out_async_reap(slot_id, &state))
+        return XHCI_BULK_OUT_EVENT_FAILED;
 
-  if (!dma_begin_device(buffer, DMA_TO_DEVICE))
-    return XHCI_BULK_OUT_DMA_FAILED;
-
-  unsigned int index = device->bulk_out_index;
-  uint32_t cycle = device->bulk_out_cycle ?  XHCI_TRB_CYCLE : 0U;
-
-  xhci_trb_t *ring = device->bulk_out_ring.virtual;
-  xhci_trb_t *trb = &ring[index];
-
-  // Normal TRB: one data buffer, one transfer event.
-  trb->parameter = buffer->bus;
-  trb->status = length;
-  trb->control = (1U << XHCI_TRB_TYPE_SHIFT) | XHCI_TRB_IOC | cycle;
-
-  result->slot_id = device->slot_id;
-  result->endpoint_id = XHCI_BULK_OUT_DCI;
-  result->transfer_trb = device->bulk_out_ring.bus +
-      (uint64_t)index * sizeof(xhci_trb_t);
-  result->length = length;
-
-  if (!xhci_bulk_out_publish(device, index, cache.data_line_size)) {
-    device->bulk_out_failed = true;
-    dma_end_device(buffer);
-    return XHCI_BULK_OUT_RING_FAILED;
-  }
-
-  // Register the transfer completion before
-  // ringing the Bulk OUT endpoint doorbell.
-  xhci_event_waiter_t *waiter = xhci_waiter_register(
-      XHCI_TRB_TRANSFER_EVENT, device->slot_id,
-      XHCI_BULK_OUT_DCI, result->transfer_trb);
-
-  if (!waiter) {
-    device->bulk_out_failed = true;
-    if (!dma_end_device(buffer))
-      return XHCI_BULK_OUT_DMA_FAILED;
-    return XHCI_BULK_OUT_EVENT_FAILED;
-  }
-
-  device->bulk_out_active = true;
-  __asm__ volatile("dsb sy" ::: "memory");
-
-  // Device doorbell, target 4: EP2 OUT.
-  xhci_write(controller.doorbell_offset +
-      4U * device->slot_id, XHCI_BULK_OUT_DCI);
-
-  uint64_t started = timer_now_us();
-  while (timer_now_us() - started < XHCI_TRANSFER_TIMEOUT_US) {
-    xhci_dispatch_result_t status = xhci_dispatch_wait_step();
-
-    if (status == XHCI_DISPATCH_READ_ERROR ||
-        status == XHCI_DISPATCH_UNHANDLED)
-      goto event_failed;
-
-    if (!waiter->completed) {
-      uint32_t usbsts = xhci_read(
-          controller.capability_length + XHCI_USBSTS);
-      if (usbsts & (XHCI_STS_HALTED | XHCI_STS_HOST_ERROR)) {
-        result->controller_status = usbsts;
-        goto event_failed;
-      }
-      continue;
+      *result = state.transfer;
+      return state.result;
     }
 
-    // The dispatcher has matched the event to
-    // our slot, endpoint and submitted transfer TRB.
-    xhci_event_t event = waiter->event;
-    xhci_waiter_release(waiter);
+    if (state.state == XHCI_BULK_OUT_ASYNC_UNCERTAIN)
+      return state.result;
 
-    result->completion_code = event.completion_code;
-    result->event_parameter = event.parameter;
-    result->event_status = event.status;
-    result->elapsed_us = timer_now_us() - started;
-    result->controller_status = xhci_read(
-        controller.capability_length + XHCI_USBSTS);
-
-    if (event.completion_code != XHCI_COMPLETION_SUCCESS)
-      goto transfer_failed;
-
-    // The controller has finished reading the data buffer.
-    if (!dma_end_device(buffer))
-      goto dma_failed;
-
-    // Once a transfer in the new cycle completes, the
-    // controller must have traversed the old Link TRB.
-    if (device->bulk_out_wrap_pending) {
-      xhci_trb_t *link = &ring[XHCI_RING_TRBS - 1U];
-      link->control = (link->control & ~XHCI_TRB_CYCLE) |
-          (device->bulk_out_cycle ? XHCI_TRB_CYCLE : 0U);
-      if (!xhci_bulk_out_publish(device,
-          XHCI_RING_TRBS - 1U, cache.data_line_size))
-        goto ring_failed;
-      device->bulk_out_wrap_pending = false;
-    }
-    device->bulk_out_index++;
-    if (device->bulk_out_index == XHCI_RING_TRBS - 1U) {
-      device->bulk_out_index = 0U;
-      device->bulk_out_cycle ^= 1U;
-      device->bulk_out_wrap_pending = true;
-    }
-
-    device->bulk_out_active = false;
-    return XHCI_BULK_OUT_OK;
+    // An unexpected state is not permission to
+    // release transfer ownership.
+    if (state.state != XHCI_BULK_OUT_ASYNC_PENDING)
+      return XHCI_BULK_OUT_EVENT_FAILED;
   }
-
-  result->elapsed_us = timer_now_us() - started;
-  result->controller_status = xhci_read(
-      controller.capability_length + XHCI_USBSTS);
-  xhci_waiter_release(waiter);
-  device->bulk_out_failed = true;
-  device->bulk_out_active = false;
-  return XHCI_BULK_OUT_TIMEOUT;
-
-transfer_failed:
-  device->bulk_out_failed = true;
-  device->bulk_out_active = false;
-  return XHCI_BULK_OUT_TRANSFER_FAILED;
-
-event_failed:
-  xhci_waiter_release(waiter);
-  device->bulk_out_failed = true;
-  device->bulk_out_active = false;
-  return XHCI_BULK_OUT_EVENT_FAILED;
-
-dma_failed:
-  device->bulk_out_failed = true;
-  device->bulk_out_active = false;
-  return XHCI_BULK_OUT_DMA_FAILED;
-
-ring_failed:
-  device->bulk_out_failed = true;
-  device->bulk_out_active = false;
-  return XHCI_BULK_OUT_RING_FAILED;
 }
 
 xhci_bulk_out_result_t xhci_bulk_out_async_start(
@@ -3085,17 +2954,38 @@ void xhci_bulk_out_async_service(void) {
       continue;
     }
 
-    uint64_t elapsed =
-        timer_now_us() - device->bulk_out_async_started;
+    uint64_t elapsed = timer_now_us() - device->bulk_out_async_started;
 
     if (!waiter->completed) {
-      if (async->state == XHCI_BULK_OUT_ASYNC_PENDING &&
-          elapsed >= XHCI_TRANSFER_TIMEOUT_US) {
-        // Ownership is unresolved, not released.
-        device->bulk_out_failed = true;
-        async->state = XHCI_BULK_OUT_ASYNC_UNCERTAIN;
-        async->result = XHCI_BULK_OUT_TIMEOUT;
-        async->transfer.elapsed_us = elapsed;
+      if (async->state == XHCI_BULK_OUT_ASYNC_PENDING) {
+        xhci_bulk_out_result_t failure = XHCI_BULK_OUT_OK;
+
+        if (dispatch_fault != XHCI_DISPATCH_NONE) {
+          failure = XHCI_BULK_OUT_EVENT_FAILED;
+        } else {
+          xhci_info_t controller = {0};
+          if (!xhci_probe(&controller)) {
+            failure = XHCI_BULK_OUT_EVENT_FAILED;
+          } else {
+            uint32_t status = xhci_read(
+                controller.capability_length + XHCI_USBSTS);
+            async->transfer.controller_status = status;
+            if (status & (XHCI_STS_HALTED | XHCI_STS_HOST_ERROR))
+              failure = XHCI_BULK_OUT_EVENT_FAILED;
+          }
+        }
+
+        if (failure != XHCI_BULK_OUT_OK ||
+            elapsed >= XHCI_TRANSFER_TIMEOUT_US) {
+
+          // An error or timeout does not prove that
+          // the hardware has relinquished ownership.
+          device->bulk_out_failed = true;
+          async->state = XHCI_BULK_OUT_ASYNC_UNCERTAIN;
+          async->result = failure != XHCI_BULK_OUT_OK ?
+              failure : XHCI_BULK_OUT_TIMEOUT;
+          async->transfer.elapsed_us = elapsed;
+        }
       }
 
       continue;

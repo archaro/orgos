@@ -3427,17 +3427,6 @@ static unsigned int midi_console_feed(midi_stream_parser_t *parser,
   return short_count;
 }
 
-static void cmd_midi_parse(const char *args) {
-  if (!midi_valid_byte_list(args)) {
-    console_puts("Usage: midi parse <hh> [hh ...]\n");
-    return;
-  }
-  midi_stream_parser_t parser = {0};
-  console_puts("MIDI short-message parser:\n");
-  unsigned int messages = midi_console_feed(&parser, args, false);
-  console_printf("Short messages: %u\n", messages);
-}
-
 static void cmd_midi_stream(const char *args) {
   const char *p = args;
   if (next_word_is(&p, "reset") && end_of_args(p)) {
@@ -3584,10 +3573,6 @@ static void cmd_midi(const char *args) {
     cmd_midi_auto(args);
     return;
   }
-  if (next_word_is(&args, "parse")) {
-    cmd_midi_parse(args);
-    return;
-  }
   if (next_word_is(&args, "stream")) {
     cmd_midi_stream(args);
     return;
@@ -3596,7 +3581,7 @@ static void cmd_midi(const char *args) {
     cmd_midi_input(args);
     return;
   }
-  console_puts("Usage: midi [decode | rx | monitor | auto | parse | stream | input]\n");
+  console_puts("Usage: midi [decode | rx | monitor | auto | stream | input]\n");
 }
 
 // Commands will be added here as they are implemented.
