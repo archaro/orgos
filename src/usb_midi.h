@@ -60,6 +60,18 @@ bool usb_midi_out_packet(const usb_midi_config_t *config, unsigned int cable,
 bool usb_midi_short_packet(const usb_midi_config_t *config, unsigned int cable,
     const midi_short_message_t *message, uint8_t packet[4]);
 
+// Encode one SysEx fragment.
+//
+// Non-final fragments contain exactly three bytes.
+// Final fragments contain one to three bytes,
+// with F7 as the last byte.
+//
+// This encodes framing only; the caller owns
+// the state of the complete SysEx message.
+bool usb_midi_sysex_packet(const usb_midi_config_t *config,
+    unsigned int cable, const uint8_t *bytes, unsigned int length,
+    bool ending, uint8_t packet[4]);
+
 bool usb_midi_parse_config(const uint8_t *data,
     unsigned int length, usb_midi_config_t *result);
 

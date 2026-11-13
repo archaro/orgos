@@ -3577,8 +3577,76 @@ static const char *midi_output_state_name(midi_output_state_t state) {
   }
 }
 
+static void cmd_midi_output_sysex(const char *args) {
+  const char *p = args;
+  if (next_word_is(&p, "begin")) {
+    unsigned int generation = 0U;
+    unsigned int cable = 0U;
+    if (!next_uint(&p, &generation) || generation == 0U ||
+        !next_uint(&p, &cable) || !end_of_args(p)) {
+      console_puts("Usage: midi output sysex begin "
+          "<generation> <cable>\n");
+      return;
+    }
+    bool started = midi_output_sysex_begin(generation, cable);
+    console_printf("MIDI SysEx: %s\n", started ? "STARTED" : "NOT READY");
+    return;
+  }
+  p = args;
+  if (next_word_is(&p, "write")) {
+    unsigned int generation = 0U;
+    if (!next_uint(&p, &generation) || generation == 0U || end_of_args(p)) {
+      console_puts("Usage: midi output sysex write "
+          "<generation> <hh> [hh ...]\n");
+      return;
+    }
+    // Validate the whole argument list before
+    // accepting any part of it.
+    const char *probe = p;
+    unsigned int total = 0U;
+    uint8_t byte = 0U;
+    while (!end_of_args(probe)) {
+      if (!midi_next_hex_byte(&probe, &byte) || byte >= 0x80U) {
+        console_puts("SysEx payload must contain "
+            "seven-bit hexadecimal bytes.\n");
+        return;
+      }
+      total++;
+    }
+    unsigned int accepted = 0U;
+    while (!end_of_args(p)) {
+      if (!midi_next_hex_byte(&p, &byte))
+        break;
+      if (!midi_output_sysex_write(generation, byte))
+        break;
+      accepted++;
+    }
+    console_printf("SysEx payload: %u / %u bytes accepted\n",
+        accepted, total);
+    if (accepted != total)
+      console_puts("Retry starting with the first unaccepted byte.\n");
+    return;
+  }
+  p = args;
+  if (next_word_is(&p, "end")) {
+    uint32_t generation = 0U;
+    if (!usb_parse_generation(p, &generation)) {
+      console_puts("Usage: midi output sysex end <generation>\n");
+      return;
+    }
+    bool ended = midi_output_sysex_end(generation);
+    console_printf("MIDI SysEx end: %s\n", ended ? "QUEUED" : "NOT READY");
+    return;
+  }
+  console_puts("Usage: midi output sysex [begin | write | end]\n");
+}
+
 static void cmd_midi_output(const char *args) {
   const char *p = args;
+  if (next_word_is(&p, "sysex")) {
+    cmd_midi_output_sysex(p);
+    return;
+  }
   if (next_word_is(&p, "send")) {
     unsigned int generation = 0U;
     unsigned int cable = 0U;
@@ -3689,6 +3757,18 @@ static void cmd_midi_output(const char *args) {
   console_printf("  Full rejects: %llu\n",
       (unsigned long long)info.full_rejections);
   console_printf("  Last error  : %u\n", (unsigned int)info.last_error);
+  console_printf("  SysEx active: %s\n", info.sysex_active ? "Yes" : "No");
+  if (info.sysex_active) {
+    console_printf("  SysEx cable : %u\n", (unsigned int)info.sysex_cable);
+    console_printf("  SysEx staged: %u bytes\n",
+        (unsigned int)info.sysex_staged);
+  }
+  console_printf("  SysEx starts: %llu\n",
+      (unsigned long long)info.sysex_started);
+  console_printf("  SysEx ends  : %llu\n",
+      (unsigned long long)info.sysex_completed);
+  console_printf("  SysEx data  : %llu bytes\n",
+      (unsigned long long)info.sysex_payload_bytes);
 }
 
 static void cmd_midi(const char *args) {

@@ -84,6 +84,37 @@ bool usb_midi_short_packet(const usb_midi_config_t *config, unsigned int cable,
   return usb_midi_out_packet(config, cable, cin, bytes, packet);
 }
 
+bool usb_midi_sysex_packet(const usb_midi_config_t *config,
+    unsigned int cable, const uint8_t *bytes,
+    unsigned int length, bool ending, uint8_t packet[4]) {
+
+  if (!bytes || !packet || length == 0U || length > 3U ||
+      (!ending && length != 3U) || (ending && bytes[length - 1U] != 0xf7U))
+    return false;
+
+  for (unsigned int i = 0U; i < length; i++) {
+    if (ending && i == length - 1U)
+      continue;
+
+    // F0 is permitted at the beginning of
+    // the first fragment. All other payload
+    // bytes must be seven-bit data.
+    if (i == 0U && bytes[i] == 0xf0U)
+      continue;
+
+    if (bytes[i] >= 0x80U)
+      return false;
+  }
+
+  uint8_t data[3] = {0};
+  for (unsigned int i = 0U; i < length; i++)
+    data[i] = bytes[i];
+
+  unsigned int cin = ending ? 4U + length : 4U;
+
+  return usb_midi_out_packet(config, cable, cin, data, packet);
+}
+
 bool usb_midi_decode_packet(const uint8_t packet[4],
     usb_midi_event_t *event) {
 

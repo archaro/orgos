@@ -30,6 +30,9 @@ typedef struct {
   uint8_t parent_port;
   bool failure_recorded;
   uint64_t next_submit_us;
+  // At most two bytes await a complete
+  // USB-MIDI SysEx event packet.
+  uint8_t sysex_pending[2];
 } midi_output_record_t;
 
 static midi_output_record_t outputs[USB_MANAGED_DEVICE_CAPACITY];
@@ -145,7 +148,8 @@ bool midi_output_stop_generation(uint32_t generation) {
   midi_output_record_t *output = output_find(generation);
 
   if (!output || output->info.state != MIDI_OUTPUT_RUNNING ||
-      output->info.queue_depth != 0U || output->info.in_flight != 0U)
+      output->info.queue_depth != 0U || output->info.in_flight != 0U ||
+      output->info.sysex_active)
     return false;
 
   output->info.state = MIDI_OUTPUT_STOPPED;
@@ -159,17 +163,10 @@ bool midi_output_owns_generation(uint32_t generation) {
       output->info.state != MIDI_OUTPUT_STOPPED;
 }
 
-bool midi_output_enqueue_short(uint32_t generation,
-    unsigned int cable, const midi_short_message_t *message) {
+static bool output_enqueue_packet(midi_output_record_t *output,
+    const uint8_t packet[4], uint8_t length) {
 
-  midi_output_record_t *output = output_find(generation);
-
-  if (!output || output->info.state != MIDI_OUTPUT_RUNNING)
-    return false;
-
-  uint8_t packet[4] = {0};
-
-  if (!usb_midi_short_packet(&output->config, cable, message, packet))
+  if (!output || !packet || length == 0U || length > 3U)
     return false;
 
   if (output->info.queue_depth == MIDI_OUTPUT_QUEUE_CAPACITY) {
@@ -180,15 +177,125 @@ bool midi_output_enqueue_short(uint32_t generation,
   unsigned int tail = (output->head + output->info.queue_depth) %
       MIDI_OUTPUT_QUEUE_CAPACITY;
 
-  for (unsigned int j = 0U; j < 4U; j++)
-    output->queue[tail].packet[j] = packet[j];
+  midi_output_packet_t *entry = &output->queue[tail];
 
-  output->queue[tail].length = message->length;
+  for (unsigned int i = 0U; i < 4U; i++)
+    entry->packet[i] = packet[i];
+
+  entry->length = length;
+
   output->info.queue_depth++;
   output->info.accepted++;
 
   if (output->info.queue_depth > output->info.queue_peak)
     output->info.queue_peak = output->info.queue_depth;
+
+  return true;
+}
+
+bool midi_output_enqueue_short(uint32_t generation,
+    unsigned int cable, const midi_short_message_t *message) {
+
+  midi_output_record_t *output = output_find(generation);
+
+  if (!output || output->info.state != MIDI_OUTPUT_RUNNING ||
+      output->info.sysex_active)
+    return false;
+
+  uint8_t packet[4] = {0};
+
+  if (!usb_midi_short_packet(&output->config, cable, message, packet))
+    return false;
+
+  return output_enqueue_packet(output, packet, message->length);
+}
+
+bool midi_output_sysex_begin(uint32_t generation,
+    unsigned int cable) {
+
+  midi_output_record_t *output = output_find(generation);
+
+  if (!output || output->info.state != MIDI_OUTPUT_RUNNING ||
+      output->info.sysex_active ||
+      cable >= output->info.cables)
+    return false;
+
+  output->info.sysex_active = true;
+  output->info.sysex_cable = (uint8_t)cable;
+  output->info.sysex_staged = 1U;
+  output->sysex_pending[0] = 0xf0U;
+  output->info.sysex_started++;
+
+  return true;
+}
+
+bool midi_output_sysex_write(uint32_t generation,
+    uint8_t byte) {
+
+  midi_output_record_t *output = output_find(generation);
+
+  if (!output || output->info.state != MIDI_OUTPUT_RUNNING ||
+      !output->info.sysex_active || byte >= 0x80U)
+    return false;
+
+  unsigned int staged = output->info.sysex_staged;
+
+  if (staged < 2U) {
+    output->sysex_pending[staged] = byte;
+    output->info.sysex_staged++;
+  } else if (staged == 2U) {
+    uint8_t bytes[3] = {
+      output->sysex_pending[0],
+      output->sysex_pending[1],
+      byte
+    };
+
+    uint8_t packet[4] = {0};
+
+    if (!usb_midi_sysex_packet(
+            &output->config, output->info.sysex_cable,
+            bytes, 3U, false, packet))
+      return false;
+
+    // On queue exhaustion, neither the staged
+    // bytes nor the new byte are consumed.
+    if (!output_enqueue_packet(output, packet, 3U))
+      return false;
+
+    output->info.sysex_staged = 0U;
+  } else {
+    return false;
+  }
+
+  output->info.sysex_payload_bytes++;
+  return true;
+}
+
+bool midi_output_sysex_end(uint32_t generation) {
+  midi_output_record_t *output = output_find(generation);
+
+  if (!output || output->info.state != MIDI_OUTPUT_RUNNING ||
+      !output->info.sysex_active || output->info.sysex_staged > 2U)
+    return false;
+
+  unsigned int staged = output->info.sysex_staged;
+  uint8_t bytes[3] = {0};
+  for (unsigned int i = 0U; i < staged; i++)
+    bytes[i] = output->sysex_pending[i];
+  bytes[staged] = 0xf7U;
+
+  uint8_t packet[4] = {0};
+
+  if (!usb_midi_sysex_packet(&output->config, output->info.sysex_cable,
+      bytes, staged + 1U, true, packet))
+    return false;
+
+  if (!output_enqueue_packet(output, packet, (uint8_t)(staged + 1U)))
+    return false;
+
+  output->info.sysex_active = false;
+  output->info.sysex_staged = 0U;
+  output->info.sysex_completed++;
 
   return true;
 }
