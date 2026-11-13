@@ -1,12 +1,12 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "midi_auto.h"
-#include "midi_monitor.h"
+#include "xhci.h"
 #include "usb.h"
 #include "usb_enumerate.h"
 #include "usb_midi_rx.h"
-#include "xhci.h"
+#include "midi_auto.h"
+#include "midi_input.h"
 
 // Automatic MIDI reception is opt-in while
 // diagnostics still require direct stream access.
@@ -91,11 +91,9 @@ void midi_auto_service(void) {
       continue;
     }
 
-    // The counting monitor is our temporary
-    // normal-operation event consumer.
-    // Later, application MIDI processing can
-    // replace it without changing USB ownership.
-    if (!midi_monitor_start(device.generation)) {
+    // Normal MIDI reception now delivers structured
+    // stream events to the application-facing queue.
+    if (!midi_input_start_generation(device.generation)) {
       auto_state.failed++;
       continue;
     }

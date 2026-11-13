@@ -3374,7 +3374,7 @@ static void cmd_midi_stream(const char *args) {
 }
 
 static void cmd_midi_input(const char *args) {
-  enum { INPUT_START, INPUT_STOP, INPUT_STATUS } action;
+  enum { INPUT_START, INPUT_STOP, INPUT_STATUS, INPUT_READ } action;
 
   if (next_word_is(&args, "start")) {
     action = INPUT_START;
@@ -3382,8 +3382,10 @@ static void cmd_midi_input(const char *args) {
     action = INPUT_STOP;
   } else if (next_word_is(&args, "status")) {
     action = INPUT_STATUS;
+  } else if (next_word_is(&args, "read")) {
+    action = INPUT_READ;
   } else {
-    console_puts("Usage: midi input [start | stop | status] <generation>\n");
+    console_puts("Usage: midi input [start | stop | status | read] <generation>\n");
     return;
   }
 
@@ -3403,6 +3405,27 @@ static void cmd_midi_input(const char *args) {
   if (action == INPUT_STOP) {
     bool stopped = midi_input_stop_generation(generation);
     console_printf("MIDI input: %s\n", stopped ? "DETACHED" : "NOT READY");
+    return;
+  }
+
+  if (action == INPUT_READ) {
+    midi_input_event_t received = {0};
+
+    if (!midi_input_read(generation, &received)) {
+      console_puts("MIDI input queue empty.\n");
+      return;
+    }
+
+    console_printf( "MIDI input event (generation %u, cable %u):\n",
+        (unsigned int)received.generation, (unsigned int)received.cable);
+
+    // Reuse the existing stream-event formatter.
+    midi_stream_output_t output = {
+      .count = 1U
+    };
+
+    output.events[0] = received.event;
+    midi_console_emit(&output, true);
     return;
   }
 
@@ -3430,6 +3453,11 @@ static void cmd_midi_input(const char *args) {
       (unsigned long long)info.sysex_ends);
   console_printf("  SysEx abort : %llu\n",
       (unsigned long long)info.sysex_aborts);
+  console_printf("  Queue       : %u / %u\n",
+      info.queue_depth, MIDI_INPUT_QUEUE_CAPACITY);
+  console_printf("  Queue peak  : %u\n", info.queue_peak);
+  console_printf("  Pending end : %u aborts\n", info.pending_aborts);
+  console_printf("  Stalls      : %llu\n", (unsigned long long)info.stalls);
 
   if (!info.have_last)
     return;

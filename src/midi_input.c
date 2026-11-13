@@ -7,9 +7,16 @@
 #include "usb_enumerate.h"
 #include "usb_midi_rx.h"
 
+_Static_assert(MIDI_INPUT_QUEUE_CAPACITY >= MIDI_USB_BRIDGE_MAX_EVENTS,
+    "Application queue must fit a complete USB-MIDI batch");
+
 typedef struct {
   midi_input_info_t info;
   midi_usb_bridge_t bridge;
+  midi_input_event_t queue[MIDI_INPUT_QUEUE_CAPACITY];
+  unsigned int head;
+  uint16_t pending_abort_cables;
+  bool stalled;
 } midi_input_record_t;
 
 static midi_input_record_t inputs[USB_MANAGED_DEVICE_CAPACITY];
@@ -55,12 +62,71 @@ static void input_count(midi_input_record_t *input,
   }
 }
 
+static bool input_has_space(midi_input_record_t *input, unsigned int needed) {
+  if (needed <= MIDI_INPUT_QUEUE_CAPACITY - input->info.queue_depth) {
+    if (needed != 0U)
+      input->stalled = false;
+    return true;
+  }
+
+  if (!input->stalled) {
+    input->info.stalls++;
+    input->stalled = true;
+  }
+
+  return false;
+}
+
+// Caller has reserved capacity for every event.
+// The packet is inserted atomically in FIFO order.
+static void input_enqueue(midi_input_record_t *input,
+    const midi_usb_batch_t *batch) {
+
+  for (unsigned int i = 0U; i < batch->count; i++) {
+    unsigned int tail = (input->head +
+        input->info.queue_depth) % MIDI_INPUT_QUEUE_CAPACITY;
+
+    input->queue[tail] = (midi_input_event_t){
+      .generation = input->info.generation,
+      .cable = batch->cable,
+      .event = batch->events[i]
+    };
+    input->info.queue_depth++;
+  }
+
+  if (input->info.queue_depth > input->info.queue_peak)
+    input->info.queue_peak = input->info.queue_depth;
+
+  input_count(input, batch);
+}
+
+// Once disconnected there is no incoming traffic.
+// Keep terminal aborts outside the bounded FIFO so
+// they cannot be lost when that FIFO is full.
 static void input_cancel_all(midi_input_record_t *input) {
   for (unsigned int cable = 0U; cable < input->bridge.cables; cable++) {
+
     midi_usb_batch_t batch = {0};
-    if (midi_usb_bridge_cancel(&input->bridge, cable, &batch))
-      input_count(input, &batch);
+    if (!midi_usb_bridge_cancel(&input->bridge, cable, &batch) ||
+        batch.count == 0U)
+      continue;
+
+    uint16_t bit = (uint16_t)(1U << cable);
+
+    if (!(input->pending_abort_cables & bit)) {
+      input->pending_abort_cables |= bit;
+      input->info.pending_aborts++;
+    }
+
+    input_count(input, &batch);
   }
+}
+
+static void input_detach(midi_input_record_t *input, bool lost) {
+  input_cancel_all(input);
+  input->info.attached = false;
+  input->info.lost = lost;
+  input->stalled = false;
 }
 
 static bool input_accept(uint32_t generation,
@@ -77,28 +143,38 @@ static bool input_accept(uint32_t generation,
 
   if (!midi_usb_bridge_prepare(&input->bridge, packet, &next, &batch)) {
 
-    // A malformed packet invalidates only the
-    // corresponding cable's partial MIDI state.
+    // Invalid transport data consumes no application
+    // capacity unless it aborts an unfinished SysEx.
+    bool in_sysex = packet->cable < input->bridge.cables &&
+        input->bridge.parsers[packet->cable].in_sysex;
+
+    if (!input_has_space(input, in_sysex ? 1U : 0U))
+      return false;
+
+    if (packet->cable < input->bridge.cables) {
+      midi_usb_batch_t cancelled = {0};
+
+      if (!midi_usb_bridge_cancel(&input->bridge, packet->cable, &cancelled))
+        return false;
+
+      input_enqueue(input, &cancelled);
+    }
+
     input->info.malformed++;
-
-    midi_usb_batch_t cancelled = {0};
-
-    if (midi_usb_bridge_cancel( &input->bridge, packet->cable, &cancelled))
-      input_count(input, &cancelled);
-
-    // Consume the malformed packet. Repeatedly
-    // retrying it would permanently block input.
     return true;
   }
 
-  // Our diagnostic consumer accepts the entire
-  // batch. An application queue will later be
-  // able to reject it before committing.
+  // Nothing has been consumed or committed yet.
+  // Declining preserves both parser and USB FIFO state.
+  if (!input_has_space(input, batch.count))
+    return false;
+
   if (!midi_usb_bridge_commit(&input->bridge, &batch, &next))
     return false;
 
   input->info.packets++;
-  input_count(input, &batch);
+  input_enqueue(input, &batch);
+
   return true;
 }
 
@@ -110,7 +186,8 @@ bool midi_input_start_generation(uint32_t generation) {
 
     usb_device_t device = {0};
 
-    if (!usb_get_device_at(i, &device) || device.generation != generation)
+    if (!usb_get_device_at(i, &device) ||
+        device.generation != generation)
       continue;
 
     if (device.state != USB_DEVICE_ACTIVE)
@@ -126,7 +203,10 @@ bool midi_input_start_generation(uint32_t generation) {
 
     midi_input_record_t *input = &inputs[i];
 
-    if (input->info.attached)
+    // A stopped receiver cannot be restarted while
+    // its previous application events remain unread.
+    if (input->info.attached || (input->info.generation == generation &&
+         (input->info.queue_depth != 0U || input->info.pending_aborts != 0U)))
       return false;
 
     midi_input_record_t fresh = {0};
@@ -134,16 +214,14 @@ bool midi_input_start_generation(uint32_t generation) {
     if (!midi_usb_bridge_init(&fresh.bridge, rx.cables))
       return false;
 
-    // Subscribe before replacing the old record.
-    // The subscription itself invokes no callback.
     if (!usb_midi_rx_subscribe(generation, input_accept, input))
       return false;
 
     fresh.info.generation = generation;
     fresh.info.cables = rx.cables;
     fresh.info.attached = true;
-    *input = fresh;
 
+    *input = fresh;
     return true;
   }
 
@@ -157,10 +235,49 @@ bool midi_input_stop_generation(uint32_t generation) {
       !usb_midi_rx_unsubscribe(generation, input_accept, input))
     return false;
 
-  input_cancel_all(input);
-  input->info.attached = false;
-
+  input_detach(input, false);
   return true;
+}
+
+bool midi_input_read(uint32_t generation, midi_input_event_t *event) {
+
+  if (!event)
+    return false;
+
+  *event = (midi_input_event_t){0};
+
+  midi_input_record_t *input = input_find(generation);
+  if (!input)
+    return false;
+
+  if (input->info.queue_depth != 0U) {
+    *event = input->queue[input->head];
+    input->head = (input->head + 1U) % MIDI_INPUT_QUEUE_CAPACITY;
+    input->info.queue_depth--;
+    return true;
+  }
+
+  // Terminal aborts follow all previously accepted
+  // events; multiple cables are reported in order.
+  for (unsigned int cable = 0U; cable < input->bridge.cables; cable++) {
+
+    uint16_t bit = (uint16_t)(1U << cable);
+    if (!(input->pending_abort_cables & bit))
+      continue;
+
+    input->pending_abort_cables &= (uint16_t)~bit;
+    input->info.pending_aborts--;
+
+    *event = (midi_input_event_t){
+      .generation = generation,
+      .cable = (uint8_t)cable,
+      .event = {.type = MIDI_STREAM_SYSEX_ABORT}
+    };
+
+    return true;
+  }
+
+  return false;
 }
 
 bool midi_input_get_info(uint32_t generation, midi_input_info_t *info) {
@@ -180,6 +297,7 @@ bool midi_input_get_info(uint32_t generation, midi_input_info_t *info) {
 
 void midi_input_service(void) {
   for (unsigned int i = 0U; i < USB_MANAGED_DEVICE_CAPACITY; i++) {
+
     midi_input_record_t *input = &inputs[i];
     if (!input->info.attached)
       continue;
@@ -196,13 +314,8 @@ void midi_input_service(void) {
         rx.slot_id == device.slot_id)
       continue;
 
-    // The original incarnation can no longer
-    // deliver events. Never let a replacement
-    // device inherit its parser state.
     usb_midi_rx_unsubscribe(generation, input_accept, input);
 
-    input_cancel_all(input);
-    input->info.attached = false;
-    input->info.lost = true;
+    input_detach(input, true);
   }
 }
