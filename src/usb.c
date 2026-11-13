@@ -1195,6 +1195,10 @@ void usb_service(void) {
   // Finalise and rearm completed Bulk IN transfers.
   xhci_bulk_in_stream_service();
 
+  // Finalise nonblocking Bulk OUT transfers whose
+  // completion events have reached their waiters.
+  xhci_bulk_out_async_service();
+
   // Service the diagnostic MIDI receiver, if active.
   usb_midi_in_stress_service();
 

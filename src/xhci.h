@@ -572,6 +572,38 @@ xhci_bulk_out_result_t xhci_downstream_bulk_out(uint8_t slot_id,
     const uint8_t *data, uint32_t length, xhci_bulk_out_info_t *result);
 
 typedef enum {
+  XHCI_BULK_OUT_ASYNC_IDLE,
+  XHCI_BULK_OUT_ASYNC_PENDING,
+  XHCI_BULK_OUT_ASYNC_COMPLETE,
+  XHCI_BULK_OUT_ASYNC_FAILED,
+  XHCI_BULK_OUT_ASYNC_UNCERTAIN
+} xhci_bulk_out_async_state_t;
+
+typedef struct {
+  xhci_bulk_out_async_state_t state;
+  xhci_bulk_out_result_t result;
+  xhci_bulk_out_info_t transfer;
+} xhci_bulk_out_async_info_t;
+
+// OK means submitted, not completed.
+// Only one outstanding Bulk OUT transfer is permitted per device.
+xhci_bulk_out_result_t xhci_bulk_out_async_start(
+    uint8_t slot_id, const uint8_t *data, uint32_t length);
+
+// Inspect without acknowledging completion.
+bool xhci_bulk_out_async_get(
+    uint8_t slot_id, xhci_bulk_out_async_info_t *info);
+
+// Acknowledge a definitive terminal outcome.
+// Uncertain transfers may not be reaped.
+bool xhci_bulk_out_async_reap(
+    uint8_t slot_id, xhci_bulk_out_async_info_t *info);
+
+// Advance asynchronous transfers whose hardware
+// completion events have been dispatched.
+void xhci_bulk_out_async_service(void);
+
+typedef enum {
   XHCI_BULK_IN_IDLE,
   XHCI_BULK_IN_PENDING,
   XHCI_BULK_IN_COMPLETE,

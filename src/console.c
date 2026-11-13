@@ -1802,6 +1802,95 @@ static void cmd_usb_test_midiout(const char *args) {
       info.completion_code == 1U ? "PASS" : "FAILED");
 }
 
+static const char *xhci_async_out_state_name(
+    xhci_bulk_out_async_state_t state) {
+
+  switch (state) {
+    case XHCI_BULK_OUT_ASYNC_IDLE:
+      return "Idle";
+    case XHCI_BULK_OUT_ASYNC_PENDING:
+      return "Pending";
+    case XHCI_BULK_OUT_ASYNC_COMPLETE:
+      return "Complete";
+    case XHCI_BULK_OUT_ASYNC_FAILED:
+      return "Failed";
+    case XHCI_BULK_OUT_ASYNC_UNCERTAIN:
+      return "Uncertain";
+    default:
+      return "Unknown";
+  }
+}
+
+static void cmd_usb_test_midiasync(const char *args) {
+  const char *p = args;
+  if (next_word_is(&p, "start")) {
+    usb_device_t device = {0};
+    usb_midi_config_t midi = {0};
+    unsigned int cable = 0U;
+    if (!usb_test_midi_out_select(p, &device, &midi, &cable)) {
+      console_puts("Usage: usb test midiasync "
+          "start <generation> [cable N]\n");
+      return;
+    }
+    const uint8_t message[3] = { 0xbfU, 0x66U, 0x20U };
+    uint8_t packet[4] = {0};
+    if (!usb_midi_out_packet(&midi, cable, 0x0bU, message, packet)) {
+      console_puts("USB-MIDI OUT cable unavailable.\n");
+      return;
+    }
+    xhci_bulk_out_result_t result =
+        xhci_bulk_out_async_start( device.slot_id, packet, sizeof(packet));
+    console_printf( "Async Bulk OUT (generation %u, slot %u): %s\n",
+        (unsigned int)device.generation, (unsigned int)device.slot_id,
+        result == XHCI_BULK_OUT_OK ?  "SUBMITTED" : "NOT SUBMITTED");
+    console_printf("  Result : %u\n", (unsigned int)result);
+    return;
+  }
+  enum { ASYNC_STATUS, ASYNC_REAP } action;
+  if (next_word_is(&args, "status")) {
+    action = ASYNC_STATUS;
+  } else if (next_word_is(&args, "reap")) {
+    action = ASYNC_REAP;
+  } else {
+    console_puts("Usage: usb test midiasync "
+        "[start | status | reap] <generation>\n");
+    return;
+  }
+  uint32_t generation = 0U;
+  if (!usb_parse_generation(args, &generation)) {
+    console_puts("Usage: usb test midiasync "
+        "[start | status | reap] <generation>\n");
+    return;
+  }
+  usb_device_t device = {0};
+  if (!usb_get_device_by_generation(generation, &device) ||
+      device.slot_id == 0U) {
+    console_puts("Device generation unavailable.\n");
+    return;
+  }
+  xhci_bulk_out_async_info_t info = {0};
+  bool available = action == ASYNC_STATUS ?
+      xhci_bulk_out_async_get(device.slot_id, &info) :
+      xhci_bulk_out_async_reap(device.slot_id, &info);
+  if (!available) {
+    console_puts("Async Bulk OUT result unavailable.\n");
+    return;
+  }
+  console_printf("Async Bulk OUT (generation %u):\n",
+      (unsigned int)generation);
+  console_printf("  State      : %s\n",
+      xhci_async_out_state_name(info.state));
+  console_printf("  Result     : %u\n", (unsigned int)info.result);
+  console_printf("  Completion : %u\n",
+      (unsigned int)info.transfer.completion_code);
+  console_printf("  TRB        : %016llx\n",
+      (unsigned long long)info.transfer.transfer_trb);
+  console_printf("  Elapsed    : %llu us\n",
+      (unsigned long long)info.transfer.elapsed_us);
+  if (action == ASYNC_REAP)
+    console_puts("  Acknowledged\n");
+}
+
 static void cmd_usb_test_midiin_stress(const char *args) {
   if (next_word_is(&args, "reset") && end_of_args(args)) {
     bool reset = usb_midi_in_stress_reset();
@@ -2405,6 +2494,10 @@ static void cmd_usb(const char *args) {
     }
     if (next_word_is(&other_args, "midiin")) {
       cmd_usb_test_midiin(other_args);
+      return;
+    }
+    if (next_word_is(&other_args, "midiasync")) {
+      cmd_usb_test_midiasync(other_args);
       return;
     }
     console_puts(
