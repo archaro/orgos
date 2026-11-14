@@ -170,6 +170,7 @@ typedef struct {
 bool xhci_resource_get_info(xhci_resource_info_t *info);
 
 bool xhci_ep0_match_selftest(void);
+bool xhci_ep0_late_selftest(void);
 
 typedef enum {
   XHCI_SERVICE_IDLE,
@@ -849,6 +850,8 @@ typedef struct {
   bool ep0_submitted;
   bool ep0_completion_seen;
   uint8_t ep0_completion_code;
+  bool ep0_uncertain;
+  uint32_t ep0_late_completions;
   bool ep0_state_valid;
   uint8_t ep0_state;
   bool bulk_out_active;

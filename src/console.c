@@ -1260,6 +1260,10 @@ static void cmd_usb_transfers(const char *args) {
       state.ep0_completion_seen ? "Yes" : "No");
   console_printf("  EP0 code      : %u\n",
       (unsigned int)state.ep0_completion_code);
+  console_printf("  EP0 uncertain : %s\n",
+      state.ep0_uncertain ? "Yes" : "No");
+  console_printf("  EP0 late events: %u\n",
+      (unsigned int)state.ep0_late_completions);
   if (state.ep0_state_valid) {
     console_printf("  EP0 endpoint  : %s (%u)\n",
         xhci_ep_state_name(state.ep0_state), (unsigned int)state.ep0_state);
@@ -2418,6 +2422,12 @@ static void cmd_usb(const char *args) {
       cmd_usb_test_ep0match();
       return;
     }
+    if (console_arg_word(&other_args, "ep0late") &&
+        console_arg_end(other_args)) {
+      console_printf("EP0 late completion: %s\n",
+          xhci_ep0_late_selftest() ? "PASS" : "FAILED");
+      return;
+    }
     if (console_arg_word(&other_args, "noops") &&
         console_arg_end(other_args)) {
       cmd_usb_test_noops();
@@ -2440,7 +2450,7 @@ static void cmd_usb(const char *args) {
       return;
     }
     console_puts(
-        "Usage: usb test [ep0match | noops | midiout | midiwrap | "
+        "Usage: usb test [ep0match | ep0late | noops | midiout | midiwrap | "
         "midiin | midiasync]\n");
     return;
   }

@@ -805,6 +805,11 @@ static bool usb_enumeration_recovery_inspect_record(
     return true;
   }
 
+  if (transfers.ep0_uncertain) {
+    info->result = USB_RECOVERY_EP0_OUTCOME_UNKNOWN;
+    return true;
+  }
+
   if (transfers.active_waiters != 0U || transfers.ep0_active ||
       transfers.bulk_out_active || transfers.bulk_in_pending ||
       transfers.bulk_in_started) {

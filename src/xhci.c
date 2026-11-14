@@ -111,6 +111,19 @@ typedef struct {
 typedef struct xhci_event_waiter xhci_event_waiter_t;
 
 typedef struct {
+  bool submitted;
+  bool completion_seen;
+  uint8_t completion_code;
+  // The synchronous operation has returned,
+  // but the hardware outcome remains unknown.
+  bool uncertain;
+  // Retained until a definitive completion or
+  // a future, verified cancellation procedure.
+  xhci_event_waiter_t *waiter;
+  uint32_t late_completions;
+} xhci_ep0_completion_t;
+
+typedef struct {
   // Current receive transfer.
   xhci_bulk_in_state_t state;
   xhci_bulk_in_info_t info;
@@ -157,9 +170,7 @@ typedef struct {
   bool ep0_wrap_pending;
   bool ep0_failed;
   bool ep0_active;
-  bool ep0_submitted;
-  bool ep0_completion_seen;
-  uint8_t ep0_completion_code;
+  xhci_ep0_completion_t ep0_completion;
   bool prepared;
   bool addressed;
   dma_buffer_t bulk_out_buffer;
@@ -1567,6 +1578,8 @@ bool xhci_port_event_read(xhci_port_change_t *result) {
   return true;
 }
 
+static void xhci_waiter_release(xhci_event_waiter_t *waiter);
+
 static bool xhci_waiter_matches(const xhci_event_waiter_t *waiter,
     const xhci_event_t *event, uint8_t endpoint_id) {
   if (!waiter || !event || !waiter->active || waiter->type != event->type)
@@ -1598,6 +1611,102 @@ static bool xhci_waiter_matches(const xhci_event_waiter_t *waiter,
   // A control TD has either a Setup and Status TRB,
   // or a Setup, Data and Status TRB.
   return offset <= sizeof(xhci_trb_t) && (offset % sizeof(xhci_trb_t)) == 0U;
+}
+
+static bool xhci_ep0_late_reconcile(xhci_ep0_completion_t *owner,
+    xhci_event_waiter_t *waiter) {
+
+  if (!owner || !waiter || !owner->uncertain || owner->waiter != waiter ||
+      !waiter->active || !waiter->completed ||
+      waiter->type != XHCI_TRB_TRANSFER_EVENT || waiter->endpoint_id != 1U ||
+      waiter->event.type != XHCI_TRB_TRANSFER_EVENT ||
+      waiter->event.slot_id != waiter->slot_id ||
+      waiter->event.completion_code == 0U)
+    return false;
+
+  // The event dispatcher has already matched
+  // the original slot, endpoint and TD.
+  //
+  // The late completion resolves hardware
+  // ownership, not the failed caller operation.
+  owner->completion_seen = true;
+  owner->completion_code = waiter->event.completion_code;
+  owner->uncertain = false;
+  owner->late_completions++;
+
+  owner->waiter = NULL;
+  xhci_waiter_release(waiter);
+
+  return true;
+}
+
+bool xhci_ep0_late_selftest(void) {
+  // Test both a late success and a late error.
+  for (unsigned int scenario = 0U; scenario < 2U; scenario++) {
+    uint8_t code = scenario == 0U ?  XHCI_COMPLETION_SUCCESS : 6U;
+
+    xhci_event_waiter_t waiter = {
+      .active = true,
+      .type = XHCI_TRB_TRANSFER_EVENT,
+      .slot_id = 2U,
+      .endpoint_id = 1U,
+      .trb_address = 0x1000ULL
+    };
+
+    xhci_ep0_completion_t owner = {
+      .submitted = true,
+      .uncertain = true,
+      .waiter = &waiter
+    };
+
+    // A timeout alone cannot release ownership.
+    if (xhci_ep0_late_reconcile(&owner, &waiter))
+      return false;
+
+    if (!owner.uncertain || owner.waiter != &waiter || !waiter.active)
+      return false;
+
+    // Another waiter must not inherit this owner.
+    xhci_event_waiter_t wrong = waiter;
+    wrong.completed = true;
+    wrong.event = (xhci_event_t){
+      .type = XHCI_TRB_TRANSFER_EVENT,
+      .slot_id = 2U,
+      .completion_code = code
+    };
+
+    if (xhci_ep0_late_reconcile(&owner, &wrong))
+      return false;
+
+    // Even the correct waiter needs a matching
+    // slot identity in its delivered event.
+    waiter.completed = true;
+    waiter.event = (xhci_event_t){
+      .type = XHCI_TRB_TRANSFER_EVENT,
+      .slot_id = 3U,
+      .completion_code = code
+    };
+
+    if (xhci_ep0_late_reconcile(&owner, &waiter))
+      return false;
+
+    // Deliver the definitive completion.
+    waiter.event.slot_id = 2U;
+
+    if (!xhci_ep0_late_reconcile(&owner, &waiter))
+      return false;
+
+    if (!owner.completion_seen || owner.completion_code != code ||
+        owner.uncertain || owner.waiter || owner.late_completions != 1U ||
+        waiter.active)
+      return false;
+
+    // Reconciliation is exactly once.
+    if (xhci_ep0_late_reconcile(&owner, &waiter))
+      return false;
+  }
+
+  return true;
 }
 
 bool xhci_ep0_match_selftest(void) {
@@ -1868,6 +1977,13 @@ static xhci_dispatch_result_t xhci_dispatch_one(void) {
       in_stop->completion_code = event.completion_code;
       in_stop->trb_address = event.parameter;
     }
+    // A timed-out EP0 operation retains its
+    // completion owner. Reconcile the first
+    // definitive event without restarting EP0.
+    if (device && endpoint_id == 1U && device->ep0_completion.uncertain &&
+        device->ep0_completion.waiter == waiter &&
+        !xhci_ep0_late_reconcile(&device->ep0_completion, waiter))
+      return xhci_dispatch_unhandled(&event);
     if (event.type == XHCI_TRB_COMMAND_EVENT)
       event_stats.command_events++;
     else
@@ -2323,6 +2439,7 @@ static bool xhci_device_alloc_buffers(xhci_device_t *device,
   device->ep0_wrap_pending = false;
   device->ep0_failed = false;
   device->ep0_active = false;
+  device->ep0_completion = (xhci_ep0_completion_t){0};
   return true;
 
 failed:
@@ -4081,6 +4198,17 @@ static bool xhci_ep0_advance(xhci_device_t *device,
   return true;
 }
 
+static void xhci_ep0_mark_uncertain(xhci_device_t *device) {
+  device->ep0_failed = true;
+  device->ep0_active = false;
+  device->ep0_completion.uncertain = true;
+
+  // Normally the waiter has not completed yet.
+  // Also handle a completion already dispatched
+  // at the boundary of the timeout.
+  (void)xhci_ep0_late_reconcile(&device->ep0_completion,
+      device->ep0_completion.waiter);
+}
 
 static xhci_control_result_t xhci_control_transfer( xhci_device_t *device,
     const xhci_setup_packet_t *setup, xhci_control_info_t *result) {
@@ -4125,9 +4253,7 @@ static xhci_control_result_t xhci_control_transfer( xhci_device_t *device,
   // controller and endpoint readiness checks.
   // Preserve evidence from the previous transfer
   // when an operation is rejected before this point.
-  device->ep0_submitted = false;
-  device->ep0_completion_seen = false;
-  device->ep0_completion_code = 0U;
+  device->ep0_completion = (xhci_ep0_completion_t){0};
 
   dma_buffer_t *buffer = &device->control_buffer;
   if (has_data) {
@@ -4199,6 +4325,7 @@ static xhci_control_result_t xhci_control_transfer( xhci_device_t *device,
   // with the same completion owner.
   waiter->td_start = device->ep0_ring.bus +
       (uint64_t)first * sizeof(xhci_trb_t);
+  device->ep0_completion.waiter = waiter;
 
   device->ep0_active = true;
   __asm__ volatile("dsb sy" ::: "memory");
@@ -4206,7 +4333,7 @@ static xhci_control_result_t xhci_control_transfer( xhci_device_t *device,
   // Doorbell index is the hardware slot ID.
   // Target 1 selects the default control endpoint.
   xhci_write(controller.doorbell_offset + 4U * device->slot_id, 1U);
-  device->ep0_submitted = true;
+  device->ep0_completion.submitted = true;
 
   uint64_t started = timer_now_us();
   while (timer_now_us() - started < XHCI_TRANSFER_TIMEOUT_US) {
@@ -4227,9 +4354,10 @@ static xhci_control_result_t xhci_control_transfer( xhci_device_t *device,
     // The dispatcher has matched the transfer event
     // to our slot, endpoint and Status Stage TRB.
     xhci_event_t event = waiter->event;
+    device->ep0_completion.waiter = NULL;
     xhci_waiter_release(waiter);
-    device->ep0_completion_seen = true;
-    device->ep0_completion_code = event.completion_code;
+    device->ep0_completion.completion_seen = true;
+    device->ep0_completion.completion_code = event.completion_code;
 
     result->event_type = event.type;
     result->completion_code = event.completion_code;
@@ -4267,15 +4395,11 @@ static xhci_control_result_t xhci_control_transfer( xhci_device_t *device,
   result->elapsed_us = timer_now_us() - started;
   result->controller_status = xhci_read(
       controller.capability_length + XHCI_USBSTS);
-  xhci_waiter_release(waiter);
-  device->ep0_failed = true;
-  device->ep0_active = false;
+  xhci_ep0_mark_uncertain(device);
   return XHCI_CONTROL_TIMEOUT;
 
 event_failed:
-  xhci_waiter_release(waiter);
-  device->ep0_failed = true;
-  device->ep0_active = false;
+  xhci_ep0_mark_uncertain(device);
   return XHCI_CONTROL_EVENT_FAILED;
 
 dma_failed:
@@ -4761,9 +4885,10 @@ bool xhci_downstream_ep0_fault_reclaimable(uint8_t slot_id) {
   if (device->slot_id == 0U || !device->addressed || !controller_running ||
       !controller_verified || command_outstanding || command_ring_failed ||
       dispatch_fault != XHCI_DISPATCH_NONE || device->lifecycle.slot_disabled ||
-      device->ep0_active || !device->ep0_failed || !device->ep0_submitted ||
-      !device->ep0_completion_seen || device->ep0_completion_code == 0U ||
-      device->ep0_completion_code == XHCI_COMPLETION_SUCCESS)
+      device->ep0_active || !device->ep0_failed || !device->ep0_completion.submitted ||
+      !device->ep0_completion.completion_seen || device->ep0_completion.completion_code == 0U ||
+      device->ep0_completion.completion_code == XHCI_COMPLETION_SUCCESS ||
+      device->ep0_completion.uncertain || device->ep0_completion.waiter)
     return false;
 
   // No completion owner may remain on EP0.
@@ -4832,9 +4957,11 @@ bool xhci_downstream_transfer_state(
   state->quiesced = device->lifecycle.quiesced;
   state->ep0_active = device->ep0_active;
   state->ep0_failed = device->ep0_failed;
-  state->ep0_submitted = device->ep0_submitted;
-  state->ep0_completion_seen = device->ep0_completion_seen;
-  state->ep0_completion_code = device->ep0_completion_code;
+  state->ep0_submitted = device->ep0_completion.submitted;
+  state->ep0_completion_seen = device->ep0_completion.completion_seen;
+  state->ep0_completion_code = device->ep0_completion.completion_code;
+  state->ep0_uncertain = device->ep0_completion.uncertain;
+  state->ep0_late_completions = device->ep0_completion.late_completions;
   state->ep0_state_valid = xhci_downstream_ep0_state(device, &state->ep0_state);
   state->bulk_out_active = device->bulk_out_active;
   state->bulk_in_started = device->receiver.started;
@@ -4904,6 +5031,7 @@ xhci_cleanup_result_t xhci_downstream_cleanup(
   if (!device->lifecycle.slot_disabled || !device->lifecycle.quiesced ||
       device->slot_id == 0U || !controller_running ||
       !controller_verified || command_outstanding ||
+      device->ep0_completion.uncertain || device->ep0_completion.waiter ||
       command_ring_failed || device->ep0_active || device->bulk_out_active)
     return XHCI_CLEANUP_NOT_READY;
 
