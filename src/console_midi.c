@@ -11,6 +11,8 @@
 #include "midi_input.h"
 #include "midi_output.h"
 #include "midi_stream.h"
+#include "midi_ports.h"
+#include "midi_ports_usb.h"
 
 static int midi_hex_digit(char c) {
   if (c >= '0' && c <= '9')
@@ -469,8 +471,7 @@ static void cmd_midi_output_sysex(const char *args) {
     unsigned int cable = 0U;
     if (!console_arg_uint(&p, &generation) || generation == 0U ||
         !console_arg_uint(&p, &cable) || !console_arg_end(p)) {
-      console_puts("Usage: midi output sysex begin "
-          "<generation> <cable>\n");
+      console_puts("Usage: midi output sysex begin " "<generation> <cable>\n");
       return;
     }
     bool started = midi_output_sysex_begin(generation, cable);
@@ -480,9 +481,9 @@ static void cmd_midi_output_sysex(const char *args) {
   p = args;
   if (console_arg_word(&p, "write")) {
     unsigned int generation = 0U;
-    if (!console_arg_uint(&p, &generation) || generation == 0U || console_arg_end(p)) {
-      console_puts("Usage: midi output sysex write "
-          "<generation> <hh> [hh ...]\n");
+    if (!console_arg_uint(&p, &generation) || generation == 0U ||
+        console_arg_end(p)) {
+      console_puts("Usage: midi output sysex write <generation> <hh> [hh ...]\n");
       return;
     }
     // Validate the whole argument list before
@@ -606,8 +607,7 @@ static void cmd_midi_output(const char *args) {
   }
   uint32_t generation = 0U;
   if (!console_arg_generation(args, &generation)) {
-    console_puts("Usage: midi output "
-        "[start | stop | status] <generation>\n");
+    console_puts("Usage: midi output [start | stop | status] <generation>\n");
     return;
   }
   if (action == OUTPUT_START) {
@@ -630,10 +630,8 @@ static void cmd_midi_output(const char *args) {
   console_printf("  Slot        : %u\n", (unsigned int)info.slot_id);
   console_printf("  OUT cables  : %u\n", (unsigned int)info.cables);
   console_printf("  Accepted    : %llu\n", (unsigned long long)info.accepted);
-  console_printf("  Confirmed   : %llu\n",
-      (unsigned long long)info.confirmed);
-  console_printf("  Transfers   : %llu\n",
-      (unsigned long long)info.transfers);
+  console_printf("  Confirmed   : %llu\n", (unsigned long long)info.confirmed);
+  console_printf("  Transfers   : %llu\n", (unsigned long long)info.transfers);
   console_printf("  Failures    : %llu\n", (unsigned long long)info.failures);
   console_printf("  Queue       : %u / %u\n",
       info.queue_depth, MIDI_OUTPUT_QUEUE_CAPACITY);
@@ -654,6 +652,119 @@ static void cmd_midi_output(const char *args) {
       (unsigned long long)info.sysex_completed);
   console_printf("  SysEx data  : %llu bytes\n",
       (unsigned long long)info.sysex_payload_bytes);
+}
+
+static const char *midi_port_state_name(midi_port_state_t state) {
+  switch (state) {
+    case MIDI_PORT_UNBOUND: return "Unbound";
+    case MIDI_PORT_BOUND: return "Bound";
+    case MIDI_PORT_AMBIGUOUS: return "Ambiguous";
+    default: return "Unknown";
+  }
+}
+
+static const char *midi_port_direction_name(
+    midi_port_direction_t direction) {
+  return direction == MIDI_PORT_IN ? "IN" : "OUT";
+}
+
+static void midi_port_print(const midi_port_info_t *info) {
+  console_printf("MIDI port %u:\n", info->id);
+  console_printf("  Direction  : %s\n",
+      midi_port_direction_name(info->key.direction));
+  console_printf("  State      : %s\n", midi_port_state_name(info->state));
+  console_printf("  Root port  : %u\n", (unsigned int)info->key.root_port);
+  console_printf("  Hub port   : %u\n", (unsigned int)info->key.hub_port);
+  console_printf("  VID:PID    : %04x:%04x\n",
+      (unsigned int)info->key.vendor_id, (unsigned int)info->key.product_id);
+  console_printf("  Cable      : %u\n", (unsigned int)info->key.cable);
+  if (info->state == MIDI_PORT_BOUND) {
+    console_printf("  Generation : %u\n", (unsigned int)info->generation);
+    console_printf("  Slot       : %u\n", (unsigned int)info->slot_id);
+  }
+}
+
+static void cmd_midi_port(const char *args) {
+  const char *p = args;
+
+  if (console_arg_word(&p, "list") && console_arg_end(p)) {
+    unsigned int count = 0U;
+    for (unsigned int id = 1U; id <= MIDI_PORT_CAPACITY; id++) {
+      midi_port_info_t info = {0};
+      if (!midi_ports_get(id, &info))
+        continue;
+
+      console_printf("  %u: %s %u/%u cable %u, %s (gen %u)\n",
+          id, midi_port_direction_name(info.key.direction),
+          (unsigned int)info.key.root_port,
+          (unsigned int)info.key.hub_port,
+          (unsigned int)info.key.cable,
+          midi_port_state_name(info.state),
+          (unsigned int)info.generation);
+      count++;
+    }
+    if (count == 0U)
+      console_puts("No logical MIDI ports defined.\n");
+    return;
+  }
+
+  p = args;
+  if (console_arg_word(&p, "bind")) {
+    unsigned int id = 0U;
+    unsigned int generation = 0U;
+    unsigned int cable = 0U;
+    midi_port_direction_t direction;
+
+    if (!console_arg_uint(&p, &id))
+      goto usage;
+
+    if (console_arg_word(&p, "in"))
+      direction = MIDI_PORT_IN;
+    else if (console_arg_word(&p, "out"))
+      direction = MIDI_PORT_OUT;
+    else
+      goto usage;
+
+    if (!console_arg_uint(&p, &generation) || generation == 0U ||
+        !console_arg_uint(&p, &cable) || !console_arg_end(p))
+      goto usage;
+
+    bool defined = midi_ports_usb_define(id, direction, generation, cable);
+    console_printf("MIDI port %u: %s\n", id,
+        defined ? "DEFINED" : "NOT DEFINED");
+    return;
+  }
+
+  p = args;
+  if (console_arg_word(&p, "status")) {
+    unsigned int id = 0U;
+    if (!console_arg_uint(&p, &id) || !console_arg_end(p))
+      goto usage;
+
+    midi_port_info_t info = {0};
+    if (!midi_ports_get(id, &info)) {
+      console_puts("Logical MIDI port not defined.\n");
+      return;
+    }
+    midi_port_print(&info);
+    return;
+  }
+
+  p = args;
+  if (console_arg_word(&p, "clear")) {
+    unsigned int id = 0U;
+    if (!console_arg_uint(&p, &id) || !console_arg_end(p))
+      goto usage;
+
+    bool cleared = midi_ports_clear(id);
+    console_printf("MIDI port %u: %s\n", id,
+        cleared ? "CLEARED" : "NOT DEFINED");
+    return;
+  }
+
+usage:
+  console_puts("Usage: midi port [list | status <id> | "
+      "bind <id> in|out <generation> <cable> | clear <id>]\n");
 }
 
 void console_midi_command(const char *args) {
@@ -685,6 +796,10 @@ void console_midi_command(const char *args) {
     cmd_midi_output(args);
     return;
   }
-  console_puts("Usage: midi [decode | rx | monitor | auto | stream | input | output]\n");
+  if (console_arg_word(&args, "port")) {
+    cmd_midi_port(args);
+    return;
+  }
+  console_puts("Usage: midi [decode | rx | monitor | auto | stream | input | output | port]\n");
 }
 

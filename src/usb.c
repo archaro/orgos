@@ -11,6 +11,7 @@
 #include "midi_auto.h"
 #include "midi_input.h"
 #include "midi_output.h"
+#include "midi_ports_usb.h"
 
 #define USB_ROOT_PORT 1U
 #define USB_HIGH_SPEED 3U
@@ -1231,6 +1232,10 @@ void usb_service(void) {
   // enumeration has established device ownership.
   // Existing diagnostic streams are never displaced.
   midi_auto_service();
+
+  // Reconcile stable logical MIDI identities after
+  // any enumeration or lifecycle changes.
+  midi_ports_usb_service();
 }
 
 bool usb_lifecycle_port_inspect_generation(

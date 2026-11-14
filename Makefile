@@ -73,11 +73,13 @@ clean:
 
 check: | $(OBJ_DIR)
 	$(HOSTCC) $(HOSTCFLAGS) -I$(SRC_DIR) \
-		tests/midi_output_test.c \
-		$(SRC_DIR)/midi_output.c \
-		$(SRC_DIR)/usb_midi.c \
-		-o $(OBJ_DIR)/midi_output_test
+		tests/midi_output_test.c $(SRC_DIR)/midi_output.c \
+		$(SRC_DIR)/usb_midi.c -o $(OBJ_DIR)/midi_output_test
 	$(OBJ_DIR)/midi_output_test
+	$(HOSTCC) $(HOSTCFLAGS) -I$(SRC_DIR) \
+		tests/midi_ports_test.c $(SRC_DIR)/midi_ports.c \
+		-o $(OBJ_DIR)/midi_ports_test
+	$(OBJ_DIR)/midi_ports_test
 
 -include $(DEPS)
 
