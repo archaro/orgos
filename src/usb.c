@@ -726,8 +726,24 @@ static bool usb_lifecycle_inspect_record(const usb_device_t *device,
     return true;
   }
 
-  if (transfers.ep0_active || transfers.bulk_out_active) {
+  if (transfers.ep0_active || transfers.ep0_uncertain) {
     info->next = USB_LIFECYCLE_BLOCKED;
+    return true;
+  }
+
+  // Resolve a pending Bulk OUT transaction before
+  // attempting to stop Bulk IN or disable the slot.
+  //
+  // A completed transfer is normally reconciled
+  // earlier in usb_service(). Never stop an
+  // endpoint whose waiter cannot be identified.
+  if (transfers.bulk_out_active) {
+    if (transfers.bulk_out_waiter_pending &&
+        transfers.endpoint_states_valid && transfers.bulk_out_ep_state == 1U) {
+      info->next = USB_LIFECYCLE_STOP_OUT;
+    } else {
+      info->next = USB_LIFECYCLE_BLOCKED;
+    }
     return true;
   }
 
@@ -951,9 +967,9 @@ static void usb_lifecycle_service_run(usb_lifecycle_run_info_t *run) {
        info.next == USB_LIFECYCLE_STOP_IN ||
        info.next == USB_LIFECYCLE_DISABLE ||
        info.next == USB_LIFECYCLE_RETIRE_IN ||
+       info.next == USB_LIFECYCLE_STOP_OUT ||
        info.next == USB_LIFECYCLE_CLEANUP) &&
-      (info.slot_id == 0U ||
-       info.slot_id != run->slot_id)) {
+      (info.slot_id == 0U || info.slot_id != run->slot_id)) {
     usb_lifecycle_fail_run(run, USB_LIFECYCLE_FAULT_BLOCKED);
     return;
   }
@@ -989,6 +1005,16 @@ static void usb_lifecycle_service_run(usb_lifecycle_run_info_t *run) {
       run->last_result = (uint32_t)result;
       succeeded = result == XHCI_IN_RECONCILE_OK ||
           result == XHCI_IN_RECONCILE_RESOLVED;
+      break;
+    }
+    case USB_LIFECYCLE_STOP_OUT: {
+      xhci_stop_info_t result = {0};
+      xhci_stop_result_t status =
+          xhci_downstream_stop_bulk_out(run->slot_id, &result);
+      run->last_result = (uint32_t)status;
+      run->command_result = (uint8_t)result.command_result;
+      run->completion_code = result.completion_code;
+      succeeded = status == XHCI_STOP_OK;
       break;
     }
     case USB_LIFECYCLE_STOP_IN: {

@@ -1303,6 +1303,7 @@ static const char *usb_lifecycle_action_name(usb_lifecycle_action_t action) {
   switch (action) {
     case USB_LIFECYCLE_IDLE: return "Idle";
     case USB_LIFECYCLE_RECONCILE_IN: return "Reconcile IN";
+    case USB_LIFECYCLE_STOP_OUT: return "Stop Bulk OUT";
     case USB_LIFECYCLE_STOP_IN: return "Stop Bulk IN";
     case USB_LIFECYCLE_DISABLE: return "Disable Slot";
     case USB_LIFECYCLE_RETIRE_IN: return "Retire Bulk IN";
@@ -2439,6 +2440,12 @@ static void cmd_usb(const char *args) {
           xhci_ep0_recovery_selftest() ? "PASS" : "FAILED");
       return;
     }
+    if (console_arg_word(&other_args, "stopout") &&
+        console_arg_end(other_args)) {
+      console_printf("Bulk OUT stop reconciliation: %s\n",
+          xhci_bulk_out_stop_selftest() ?  "PASS" : "FAILED");
+      return;
+    }
     if (console_arg_word(&other_args, "noops") &&
         console_arg_end(other_args)) {
       cmd_usb_test_noops();
@@ -2461,7 +2468,7 @@ static void cmd_usb(const char *args) {
       return;
     }
     console_puts(
-        "Usage: usb test [ep0match | ep0late | ep0recovery | noops | "
+        "Usage: usb test [ep0match | ep0late | ep0recovery | stopout | noops | "
 	"midiout | midiwrap | midiin | midiasync]\n");
     return;
   }

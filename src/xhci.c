@@ -1897,6 +1897,28 @@ static xhci_dispatch_result_t xhci_dispatch_unhandled(
   return dispatch_fault;
 }
 
+static bool xhci_stopped_code(uint8_t code) {
+  return code == XHCI_COMPLETION_STOPPED ||
+      code == XHCI_COMPLETION_STOPPED_LENGTH_INVALID ||
+      code == XHCI_COMPLETION_STOPPED_SHORT_PACKET;
+}
+
+static bool xhci_stop_event_record(xhci_stop_event_state_t *stop,
+    const xhci_event_t *event, uint8_t endpoint_id) {
+
+  if (!stop || !event || !stop->armed || stop->received ||
+      event->type != XHCI_TRB_TRANSFER_EVENT ||
+      event->slot_id != stop->slot_id || endpoint_id != stop->endpoint_id ||
+      !xhci_stopped_code(event->completion_code))
+    return false;
+
+  stop->received = true;
+  stop->completion_code = event->completion_code;
+  stop->trb_address = event->parameter;
+
+  return true;
+}
+
 static xhci_dispatch_result_t xhci_dispatch_one(void) {
   // Never consume further events after a fatal
   // dispatch error. Preserve the original fault.
@@ -1965,17 +1987,14 @@ static xhci_dispatch_result_t xhci_dispatch_one(void) {
     }
     waiter->event = event;
     waiter->completed = true;
-    // A stopped Bulk IN event may belong to
-    // the outstanding receive TD itself.
-    if (in_stop && in_stop->armed && !in_stop->received &&
-        event.slot_id == in_stop->slot_id &&
-        endpoint_id == in_stop->endpoint_id &&
-        event.completion_code >= 26U &&
-        event.completion_code <= 28U) {
-      in_stop->received = true;
-      in_stop->completion_code = event.completion_code;
-      in_stop->trb_address = event.parameter;
-    }
+    // A stopped event can refer directly to the
+    // outstanding IN or OUT transfer's TRB.
+    //
+    // Retain the original waiter until the
+    // corresponding Stop Endpoint command has
+    // been verified.
+    xhci_stop_event_record(in_stop, &event, endpoint_id);
+    xhci_stop_event_record(out_stop, &event, endpoint_id);
     // A timed-out EP0 operation retains its
     // completion owner. Reconcile the first
     // definitive event without restarting EP0.
@@ -1995,7 +2014,7 @@ static xhci_dispatch_result_t xhci_dispatch_one(void) {
   if (in_stop && in_stop->armed && !in_stop->received &&
       event.slot_id == in_stop->slot_id &&
       endpoint_id == in_stop->endpoint_id &&
-      event.completion_code >= 26U && event.completion_code <= 28U) {
+      xhci_stopped_code(event.completion_code)) {
 
     if (device->bulk_in_ring.pages == 0U)
       return xhci_dispatch_unhandled(&event);
@@ -2005,9 +2024,8 @@ static xhci_dispatch_result_t xhci_dispatch_one(void) {
         ((event.parameter - base) % sizeof(xhci_trb_t)) != 0U)
       return xhci_dispatch_unhandled(&event);
 
-    in_stop->received = true;
-    in_stop->completion_code = event.completion_code;
-    in_stop->trb_address = event.parameter;
+    if (!xhci_stop_event_record(in_stop, &event, endpoint_id))
+      return xhci_dispatch_unhandled(&event);
 
     event_stats.transfer_events++;
     return XHCI_DISPATCH_OK;
@@ -2019,7 +2037,7 @@ static xhci_dispatch_result_t xhci_dispatch_one(void) {
   if (out_stop && out_stop->armed && !out_stop->received &&
       event.slot_id == out_stop->slot_id &&
       endpoint_id == out_stop->endpoint_id &&
-      event.completion_code >= 26U && event.completion_code <= 28U) {
+      xhci_stopped_code(event.completion_code)) {
 
     if (device->bulk_out_ring.pages == 0U)
       return xhci_dispatch_unhandled(&event);
@@ -2030,9 +2048,8 @@ static xhci_dispatch_result_t xhci_dispatch_one(void) {
         (offset % sizeof(xhci_trb_t)) != 0U)
       return xhci_dispatch_unhandled(&event);
 
-    out_stop->received = true;
-    out_stop->completion_code = event.completion_code;
-    out_stop->trb_address = event.parameter;
+    if (!xhci_stop_event_record(out_stop, &event, endpoint_id))
+      return xhci_dispatch_unhandled(&event);
 
     event_stats.transfer_events++;
     return XHCI_DISPATCH_OK;
@@ -3046,6 +3063,33 @@ xhci_bulk_out_result_t xhci_bulk_out_async_start(
       4U * device->slot_id, XHCI_BULK_OUT_DCI);
 
   return XHCI_BULK_OUT_OK;
+}
+
+static bool xhci_bulk_out_owner_valid(const xhci_device_t *device) {
+
+  if (!device || !device->bulk_out_active)
+    return false;
+
+  const xhci_event_waiter_t *waiter = device->bulk_out_async_waiter;
+
+  const xhci_bulk_out_async_info_t *async = &device->bulk_out_async;
+
+  if (!waiter || !waiter->active ||
+      (async->state != XHCI_BULK_OUT_ASYNC_PENDING &&
+       async->state != XHCI_BULK_OUT_ASYNC_UNCERTAIN))
+    return false;
+
+  return waiter->type == XHCI_TRB_TRANSFER_EVENT &&
+      waiter->slot_id == device->slot_id &&
+      waiter->endpoint_id == XHCI_BULK_OUT_DCI &&
+      waiter->trb_address == async->transfer.transfer_trb &&
+      async->transfer.slot_id == device->slot_id &&
+      async->transfer.endpoint_id == XHCI_BULK_OUT_DCI;
+}
+
+static bool xhci_bulk_out_owner_pending(const xhci_device_t *device) {
+  return xhci_bulk_out_owner_valid(device) &&
+      !device->bulk_out_async_waiter->completed;
 }
 
 void xhci_bulk_out_async_service(void) {
@@ -5039,11 +5083,14 @@ bool xhci_downstream_transfer_state(
   state->ep0_completion_code = device->ep0_completion.completion_code;
   state->ep0_uncertain = device->ep0_completion.uncertain;
   state->ep0_late_completions = device->ep0_completion.late_completions;
-  state->ep0_state_valid = xhci_downstream_ep0_state(device, &state->ep0_state);
+  state->ep0_state_valid =
+      xhci_downstream_ep0_state(device, &state->ep0_state);
   state->bulk_out_active = device->bulk_out_active;
+  state->bulk_out_waiter_pending = xhci_bulk_out_owner_pending(device);
   state->bulk_in_started = device->receiver.started;
   state->bulk_in_pending = device->receiver.state == XHCI_BULK_IN_PENDING;
-  state->bulk_in_completed = device->receiver.waiter && device->receiver.waiter->completed;
+  state->bulk_in_completed = device->receiver.waiter &&
+      device->receiver.waiter->completed;
   state->bulk_in_failed = device->receiver.state == XHCI_BULK_IN_FAILED;
   state->bulk_in_completion_code = device->receiver.info.completion_code;
   state->endpoint_states_valid = xhci_downstream_endpoint_states(
@@ -5165,6 +5212,160 @@ xhci_cleanup_result_t xhci_downstream_cleanup(
   return XHCI_CLEANUP_OK;
 }
 
+static bool xhci_bulk_out_stop_reconcile(xhci_device_t *device,
+    const xhci_stop_event_state_t *stop, bool endpoint_stopped) {
+
+  if (!device || !stop || !endpoint_stopped || stop->armed ||
+      !stop->received || stop->slot_id != device->slot_id ||
+      stop->endpoint_id != XHCI_BULK_OUT_DCI || stop->trb_address == 0U ||
+      !xhci_stopped_code(stop->completion_code) ||
+      !xhci_bulk_out_owner_valid(device))
+    return false;
+
+  xhci_event_waiter_t *waiter = device->bulk_out_async_waiter;
+
+  xhci_bulk_out_async_info_t *async = &device->bulk_out_async;
+
+  // The original TD may have completed before
+  // Stop Endpoint took effect. Preserve its
+  // completion evidence if it was received.
+  if (waiter->completed) {
+    async->transfer.completion_code = waiter->event.completion_code;
+    async->transfer.event_parameter = waiter->event.parameter;
+    async->transfer.event_status = waiter->event.status;
+  } else {
+    async->transfer.completion_code = stop->completion_code;
+    async->transfer.event_parameter = stop->trb_address;
+  }
+
+  // Stop Endpoint has been verified and the
+  // controller is no longer executing this
+  // endpoint. Its waiter can now be retired.
+  //
+  // The DMA buffer remains device-owned until
+  // Disable Slot succeeds.
+  xhci_waiter_release(waiter);
+  device->bulk_out_async_waiter = NULL;
+
+  device->bulk_out_active = false;
+  device->bulk_out_failed = true;
+
+  async->state = XHCI_BULK_OUT_ASYNC_FAILED;
+  async->result = XHCI_BULK_OUT_CANCELLED;
+
+  return true;
+}
+
+bool xhci_bulk_out_stop_selftest(void) {
+  // Keep the synthetic device off the kernel stack.
+  // No real DMA operations are performed.
+  static xhci_device_t sample;
+
+  sample = (xhci_device_t){0};
+
+  xhci_event_waiter_t waiter = {
+    .active = true,
+    .type = XHCI_TRB_TRANSFER_EVENT,
+    .slot_id = 2U,
+    .endpoint_id = XHCI_BULK_OUT_DCI,
+    .trb_address = 0x1000ULL
+  };
+
+  sample.slot_id = 2U;
+  sample.bulk_out_active = true;
+  sample.bulk_out_async_waiter = &waiter;
+  sample.bulk_out_buffer.owner = DMA_OWNER_DEVICE;
+
+  sample.bulk_out_async = (xhci_bulk_out_async_info_t){
+    .state = XHCI_BULK_OUT_ASYNC_PENDING,
+    .transfer = {
+      .slot_id = 2U,
+      .endpoint_id = XHCI_BULK_OUT_DCI,
+      .transfer_trb = 0x1000ULL,
+      .length = 4U
+    }
+  };
+
+  xhci_stop_event_state_t stop = {
+    .received = true,
+    .slot_id = 2U,
+    .endpoint_id = XHCI_BULK_OUT_DCI,
+    .completion_code = XHCI_COMPLETION_STOPPED_LENGTH_INVALID,
+    .trb_address = 0x1010ULL
+  };
+
+  if (!xhci_bulk_out_owner_pending(&sample))
+    return false;
+
+  // A stopped event alone is insufficient.
+  if (xhci_bulk_out_stop_reconcile(&sample, &stop, false))
+    return false;
+
+  if (!sample.bulk_out_active || !waiter.active)
+    return false;
+
+  // No stopped event means no cancellation proof.
+  stop.received = false;
+
+  if (xhci_bulk_out_stop_reconcile(&sample, &stop, true))
+    return false;
+
+  stop.received = true;
+  stop.completion_code = XHCI_COMPLETION_SUCCESS;
+
+  if (xhci_bulk_out_stop_reconcile(&sample, &stop, true))
+    return false;
+
+  // A verified endpoint stop permits ownership
+  // reconciliation, but not DMA reclamation.
+  stop.completion_code = XHCI_COMPLETION_STOPPED_LENGTH_INVALID;
+
+  if (!xhci_bulk_out_stop_reconcile(&sample, &stop, true))
+    return false;
+
+  if (sample.bulk_out_active || !sample.bulk_out_failed ||
+      sample.bulk_out_async_waiter || waiter.active ||
+      sample.bulk_out_async.state != XHCI_BULK_OUT_ASYNC_FAILED ||
+      sample.bulk_out_async.result != XHCI_BULK_OUT_CANCELLED ||
+      sample.bulk_out_buffer.owner != DMA_OWNER_DEVICE)
+    return false;
+
+  // The same ownership cannot be retired twice.
+  if (xhci_bulk_out_stop_reconcile(&sample, &stop, true))
+    return false;
+
+  // A stopped Transfer Event matching the current
+  // TD must also be recorded, not just a forced
+  // event referring to a later dequeue position.
+  xhci_stop_event_state_t captured = {
+    .armed = true,
+    .slot_id = 2U,
+    .endpoint_id = XHCI_BULK_OUT_DCI
+  };
+
+  xhci_event_t event = {
+    .type = XHCI_TRB_TRANSFER_EVENT,
+    .slot_id = 2U,
+    .completion_code = XHCI_COMPLETION_STOPPED,
+    .parameter = 0x1000ULL
+  };
+
+  if (xhci_stop_event_record(&captured, &event, 3U))
+    return false;
+
+  if (!xhci_stop_event_record(&captured, &event, XHCI_BULK_OUT_DCI))
+    return false;
+
+  if (!captured.received || captured.trb_address != 0x1000ULL ||
+      captured.completion_code != XHCI_COMPLETION_STOPPED)
+    return false;
+
+  if (xhci_stop_event_record(&captured, &event, XHCI_BULK_OUT_DCI))
+    return false;
+
+  return true;
+}
+
 xhci_stop_result_t xhci_downstream_stop_bulk_out(
     uint8_t slot_id, xhci_stop_info_t *info) {
 
@@ -5187,19 +5388,38 @@ xhci_stop_result_t xhci_downstream_stop_bulk_out(
   if (!device->lifecycle.quiesced || device->lifecycle.slot_disabled ||
       !device->addressed || !device->bulk_out_ready ||
       device->slot_id == 0U || !controller_running || !controller_verified ||
+      dispatch_fault != XHCI_DISPATCH_NONE ||
       command_outstanding || command_ring_failed)
     return XHCI_STOP_NOT_READY;
 
-  // This first operation is restricted to an idle
-  // Bulk OUT endpoint after device disconnection.
-  if (device->bulk_out_active || device->ep0_active)
+  // Idle endpoint stopping remains supported.
+  // An active transfer requires an exclusively
+  // owned, still-pending completion waiter.
+  bool cancelling = device->bulk_out_active;
+  if (device->ep0_active || device->ep0_completion.uncertain ||
+      device->ep0_completion.waiter)
     return XHCI_STOP_BUSY;
 
-  // No outstanding waiter may belong to Bulk OUT.
+  if (cancelling && (!xhci_bulk_out_owner_pending(device) ||
+       device->bulk_out_buffer.owner != DMA_OWNER_DEVICE))
+    return XHCI_STOP_BUSY;
+
+  if (!cancelling && device->bulk_out_async_waiter)
+    return XHCI_STOP_BUSY;
+
+  // When cancelling, exactly one Bulk OUT waiter
+  // may remain: the owner of the original TD.
+  //
+  // An independent Bulk IN receiver may still be
+  // pending. The lifecycle will stop it later.
   for (unsigned int i = 0U; i < XHCI_EVENT_WAITERS; i++) {
     xhci_event_waiter_t *waiter = &event_waiters[i];
-    if (waiter->active && waiter->slot_id == device->slot_id &&
-        waiter->endpoint_id == XHCI_BULK_OUT_DCI)
+
+    if (!waiter->active || waiter->slot_id != device->slot_id ||
+        waiter->endpoint_id != XHCI_BULK_OUT_DCI)
+      continue;
+
+    if (!cancelling || waiter != device->bulk_out_async_waiter)
       return XHCI_STOP_BUSY;
   }
 
@@ -5256,6 +5476,9 @@ xhci_stop_result_t xhci_downstream_stop_bulk_out(
 
   info->after_state = out_state;
   if (out_state != 3U)
+    return XHCI_STOP_VERIFY_FAILED;
+
+  if (cancelling && !xhci_bulk_out_stop_reconcile(device, stop, true))
     return XHCI_STOP_VERIFY_FAILED;
 
   return XHCI_STOP_OK;

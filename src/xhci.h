@@ -20,6 +20,9 @@
 // and may be returned by the public driver API.
 #define XHCI_COMPLETION_SUCCESS 1U
 #define XHCI_COMPLETION_SHORT_PACKET 13U
+#define XHCI_COMPLETION_STOPPED                26U
+#define XHCI_COMPLETION_STOPPED_LENGTH_INVALID 27U
+#define XHCI_COMPLETION_STOPPED_SHORT_PACKET   28U
 
 typedef struct {
   uint8_t capability_length;
@@ -178,6 +181,7 @@ bool xhci_resource_get_info(xhci_resource_info_t *info);
 bool xhci_ep0_match_selftest(void);
 bool xhci_ep0_late_selftest(void);
 bool xhci_ep0_recovery_selftest(void);
+bool xhci_bulk_out_stop_selftest(void);
 
 typedef enum {
   XHCI_SERVICE_IDLE,
@@ -572,7 +576,8 @@ typedef enum {
   XHCI_BULK_OUT_RING_FAILED,
   XHCI_BULK_OUT_EVENT_FAILED,
   XHCI_BULK_OUT_TIMEOUT,
-  XHCI_BULK_OUT_TRANSFER_FAILED
+  XHCI_BULK_OUT_TRANSFER_FAILED,
+  XHCI_BULK_OUT_CANCELLED
 } xhci_bulk_out_result_t;
 
 typedef struct {
@@ -873,6 +878,7 @@ typedef struct {
   bool ep0_state_valid;
   uint8_t ep0_state;
   bool bulk_out_active;
+  bool bulk_out_waiter_pending;
   bool bulk_in_started;
   bool bulk_in_pending;
   bool bulk_in_completed;
