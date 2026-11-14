@@ -30,8 +30,17 @@ static unsigned int current_el(void) {
   return (unsigned int)((value >> 2) & 3U);
 }
 
+static _Noreturn void boot_halt(void) {
+  console_puts("FAILED.\n");
+  console_puts("System halted.\n");
 
-bool pcie_subsystem_init(void) {
+  __asm__ volatile("msr daifset, #0xf" ::: "memory");
+
+  for (;;)
+    __asm__ volatile("wfe");
+}
+
+static bool pcie_subsystem_init(void) {
   // Establish the PCIe link to the VL805.
   console_puts("\nInitialising PCIe... ");
 
@@ -217,6 +226,77 @@ bool pcie_subsystem_init(void) {
   return true;
 }
 
+static void boot_usb_start(void) {
+  if (!pcie_subsystem_init()) {
+    console_puts("\nUNABLE TO INITIALISE PCIE BUS!\n");
+    return;
+  }
+
+  console_puts("Configuring USB subsystem... ");
+  xhci_configure_info_t configure = {0};
+  xhci_configure_result_t configure_result = xhci_configure(&configure);
+  if (configure_result != XHCI_CONFIGURE_OK) {
+    console_printf("FAILED (configuration result %u).\n",
+        (unsigned int)configure_result);
+    return;
+  }
+  console_puts("OK.\n");
+
+  console_puts("Starting USB subsystem... ");
+  xhci_start_info_t start = {0};
+  xhci_start_result_t start_result = xhci_start(&start);
+  if (start_result != XHCI_START_OK) {
+    console_printf("FAILED (start result %u).\n", (unsigned int)start_result);
+    return;
+  }
+  console_puts("OK.\n");
+
+  console_puts("Enumerating internal USB hub... ");
+  usb_init_info_t usb = {0};
+  usb_init_result_t usb_result = usb_init(&usb);
+  if (usb_result != USB_INIT_OK) {
+    console_printf("FAILED (stage %u, detail 0x%u).\n",
+        (unsigned int)usb_result, (unsigned int)usb.detail);
+    return;
+  }
+  console_printf("OK (address %u).\n", (unsigned int)usb.address);
+
+  console_puts("Configuring internal USB hub... ");
+  usb_hub_init_info_t hub = {0};
+  usb_hub_init_result_t hub_result = usb_hub_init(&hub);
+  if (hub_result != USB_HUB_INIT_OK) {
+    console_printf("FAILED (result %u, detail %u).\n",
+        (unsigned int)hub_result, (unsigned int)hub.detail);
+    return;
+  }
+  console_printf("OK (%u ports).\n", (unsigned int)hub.ports);
+
+  console_printf("Hub interrupt endpoint: 0x%02x, MPS %u, interval %u.\n",
+      (unsigned int)hub.interrupt_endpoint, (unsigned int)hub.interrupt_mps,
+      (unsigned int)hub.interrupt_interval);
+
+  console_puts("Scanning downstream USB ports... ");
+  usb_hub_scan_info_t scan = {0};
+  usb_hub_result_t scan_result = usb_hub_scan(&scan);
+  if (scan_result != USB_HUB_OK) {
+    console_printf("FAILED (port %u, result %u).\n",
+        (unsigned int)scan.failed_port, (unsigned int)scan_result);
+    return;
+  }
+  console_printf("OK (connected mask 0x%04x).\n",
+      (unsigned int)scan.connected);
+
+  if (!usb_auto_enum_ports_seed(scan.ports, scan.connected))
+    console_puts("USB port request seeding failed.\n");
+
+  console_puts("Starting hub notifications... ");
+  xhci_hub_notify_result_t notify_result = xhci_hub_notify_start();
+  if (notify_result == XHCI_HUB_NOTIFY_OK)
+    console_puts("OK.\n");
+  else
+    console_printf("FAILED (%u).\n", (unsigned int)notify_result);
+}
+
 void main(void) {
   uint32_t clock_hz;
   bool clock_ok;
@@ -294,45 +374,24 @@ void main(void) {
   // kernel-owned memory, and translation is
   // still disabled.
   console_puts("Building physical memory map... ");
-  if (physmem_init()) {
-    console_puts("OK.\n");
-  } else {
-    console_puts("FAILED.\n");
-    console_puts("System halted.\n");
-    __asm__ volatile("msr daifset, #0xf" ::: "memory");
-    for (;;) {
-      __asm__ volatile("wfe");
-    }
-  }
+  if (!physmem_init())
+    boot_halt();
+  console_puts("OK.\n");
 
   // The MMU requires valid memory information.
   // A failed initialization is fatal, because
   // later subsystems will depend on translation.
   console_puts("Initialising MMU... ");
-  if (memory_ok && mmu_init(physmem_get_map())) {
-    console_puts("OK.\n");
-  } else {
-    console_puts("FAILED.\n");
-    console_puts("System halted.\n");
-    __asm__ volatile("msr daifset, #0xf" ::: "memory");
-    for (;;) {
-      __asm__ volatile("wfe");
-    }
-  }
+  if (!memory_ok || !mmu_init(physmem_get_map()))
+    boot_halt();
+  console_puts("OK.\n");
 
   // Now we have the physical memory map and the MMU is configured,
   // it is time to initialise the physical page allocator.
   console_puts("Initialising page allocator... ");
-  if (page_init(physmem_get_map())) {
-    console_puts("OK.\n");
-  } else {
-    console_puts("FAILED.\n");
-    console_puts("System halted.\n");
-    __asm__ volatile("msr daifset, #0xf" ::: "memory");
-    for (;;) {
-      __asm__ volatile("wfe");
-    }
-  }
+  if (!page_init(physmem_get_map()))
+    boot_halt();
+  console_puts("OK.\n");
 
   // Initialise interrupt delivery.
   // VBAR_EL1 was installed by boot.S.
@@ -354,80 +413,9 @@ void main(void) {
   // Other exception masks remain unchanged.
   __asm__ volatile("msr daifclr, #2\nisb" ::: "memory");
 
-  if (!pcie_subsystem_init()) {
-    console_puts("\nUNABLE TO INITIALISE PCIE BUS!\n");
-  } else {
-    // PCIe and VL805 firmware are ready.
-    // Install the persistent xHCI DMA structures.
-    console_puts("Configuring USB subsystem... ");
-
-    xhci_configure_info_t configure_info;
-    xhci_configure_result_t configure_result =
-        xhci_configure(&configure_info);
-
-    if (configure_result != XHCI_CONFIGURE_OK) {
-      console_puts("FAILED (configuration result ");
-      console_putu32((uint32_t)configure_result);
-      console_puts(").\n");
-    } else {
-      console_puts("OK.\n");
-
-      // Enable PCI bus mastering and start xHCI.
-      // This operation verifies that the controller
-      // transitions from halted to running.
-      console_puts("Starting USB subsystem... ");
-
-      xhci_start_info_t start_info;
-      xhci_start_result_t start_result = xhci_start(&start_info);
-      if (start_result != XHCI_START_OK) {
-        console_printf("FAILED (start result %u).\n", (uint32_t)start_result);
-      } else {
-        console_puts("OK.\n");
-        console_puts("Enumerating internal USB hub... ");
-        usb_init_info_t usb_info;
-        usb_init_result_t usb_result = usb_init(&usb_info);
-        if (usb_result == USB_INIT_OK) {
-          console_printf("OK (address %u).\n",
-              (unsigned int)usb_info.address);
-          console_puts("Configuring internal USB hub... ");
-          usb_hub_init_info_t hub_info = {0};
-          usb_hub_init_result_t hub_result = usb_hub_init(&hub_info);
-          if (hub_result == USB_HUB_INIT_OK) {
-            console_printf("OK (%u ports).\n", (unsigned int)hub_info.ports);
-            console_printf( "Hub interrupt endpoint: 0x%02x, MPS %u, interval %u.\n",
-                (unsigned int)hub_info.interrupt_endpoint,
-                (unsigned int)hub_info.interrupt_mps,
-                (unsigned int)hub_info.interrupt_interval);
-            console_puts("Scanning downstream USB ports... ");
-            usb_hub_scan_info_t scan = {0};
-            usb_hub_result_t scan_result = usb_hub_scan(&scan);
-            if (scan_result == USB_HUB_OK) {
-              console_printf("OK (connected mask 0x%04x).\n",
-                  (unsigned int)scan.connected);
-              if (!usb_auto_enum_ports_seed(scan.ports, scan.connected))
-                  console_puts("USB port request seeding failed.\n");
-              console_puts("Starting hub notifications... ");
-              xhci_hub_notify_result_t notify_result =
-                  xhci_hub_notify_start();
-              if (notify_result == XHCI_HUB_NOTIFY_OK)
-                console_puts("OK.\n");
-              else
-                console_printf("FAILED (%u).\n", (unsigned int)notify_result);
-            } else {
-              console_printf("FAILED (port %u, result %u).\n",
-                  (unsigned int)scan.failed_port, (unsigned int)scan_result);
-            }
-          } else {
-            console_printf("FAILED (result %u, detail %u).\n",
-                (unsigned int)hub_result, (unsigned int)hub_info.detail);
-          }
-        } else {
-          console_printf("FAILED (stage %d, detail 0x%u).\n",
-              (uint32_t)usb_result, usb_info.detail);
-        }
-      }
-    }
-  }
+  // USB failure is non-fatal. The console remains
+  // available even if the controller cannot start.
+  boot_usb_start();
 
   // USB failure is non-fatal. The console remains
   // available even if xHCI cannot start.

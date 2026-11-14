@@ -91,33 +91,6 @@ static bool midi_console_short_message(const char *args,
   return true;
 }
 
-static void cmd_midi_decode(const char *args) {
-  uint8_t packet[4] = {0};
-  if (!midi_next_hex_byte(&args, &packet[0]) ||
-      !midi_next_hex_byte(&args, &packet[1]) ||
-      !midi_next_hex_byte(&args, &packet[2]) ||
-      !midi_next_hex_byte(&args, &packet[3]) ||
-      !console_arg_end(args)) {
-    console_puts("Usage: midi decode <hh> <hh> <hh> <hh>\n");
-    return;
-  }
-  usb_midi_event_t event = {0};
-  if (!usb_midi_decode_packet(packet, &event)) {
-    console_puts("USB-MIDI: reserved or invalid CIN.\n");
-    return;
-  }
-  console_puts("USB-MIDI decoded event:\n");
-  console_printf("  Cable  : %u\n", (unsigned int)event.cable);
-  console_printf("  CIN    : 0x%01x\n", (unsigned int)event.cin);
-  console_printf("  Length : %u\n", (unsigned int)event.length);
-  console_puts("  Data   :");
-  for (unsigned int i = 0U; i < event.length; i++) {
-    console_putc(' ');
-    console_puthex(event.data[i], 2U);
-  }
-  console_putc('\n');
-}
-
 static const char *midi_rx_state_name(usb_midi_rx_state_t state) {
   switch (state) {
     case USB_MIDI_RX_IDLE: return "Idle";
@@ -281,22 +254,7 @@ static void cmd_midi_auto(const char *args) {
   console_puts("Usage: midi auto [on | off | status]\n");
 }
 
-static midi_stream_parser_t console_stream_parser;
-
-static bool midi_valid_byte_list(const char *args) {
-  uint8_t byte = 0U;
-  bool found = false;
-  while (!console_arg_end(args)) {
-    if (!midi_next_hex_byte(&args, &byte))
-      return false;
-    found = true;
-  }
-  return found;
-}
-
-static unsigned int midi_console_emit(
-    const midi_stream_output_t *output, bool show_sysex) {
-  unsigned int short_count = 0U;
+static void midi_console_emit(const midi_stream_output_t *output) {
   for (unsigned int i = 0U; i < output->count; i++) {
     const midi_stream_event_t *event = &output->events[i];
     if (event->type == MIDI_STREAM_SHORT) {
@@ -308,11 +266,8 @@ static unsigned int midi_console_emit(
         console_puthex(message->data[j - 1U], 2U);
       }
       console_putc('\n');
-      short_count++;
       continue;
     }
-    if (!show_sysex)
-      continue;
     switch (event->type) {
       case MIDI_STREAM_SYSEX_BEGIN:
         console_puts("  SysEx BEGIN\n");
@@ -338,52 +293,6 @@ static unsigned int midi_console_emit(
         break;
     }
   }
-  return short_count;
-}
-
-static unsigned int midi_console_feed(midi_stream_parser_t *parser,
-    const char *args, bool show_sysex) {
-  unsigned int short_count = 0U;
-  while (!console_arg_end(args)) {
-    uint8_t byte = 0U;
-    // The complete argument list was validated
-    // before this function was called.
-    if (!midi_next_hex_byte(&args, &byte))
-      break;
-    midi_stream_output_t output = {0};
-    if (!midi_stream_parser_feed(parser, byte, &output))
-      break;
-    short_count += midi_console_emit(&output, show_sysex);
-  }
-  return short_count;
-}
-
-static void cmd_midi_stream(const char *args) {
-  const char *p = args;
-  if (console_arg_word(&p, "reset") && console_arg_end(p)) {
-    midi_stream_output_t output = {0};
-    midi_stream_parser_cancel(&console_stream_parser, &output);
-    midi_console_emit(&output, true);
-    console_puts("MIDI stream parser reset.\n");
-    return;
-  }
-  p = args;
-  if (console_arg_word(&p, "status") && console_arg_end(p)) {
-    console_puts("MIDI stream parser state:\n");
-    console_printf("  SysEx   : %s\n",
-        console_stream_parser.in_sysex ? "Yes" : "No");
-    console_printf("  Running : 0x%02x\n",
-        (unsigned int)console_stream_parser.running_status);
-    console_printf("  Active  : 0x%02x\n",
-        (unsigned int)console_stream_parser.active_status);
-    return;
-  }
-  if (!midi_valid_byte_list(args)) {
-    console_puts("Usage: midi stream [reset | status | <hh> [hh ...]]\n");
-    return;
-  }
-  console_puts("MIDI stream events:\n");
-  midi_console_feed(&console_stream_parser, args, true);
 }
 
 static void cmd_midi_input(const char *args) {
@@ -438,7 +347,7 @@ static void cmd_midi_input(const char *args) {
     };
 
     output.events[0] = received.event;
-    midi_console_emit(&output, true);
+    midi_console_emit(&output);
     return;
   }
 
@@ -484,7 +393,7 @@ static void cmd_midi_input(const char *args) {
   };
 
   output.events[0] = info.last;
-  midi_console_emit(&output, true);
+  midi_console_emit(&output);
 }
 
 static const char *midi_output_state_name(midi_output_state_t state) {
@@ -977,7 +886,7 @@ static void cmd_midi_port(const char *args) {
     };
 
     output.events[0] = received.event;
-    midi_console_emit(&output, true);
+    midi_console_emit(&output);
     return;
   }
 
@@ -1033,10 +942,6 @@ usage:
 }
 
 void console_midi_command(const char *args) {
-  if (console_arg_word(&args, "decode")) {
-    cmd_midi_decode(args);
-    return;
-  }
   if (console_arg_word(&args, "rx")) {
     cmd_midi_rx(args);
     return;
@@ -1047,10 +952,6 @@ void console_midi_command(const char *args) {
   }
   if (console_arg_word(&args, "auto")) {
     cmd_midi_auto(args);
-    return;
-  }
-  if (console_arg_word(&args, "stream")) {
-    cmd_midi_stream(args);
     return;
   }
   if (console_arg_word(&args, "input")) {
@@ -1065,6 +966,6 @@ void console_midi_command(const char *args) {
     cmd_midi_port(args);
     return;
   }
-  console_puts("Usage: midi [decode | rx | monitor | auto | stream | input | output | port]\n");
+  console_puts("Usage: midi [rx | monitor | auto | input | output | port]\n");
 }
 

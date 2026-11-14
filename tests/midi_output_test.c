@@ -4,10 +4,11 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "midi_output.h"
+#include "xhci.h"
 #include "usb.h"
 #include "usb_enumerate.h"
-#include "xhci.h"
+#include "usb_midi.h"
+#include "midi_output.h"
 
 static usb_device_t live = {
   .root_port = 1U,
@@ -434,7 +435,31 @@ static void test_claimed_sysex(void) {
   assert(!info.sysex_active);
 }
 
+static void test_usb_midi_decode(void) {
+  const uint8_t packet[4] = {
+    0x1bU, 0xbfU, 0x66U, 0x21U
+  };
+
+  usb_midi_event_t event = {0};
+
+  assert(usb_midi_decode_packet(packet, &event));
+  assert(event.cable == 1U);
+  assert(event.cin == 0x0bU);
+  assert(event.length == 3U);
+  assert(event.data[0] == 0xbfU);
+  assert(event.data[1] == 0x66U);
+  assert(event.data[2] == 0x21U);
+
+  const uint8_t reserved[4] = {
+    0x10U, 0x90U, 0x3cU, 0x40U
+  };
+
+  assert(!usb_midi_decode_packet(reserved, &event));
+}
+
 int main(void) {
+  test_usb_midi_decode();
+
   assert(midi_output_start_generation(1U));
   assert(!midi_output_start_generation(1U));
   assert(midi_output_owns_generation(1U));
