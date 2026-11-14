@@ -558,7 +558,21 @@ static void cmd_midi_output_sysex(const char *args) {
     console_printf("MIDI SysEx end: %s\n", ended ? "QUEUED" : "NOT READY");
     return;
   }
-  console_puts("Usage: midi output sysex [begin | write | end]\n");
+  p = args;
+  if (console_arg_word(&p, "cancel")) {
+    uint32_t generation = 0U;
+
+    if (!console_arg_generation(p, &generation)) {
+      console_puts("Usage: midi output sysex cancel <generation>\n");
+      return;
+    }
+
+    bool cancelled = midi_output_sysex_cancel(generation);
+    console_printf("MIDI SysEx cancel: %s\n",
+        cancelled ? "CANCELLED" : "NOT READY");
+    return;
+  }
+  console_puts("Usage: midi output sysex [begin | write | end | cancel]\n");
 }
 
 static void cmd_midi_output(const char *args) {
@@ -725,9 +739,124 @@ static void midi_port_print(const midi_port_info_t *info) {
       (unsigned long long)lifecycle.changes_dropped);
 }
 
+static midi_port_sysex_t console_sysex[MIDI_PORT_CAPACITY];
+
+static bool midi_sysex_port_id(const char **args, unsigned int *id) {
+  return console_arg_uint(args, id) &&
+      *id >= 1U && *id <= MIDI_PORT_CAPACITY;
+}
+
+static void cmd_midi_port_sysex(const char *args) {
+  const char *p = args;
+  unsigned int id = 0U;
+
+  if (console_arg_word(&p, "begin")) {
+    if (!midi_sysex_port_id(&p, &id) || !console_arg_end(p))
+      goto usage;
+
+    midi_port_sysex_t *session = &console_sysex[id - 1U];
+
+    bool started = midi_port_sysex_begin(id, session);
+
+    console_printf("MIDI port %u SysEx: %s\n",
+        id, started ? "STARTED" : "NOT READY");
+    return;
+  }
+
+  p = args;
+  if (console_arg_word(&p, "write")) {
+    if (!midi_sysex_port_id(&p, &id) || console_arg_end(p))
+      goto usage;
+
+    const char *probe = p;
+    uint8_t byte = 0U;
+    unsigned int total = 0U;
+
+    // Validate all bytes before accepting any.
+    while (!console_arg_end(probe)) {
+      if (!midi_next_hex_byte(&probe, &byte) || byte >= 0x80U) {
+        console_puts("SysEx payload requires "
+            "seven-bit hexadecimal bytes.\n");
+        return;
+      }
+      total++;
+    }
+
+    midi_port_sysex_t *session = &console_sysex[id - 1U];
+    unsigned int accepted = 0U;
+
+    while (!console_arg_end(p)) {
+      if (!midi_next_hex_byte(&p, &byte) ||
+          !midi_port_sysex_write(session, byte))
+        break;
+
+      accepted++;
+    }
+
+    console_printf("MIDI port %u SysEx: "
+        "%u / %u bytes accepted\n", id, accepted, total);
+
+    if (accepted != total)
+      console_puts("Retry from the first unaccepted byte, "
+          "or cancel the session.\n");
+
+    return;
+  }
+
+  p = args;
+  if (console_arg_word(&p, "end")) {
+    if (!midi_sysex_port_id(&p, &id) || !console_arg_end(p))
+      goto usage;
+
+    bool ended = midi_port_sysex_end(&console_sysex[id - 1U]);
+
+    console_printf("MIDI port %u SysEx end: %s\n",
+        id, ended ? "QUEUED" : "NOT READY");
+    return;
+  }
+
+  p = args;
+  if (console_arg_word(&p, "cancel")) {
+    if (!midi_sysex_port_id(&p, &id) || !console_arg_end(p))
+      goto usage;
+
+    bool cancelled = midi_port_sysex_cancel(&console_sysex[id - 1U]);
+    console_printf("MIDI port %u SysEx: %s\n",
+        id, cancelled ? "CANCELLED" : "NOT READY");
+    return;
+  }
+
+  p = args;
+  if (console_arg_word(&p, "status")) {
+    if (!midi_sysex_port_id(&p, &id) || !console_arg_end(p))
+      goto usage;
+
+    const midi_port_sysex_t *session = &console_sysex[id - 1U];
+    console_printf("MIDI port %u SysEx session:\n", id);
+    console_printf("  Active     : %s\n", session->active ? "Yes" : "No");
+    if (session->active) {
+      console_printf("  Generation : %u\n",
+          (unsigned int)session->generation);
+      console_printf("  Cable      : %u\n", (unsigned int)session->cable);
+      console_printf("  Claim      : %u\n", (unsigned int)session->claim);
+    }
+    return;
+  }
+
+usage:
+  console_puts("Usage: midi port sysex "
+      "[begin | end | cancel | status] <id>\n"
+      "       midi port sysex write "
+      "<id> <hh> [hh ...]\n");
+}
+
 static void cmd_midi_port(const char *args) {
   const char *p = args;
 
+  if (console_arg_word(&p, "sysex")) {
+    cmd_midi_port_sysex(p);
+    return;
+  }
   if (console_arg_word(&p, "list") && console_arg_end(p)) {
     unsigned int count = 0U;
     for (unsigned int id = 1U; id <= MIDI_PORT_CAPACITY; id++) {
@@ -796,7 +925,14 @@ static void cmd_midi_port(const char *args) {
     unsigned int id = 0U;
     if (!console_arg_uint(&p, &id) || !console_arg_end(p))
       goto usage;
-
+    if (id >= 1U && id <= MIDI_PORT_CAPACITY) {
+      midi_port_sysex_t *session = &console_sysex[id - 1U];
+      if (session->active && !midi_port_sysex_cancel(session)) {
+        console_puts("SysEx cancellation pending; "
+            "retry before clearing this port.\n");
+        return;
+      }
+    }
     bool cleared = midi_ports_clear(id);
     console_printf("MIDI port %u: %s\n", id,
         cleared ? "CLEARED" : "NOT DEFINED");
@@ -888,12 +1024,12 @@ static void cmd_midi_port(const char *args) {
     return;
   }
 
-  usage:
+usage:
   console_puts("Usage: midi port "
       "[list | status <id> | clear <id> |\n"
       "  bind <id> in|out <generation> <cable> |\n"
       "  open <id> | read <id> | change <id> |\n"
-      "  send <id> <hh> [hh ...]]\n");
+      "  send <id> <hh> [hh ...] | sysex ...]\n");
 }
 
 void console_midi_command(const char *args) {

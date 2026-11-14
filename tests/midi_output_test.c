@@ -317,6 +317,123 @@ static void test_long_sysex(void) {
   assert(reconstructed[201] == 0xf7U);
 }
 
+static void test_claimed_sysex(void) {
+  uint32_t claim = 0U;
+  uint32_t second = 0U;
+  unsigned int offset = transmitted_length;
+
+  assert(midi_output_sysex_claim(1U, 1U, &claim));
+  assert(claim != 0U);
+
+  // Raw diagnostics cannot mutate a claimed stream.
+  assert(!midi_output_sysex_begin(1U, 0U));
+  assert(!midi_output_sysex_write(1U, 0x7dU));
+  assert(!midi_output_sysex_end(1U));
+  assert(!midi_output_sysex_cancel(1U));
+
+  assert(!midi_output_sysex_write_claim(
+      1U, claim + 1U, 0x7dU));
+
+  // One complete SysEx fragment is accepted.
+  assert(midi_output_sysex_write_claim(1U, claim, 0x7dU));
+  assert(midi_output_sysex_write_claim(1U, claim, 0x01U));
+
+  // Cancellation must enqueue a standalone EOX,
+  // following the fragment on the same cable.
+  assert(midi_output_sysex_cancel_claim(1U, claim));
+
+  assert(!midi_output_sysex_end_claim(1U, claim));
+  assert(!midi_output_sysex_write_claim(1U, claim, 0x02U));
+
+  midi_output_service();
+
+  const uint8_t expected[8] = {
+    0x14U, 0xf0U, 0x7dU, 0x01U,
+    0x15U, 0xf7U, 0x00U, 0x00U
+  };
+
+  assert(transmitted_length == offset + sizeof(expected));
+  assert(memcmp(transmitted + offset,
+      expected, sizeof(expected)) == 0);
+
+  complete();
+
+  // Cancellation before the first complete
+  // fragment produces no USB-MIDI packet.
+  offset = transmitted_length;
+
+  assert(midi_output_sysex_claim(1U, 0U, &second));
+  assert(second != claim);
+
+  assert(midi_output_sysex_write_claim(
+      1U, second, 0x7dU));
+
+  assert(midi_output_sysex_cancel_claim(1U, second));
+
+  midi_output_service();
+  assert(transmitted_length == offset);
+
+  // The raw diagnostic API still works when no
+  // claimed session is active.
+  assert(midi_output_sysex_begin(1U, 0U));
+  assert(!midi_output_sysex_claim(1U, 0U, &second));
+  assert(midi_output_sysex_cancel(1U));
+
+  midi_output_info_t info = {0};
+
+  assert(midi_output_get_info(1U, &info));
+  assert(!info.sysex_active);
+  assert(info.sysex_claim == 0U);
+  assert(info.sysex_cancelled >= 3U);
+
+  // Fill the entire output FIFO with SysEx
+  // fragments, then exercise retryable cancellation.
+  uint32_t full_claim = 0U;
+
+  assert(midi_output_sysex_claim(1U, 0U, &full_claim));
+
+  // F0 + 191 payload bytes = 64 full fragments.
+  for (unsigned int i = 0U; i < 191U; i++) {
+    assert(midi_output_sysex_write_claim(
+        1U, full_claim, (uint8_t)(i & 0x7fU)));
+  }
+
+  assert(midi_output_get_info(1U, &info));
+  assert(info.queue_depth == MIDI_OUTPUT_QUEUE_CAPACITY);
+  assert(info.sysex_fragments == MIDI_OUTPUT_QUEUE_CAPACITY);
+
+  assert(!midi_output_sysex_cancel_claim(1U, full_claim));
+
+  // Failed cancellation preserves ownership.
+  assert(midi_output_get_info(1U, &info));
+  assert(info.sysex_active);
+  assert(info.sysex_claim == full_claim);
+
+  midi_output_service();
+  assert(hw.state == XHCI_BULK_OUT_ASYNC_PENDING);
+  complete();
+
+  // At least one batch has been confirmed,
+  // making space for the terminating F7.
+  assert(midi_output_sysex_cancel_claim(1U, full_claim));
+
+  for (unsigned int i = 0U; i < 10U; i++) {
+    assert(midi_output_get_info(1U, &info));
+
+    if (info.queue_depth == 0U)
+      break;
+
+    midi_output_service();
+    assert(hw.state == XHCI_BULK_OUT_ASYNC_PENDING);
+    complete();
+  }
+
+  assert(midi_output_get_info(1U, &info));
+  assert(info.queue_depth == 0U);
+  assert(info.in_flight == 0U);
+  assert(!info.sysex_active);
+}
+
 int main(void) {
   assert(midi_output_start_generation(1U));
   assert(!midi_output_start_generation(1U));
@@ -374,6 +491,8 @@ int main(void) {
 
   test_sysex();
   test_long_sysex();
+  test_claimed_sysex();
+
   assert(midi_output_stop_generation(1U));
   assert(!midi_output_owns_generation(1U));
   assert(midi_output_start_generation(1U));

@@ -37,6 +37,8 @@ typedef struct {
 
 static midi_output_record_t outputs[USB_MANAGED_DEVICE_CAPACITY];
 
+static uint32_t next_sysex_claim = 1U;
+
 static midi_output_record_t *output_find(uint32_t generation) {
   if (generation == 0U)
     return NULL;
@@ -210,10 +212,8 @@ bool midi_output_enqueue_short(uint32_t generation,
   return output_enqueue_packet(output, packet, message->length);
 }
 
-bool midi_output_sysex_begin(uint32_t generation,
-    unsigned int cable) {
-
-  midi_output_record_t *output = output_find(generation);
+static bool sysex_begin(midi_output_record_t *output,
+    unsigned int cable, uint32_t claim) {
 
   if (!output || output->info.state != MIDI_OUTPUT_RUNNING ||
       output->info.sysex_active ||
@@ -223,19 +223,33 @@ bool midi_output_sysex_begin(uint32_t generation,
   output->info.sysex_active = true;
   output->info.sysex_cable = (uint8_t)cable;
   output->info.sysex_staged = 1U;
+  output->info.sysex_claim = claim;
+  output->info.sysex_fragments = 0U;
   output->sysex_pending[0] = 0xf0U;
   output->info.sysex_started++;
 
   return true;
 }
 
-bool midi_output_sysex_write(uint32_t generation,
-    uint8_t byte) {
+static bool sysex_owned(const midi_output_record_t *output,
+    uint32_t claim) {
+  return output && output->info.sysex_active &&
+      output->info.sysex_claim == claim;
+}
 
-  midi_output_record_t *output = output_find(generation);
+static void sysex_release(midi_output_record_t *output) {
+  output->info.sysex_active = false;
+  output->info.sysex_staged = 0U;
+  output->info.sysex_claim = 0U;
+  output->info.sysex_fragments = 0U;
+}
 
-  if (!output || output->info.state != MIDI_OUTPUT_RUNNING ||
-      !output->info.sysex_active || byte >= 0x80U)
+static bool sysex_write(midi_output_record_t *output,
+    uint32_t claim, uint8_t byte) {
+
+  if (!sysex_owned(output, claim) ||
+      output->info.state != MIDI_OUTPUT_RUNNING ||
+      byte >= 0x80U)
     return false;
 
   unsigned int staged = output->info.sysex_staged;
@@ -243,26 +257,26 @@ bool midi_output_sysex_write(uint32_t generation,
   if (staged < 2U) {
     output->sysex_pending[staged] = byte;
     output->info.sysex_staged++;
+
   } else if (staged == 2U) {
     uint8_t bytes[3] = {
       output->sysex_pending[0],
       output->sysex_pending[1],
       byte
     };
-
     uint8_t packet[4] = {0};
 
-    if (!usb_midi_sysex_packet(
-            &output->config, output->info.sysex_cable,
+    if (!usb_midi_sysex_packet(&output->config,
+            output->info.sysex_cable,
             bytes, 3U, false, packet))
       return false;
 
-    // On queue exhaustion, neither the staged
-    // bytes nor the new byte are consumed.
     if (!output_enqueue_packet(output, packet, 3U))
       return false;
 
     output->info.sysex_staged = 0U;
+    output->info.sysex_fragments++;
+
   } else {
     return false;
   }
@@ -271,33 +285,130 @@ bool midi_output_sysex_write(uint32_t generation,
   return true;
 }
 
-bool midi_output_sysex_end(uint32_t generation) {
-  midi_output_record_t *output = output_find(generation);
+static bool sysex_end(midi_output_record_t *output,
+    uint32_t claim) {
 
-  if (!output || output->info.state != MIDI_OUTPUT_RUNNING ||
-      !output->info.sysex_active || output->info.sysex_staged > 2U)
+  if (!sysex_owned(output, claim) ||
+      output->info.state != MIDI_OUTPUT_RUNNING ||
+      output->info.sysex_staged > 2U)
     return false;
 
   unsigned int staged = output->info.sysex_staged;
   uint8_t bytes[3] = {0};
-  for (unsigned int i = 0U; i < staged; i++)
-    bytes[i] = output->sysex_pending[i];
-  bytes[staged] = 0xf7U;
-
   uint8_t packet[4] = {0};
 
-  if (!usb_midi_sysex_packet(&output->config, output->info.sysex_cable,
-      bytes, staged + 1U, true, packet))
+  for (unsigned int i = 0U; i < staged; i++)
+    bytes[i] = output->sysex_pending[i];
+
+  bytes[staged] = 0xf7U;
+
+  if (!usb_midi_sysex_packet(&output->config,
+          output->info.sysex_cable,
+          bytes, staged + 1U, true, packet))
     return false;
 
-  if (!output_enqueue_packet(output, packet, (uint8_t)(staged + 1U)))
+  if (!output_enqueue_packet(output, packet,
+          (uint8_t)(staged + 1U)))
     return false;
 
-  output->info.sysex_active = false;
-  output->info.sysex_staged = 0U;
   output->info.sysex_completed++;
-
+  sysex_release(output);
   return true;
+}
+
+static bool sysex_cancel(midi_output_record_t *output,
+    uint32_t claim) {
+
+  if (!sysex_owned(output, claim))
+    return false;
+
+  // If no complete fragment was queued, F0 has
+  // never left the staging buffer. Nothing needs
+  // terminating on the MIDI connection.
+  //
+  // If the hardware is already disconnected or
+  // failed, only local ownership can be released.
+  // Existing queued/in-flight DMA data is untouched.
+  if (output->info.state == MIDI_OUTPUT_RUNNING &&
+      output->info.sysex_fragments != 0U) {
+
+    uint8_t bytes[1] = {0xf7U};
+    uint8_t packet[4] = {0};
+
+    if (!usb_midi_sysex_packet(&output->config,
+            output->info.sysex_cable,
+            bytes, 1U, true, packet))
+      return false;
+
+    // The terminator must follow every earlier
+    // fragment. On backpressure, leave the whole
+    // session active for an explicit retry.
+    if (!output_enqueue_packet(output, packet, 1U))
+      return false;
+  }
+
+  output->info.sysex_cancelled++;
+  sysex_release(output);
+  return true;
+}
+
+bool midi_output_sysex_begin(uint32_t generation,
+    unsigned int cable) {
+
+  return sysex_begin(output_find(generation), cable, 0U);
+}
+
+bool midi_output_sysex_write(uint32_t generation,
+    uint8_t byte) {
+
+  return sysex_write(output_find(generation), 0U, byte);
+}
+
+bool midi_output_sysex_end(uint32_t generation) {
+  return sysex_end(output_find(generation), 0U);
+}
+
+bool midi_output_sysex_cancel(uint32_t generation) {
+  return sysex_cancel(output_find(generation), 0U);
+}
+
+bool midi_output_sysex_claim(uint32_t generation,
+    unsigned int cable, uint32_t *claim) {
+
+  if (!claim)
+    return false;
+
+  *claim = 0U;
+
+  // Do not wrap and accidentally authorise an old
+  // session handle with a reused claim identifier.
+  if (next_sysex_claim == 0U)
+    return false;
+
+  uint32_t candidate = next_sysex_claim;
+
+  if (!sysex_begin(output_find(generation), cable, candidate))
+    return false;
+
+  next_sysex_claim++;
+  *claim = candidate;
+  return true;
+}
+
+bool midi_output_sysex_write_claim(uint32_t generation,
+    uint32_t claim, uint8_t byte) {
+
+  return claim != 0U && sysex_write(output_find(generation), claim, byte);
+}
+
+bool midi_output_sysex_end_claim(uint32_t generation, uint32_t claim) {
+
+  return claim != 0U && sysex_end(output_find(generation), claim);
+}
+
+bool midi_output_sysex_cancel_claim(uint32_t generation, uint32_t claim) {
+
+  return claim != 0U && sysex_cancel(output_find(generation), claim);
 }
 
 bool midi_output_get_info(uint32_t generation, midi_output_info_t *info) {

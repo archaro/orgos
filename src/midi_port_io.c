@@ -159,6 +159,11 @@ static bool port_target(unsigned int id, midi_port_direction_t expected,
       current.key.direction != expected)
     return false;
 
+  // A previous open cannot authorise operations
+  // on a newly bound USB generation.
+  if (runtimes[id - 1U].opened_generation != current.generation)
+    return false;
+
   *generation = current.generation;
   *cable = current.key.cable;
   return true;
@@ -304,5 +309,103 @@ bool midi_port_lifecycle_get_info(unsigned int id,
   };
 
   return true;
+}
+
+bool midi_port_sysex_begin(unsigned int id, midi_port_sysex_t *session) {
+  if (!session || session->active)
+    return false;
+
+  uint32_t generation = 0U;
+  uint8_t cable = 0U;
+
+  if (!port_target(id, MIDI_PORT_OUT, &generation, &cable))
+    return false;
+
+  midi_port_info_t current = {0};
+
+  if (!midi_ports_get(id, &current))
+    return false;
+
+  uint32_t claim = 0U;
+
+  if (!midi_output_sysex_claim(generation, cable, &claim))
+    return false;
+
+  *session = (midi_port_sysex_t){
+    .active = true,
+    .port = id,
+    .definition_serial = current.definition_serial,
+    .generation = generation,
+    .cable = cable,
+    .claim = claim
+  };
+
+  return true;
+}
+
+static bool sysex_target_current(const midi_port_sysex_t *session) {
+  if (!session || !session->active || session->claim == 0U)
+    return false;
+
+  midi_port_info_t current = {0};
+
+  if (!port_update(session->port, &current))
+    return false;
+
+  if (current.definition_serial != session->definition_serial ||
+      current.state != MIDI_PORT_BOUND ||
+      current.key.direction != MIDI_PORT_OUT ||
+      current.generation != session->generation ||
+      current.key.cable != session->cable)
+    return false;
+
+  return runtimes[session->port - 1U].opened_generation ==
+      session->generation;
+}
+
+bool midi_port_sysex_write(midi_port_sysex_t *session, uint8_t byte) {
+
+  if (!sysex_target_current(session))
+    return false;
+
+  return midi_output_sysex_write_claim(
+      session->generation, session->claim, byte);
+}
+
+bool midi_port_sysex_end(midi_port_sysex_t *session) {
+  if (!sysex_target_current(session))
+    return false;
+
+  if (!midi_output_sysex_end_claim(session->generation, session->claim))
+    return false;
+
+  session->active = false;
+  return true;
+}
+
+bool midi_port_sysex_cancel(midi_port_sysex_t *session) {
+  if (!session || !session->active || session->claim == 0U)
+    return false;
+
+  if (midi_output_sysex_cancel_claim(session->generation, session->claim)) {
+    session->active = false;
+    return true;
+  }
+
+  // The original driver record might already have
+  // been recycled, or another session may have
+  // replaced this claim. Never target a replacement.
+  midi_output_info_t info = {0};
+
+  if (!midi_output_get_info(session->generation, &info) ||
+      !info.sysex_active || info.sysex_claim != session->claim) {
+    session->active = false;
+    return true;
+  }
+
+  // The original claim is still active.
+  // Most importantly, a full output queue may
+  // require the caller to retry cancellation.
+  return false;
 }
 

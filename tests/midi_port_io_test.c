@@ -25,6 +25,9 @@ static void *subscriber_context;
 static uint32_t output_generation;
 static uint32_t sent_generation;
 static unsigned int sent_cable;
+static uint32_t next_claim = 1U;
+static uint32_t active_claim;
+static unsigned int claimed_bytes;
 
 bool usb_get_device_at(unsigned int index, usb_device_t *device) {
   if (index != 0U)
@@ -93,9 +96,57 @@ bool midi_output_get_info(uint32_t generation,
 
   *info = (midi_output_info_t){
     .state = MIDI_OUTPUT_RUNNING,
-    .cables = 1U
+    .cables = 1U,
+    .sysex_active = active_claim != 0U,
+    .sysex_claim = active_claim
   };
 
+  return true;
+}
+
+bool midi_output_sysex_claim(uint32_t generation,
+    unsigned int cable, uint32_t *claim) {
+
+  if (!claim || generation != output_generation ||
+      cable != 0U || active_claim != 0U)
+    return false;
+
+  active_claim = next_claim++;
+  *claim = active_claim;
+  return true;
+}
+
+bool midi_output_sysex_write_claim(uint32_t generation,
+    uint32_t claim, uint8_t byte) {
+
+  if (generation != output_generation ||
+      claim == 0U || claim != active_claim ||
+      byte >= 0x80U)
+    return false;
+
+  claimed_bytes++;
+  return true;
+}
+
+bool midi_output_sysex_end_claim(uint32_t generation,
+    uint32_t claim) {
+
+  if (generation != output_generation ||
+      claim == 0U || claim != active_claim)
+    return false;
+
+  active_claim = 0U;
+  return true;
+}
+
+bool midi_output_sysex_cancel_claim(uint32_t generation,
+    uint32_t claim) {
+
+  if (generation != output_generation ||
+      claim == 0U || claim != active_claim)
+    return false;
+
+  active_claim = 0U;
   return true;
 }
 
@@ -351,6 +402,71 @@ int main(void) {
   assert(midi_port_send_short(3U, &message));
   assert(sent_generation == 9U);
   assert(!midi_port_read(1U, &event));
+
+  // A logical SysEx session pins its generation,
+  // cable, definition and driver claim.
+  midi_port_sysex_t session = {0};
+
+  assert(midi_port_sysex_begin(3U, &session));
+  assert(session.active);
+  assert(session.generation == 9U);
+  assert(session.cable == 0U);
+  assert(session.claim != 0U);
+
+  assert(!midi_port_sysex_begin(3U, &session));
+  assert(!midi_port_sysex_write(&session, 0x80U));
+  assert(midi_port_sysex_write(&session, 0x7dU));
+  assert(claimed_bytes == 1U);
+
+  assert(midi_port_sysex_end(&session));
+  assert(!session.active);
+  assert(!midi_port_sysex_write(&session, 0x01U));
+
+  // Start another session and remove its binding.
+  assert(midi_port_sysex_begin(3U, &session));
+  uint32_t old_claim = session.claim;
+
+  assert(midi_ports_reconcile(NULL, 0U));
+
+  assert(!midi_port_sysex_write(&session, 0x02U));
+  assert(!midi_port_sysex_end(&session));
+
+  // Explicit cancellation still targets the
+  // original generation, not a new binding.
+  assert(midi_port_sysex_cancel(&session));
+  assert(!session.active);
+  assert(active_claim == 0U);
+
+  // A different physical incarnation arrives.
+  live.generation = 11U;
+  live.slot_id = 5U;
+  live.state = USB_DEVICE_ACTIVE;
+  device.generation = 11U;
+  device.slot_id = 5U;
+  output_generation = 0U;
+
+  assert(midi_ports_reconcile(&device, 1U));
+
+  // Rebinding alone does not authorise sending.
+  assert(!midi_port_send_short(3U, &message));
+  assert(!midi_port_sysex_begin(3U, &session));
+
+  assert(midi_port_open(3U));
+  assert(midi_port_sysex_begin(3U, &session));
+
+  assert(session.generation == 11U);
+  assert(session.claim != old_claim);
+
+  // A copied, stale handle cannot adopt the
+  // current driver's ownership claim.
+  midi_port_sysex_t stale = session;
+  stale.claim = old_claim;
+
+  assert(!midi_port_sysex_write(&stale, 0x03U));
+  assert(!midi_port_sysex_end(&stale));
+
+  assert(midi_port_sysex_cancel(&session));
+  assert(!session.active);
 
   puts("MIDI logical I/O: PASS");
   return 0;
