@@ -49,6 +49,8 @@ typedef struct {
   midi_port_state_t state;
   uint32_t generation;
   uint8_t slot_id;
+  // Changes whenever this port ID is redefined.
+  uint32_t definition_serial;
 } midi_port_info_t;
 
 // Identities are explicit and stable within a boot.

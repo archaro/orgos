@@ -113,11 +113,17 @@ int main(void) {
   assert(midi_ports_resolve(
       1U, &generation, &cable, &direction));
 
+  assert(midi_ports_get(1U, &info));
+  uint32_t original_serial = info.definition_serial;
+
   // Definition can be explicitly cleared and reused.
   assert(midi_ports_clear(1U));
   assert(!midi_ports_get(1U, &info));
   assert(!midi_ports_clear(1U));
   assert(midi_ports_define(1U, &input));
+
+  assert(midi_ports_get(1U, &info));
+  assert(info.definition_serial != original_serial);
 
   puts("MIDI logical ports: PASS");
   return 0;

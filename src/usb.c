@@ -12,6 +12,7 @@
 #include "midi_input.h"
 #include "midi_output.h"
 #include "midi_ports_usb.h"
+#include "midi_port_io.h"
 
 #define USB_ROOT_PORT 1U
 #define USB_HIGH_SPEED 3U
@@ -1215,6 +1216,14 @@ void usb_service(void) {
   // Reconcile MIDI parser ownership with the
   // live USB device generations.
   midi_input_service();
+
+  // Capture logical-port disconnections before
+  // lifecycle teardown can recycle device records.
+  //
+  // Input detachment has already generated any
+  // terminal SysEx aborts at this point.
+  midi_ports_usb_service();
+  midi_port_io_service();
 
   // A disconnected, successfully enumerated device
   // is automatically admitted to lifecycle teardown.

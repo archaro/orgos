@@ -5,6 +5,7 @@
 #include "midi_ports.h"
 
 static midi_port_info_t ports[MIDI_PORT_CAPACITY];
+static uint32_t next_definition_serial = 1U;
 
 static bool valid_id(unsigned int id) {
   return id >= 1U && id <= MIDI_PORT_CAPACITY;
@@ -22,7 +23,8 @@ static bool same_key(const midi_port_key_t *a, const midi_port_key_t *b) {
 bool midi_ports_define(unsigned int id, const midi_port_key_t *key) {
   if (!valid_id(id) || !key || key->root_port == 0U || key->hub_port == 0U ||
       key->cable >= MIDI_PORT_MAX_CABLES || (key->direction != MIDI_PORT_IN &&
-       key->direction != MIDI_PORT_OUT) || ports[id - 1U].id != 0U)
+       key->direction != MIDI_PORT_OUT) || next_definition_serial == 0U ||
+      ports[id - 1U].id != 0U)
     return false;
 
   for (unsigned int i = 0U; i < MIDI_PORT_CAPACITY; i++) {
@@ -33,7 +35,8 @@ bool midi_ports_define(unsigned int id, const midi_port_key_t *key) {
   ports[id - 1U] = (midi_port_info_t){
     .id = id,
     .key = *key,
-    .state = MIDI_PORT_UNBOUND
+    .state = MIDI_PORT_UNBOUND,
+    .definition_serial = next_definition_serial++
   };
   return true;
 }

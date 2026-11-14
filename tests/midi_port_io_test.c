@@ -238,21 +238,97 @@ int main(void) {
   live.state = USB_DEVICE_DISCONNECTING;
   midi_input_service();
 
+  // The USB registry now observes the disconnect.
+  assert(midi_ports_reconcile(NULL, 0U));
+  midi_port_io_service();
+
+  midi_port_lifecycle_info_t lifecycle = {0};
+
+  assert(midi_port_lifecycle_get_info(2U, &lifecycle));
+  assert(lifecycle.retired_depth == 4U);
+  assert(lifecycle.opened_generation == 0U);
+  assert(lifecycle.retired_dropped == 0U);
+
+  // The old device FIFO has been retired into
+  // the logical port, without losing its events.
   midi_input_event_t raw = {0};
-
-  assert(midi_input_read_cable(1U, 1U, &raw));
-  assert(raw.event.type == MIDI_STREAM_SYSEX_BEGIN);
-
-  assert(midi_input_read_cable(1U, 1U, &raw));
-  assert(raw.event.type == MIDI_STREAM_SYSEX_DATA);
-
-  assert(midi_input_read_cable(1U, 1U, &raw));
-  assert(raw.event.type == MIDI_STREAM_SYSEX_DATA);
-
-  assert(midi_input_read_cable(1U, 1U, &raw));
-  assert(raw.event.type == MIDI_STREAM_SYSEX_ABORT);
-
   assert(!midi_input_read_cable(1U, 1U, &raw));
+
+  // The old binding is no longer usable for output.
+  assert(!midi_port_open(3U));
+  assert(!midi_port_send_short(3U, &message));
+
+  // Reconnect the same logical endpoint as gen 9.
+  live.state = USB_DEVICE_ACTIVE;
+  live.generation = 9U;
+  live.slot_id = 4U;
+
+  device.generation = 9U;
+  device.slot_id = 4U;
+
+  rx_running = false;
+  output_generation = 0U;
+
+  assert(midi_ports_reconcile(&device, 1U));
+  midi_port_io_service();
+
+  // Old-generation events remain readable even
+  // before the replacement receiver is opened.
+  assert(midi_port_read(2U, &event));
+  assert(event.generation == 1U);
+  assert(event.event.type == MIDI_STREAM_SYSEX_BEGIN);
+
+  assert(midi_port_read(2U, &event));
+  assert(event.generation == 1U);
+  assert(event.event.type == MIDI_STREAM_SYSEX_DATA);
+
+  // Explicitly open the new receiver incarnation.
+  assert(midi_port_open(1U));
+  assert(midi_port_open(2U));
+  assert(midi_port_open(3U));
+
+  assert(midi_port_read(2U, &event));
+  assert(event.generation == 1U);
+  assert(event.event.type == MIDI_STREAM_SYSEX_DATA);
+
+  assert(midi_port_read(2U, &event));
+  assert(event.generation == 1U);
+  assert(event.event.type == MIDI_STREAM_SYSEX_ABORT);
+
+  // Only after the retired generation is drained
+  // may the application observe new input events.
+  inject(1U, 0x91U, 99U);
+
+  assert(midi_port_read(2U, &event));
+  assert(event.generation == 9U);
+  assert(event.event.type == MIDI_STREAM_SHORT);
+  assert(event.event.message.data[0] == 99U);
+
+  assert(!midi_port_read(2U, &event));
+
+  // The connection history must include:
+  // initial connection, disconnection, reconnection.
+  midi_port_change_t change = {0};
+
+  assert(midi_port_next_change(2U, &change));
+  assert(change.previous == MIDI_PORT_UNBOUND);
+  assert(change.current == MIDI_PORT_BOUND);
+  assert(change.current_generation == 1U);
+
+  assert(midi_port_next_change(2U, &change));
+  assert(change.previous == MIDI_PORT_BOUND);
+  assert(change.current == MIDI_PORT_UNBOUND);
+  assert(change.previous_generation == 1U);
+
+  assert(midi_port_next_change(2U, &change));
+  assert(change.previous == MIDI_PORT_UNBOUND);
+  assert(change.current == MIDI_PORT_BOUND);
+  assert(change.current_generation == 9U);
+
+  assert(!midi_port_next_change(2U, &change));
+
+  assert(midi_port_send_short(3U, &message));
+  assert(sent_generation == 9U);
 
   // An unbound port cannot route new operations.
   assert(midi_ports_reconcile(NULL, 0U));

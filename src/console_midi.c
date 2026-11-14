@@ -710,6 +710,19 @@ static void midi_port_print(const midi_port_info_t *info) {
     console_printf("  Generation : %u\n", (unsigned int)info->generation);
     console_printf("  Slot       : %u\n", (unsigned int)info->slot_id);
   }
+  midi_port_lifecycle_info_t lifecycle = {0};
+  if (!midi_port_lifecycle_get_info(info->id, &lifecycle))
+    return;
+  console_printf("  Opened gen : %u\n",
+      (unsigned int)lifecycle.opened_generation);
+  console_printf("  Retired    : %u events\n", lifecycle.retired_depth);
+  console_printf("  Lost events: %llu\n",
+      (unsigned long long)lifecycle.retired_dropped);
+  console_printf("  Missed retirements: %llu\n",
+      (unsigned long long)lifecycle.retirement_missed);
+  console_printf("  Changes    : %u pending\n", lifecycle.pending_changes);
+  console_printf("  Lost changes: %llu\n",
+      (unsigned long long)lifecycle.changes_dropped);
 }
 
 static void cmd_midi_port(const char *args) {
@@ -849,10 +862,38 @@ static void cmd_midi_port(const char *args) {
     return;
   }
 
-usage:
-  console_puts("Usage: midi port [list | status <id> | clear <id> |\n"
+  p = args;
+
+  if (console_arg_word(&p, "change")) {
+    unsigned int id = 0U;
+
+    if (!console_arg_uint(&p, &id) ||
+        !console_arg_end(p))
+      goto usage;
+
+    midi_port_change_t change = {0};
+
+    if (!midi_port_next_change(id, &change)) {
+      console_puts("No logical-port change available.\n");
+      return;
+    }
+
+    console_printf("MIDI port %u change:\n", change.port);
+    console_printf("  Previous : %s (generation %u)\n",
+        midi_port_state_name(change.previous),
+        (unsigned int)change.previous_generation);
+    console_printf("  Current  : %s (generation %u)\n",
+        midi_port_state_name(change.current),
+        (unsigned int)change.current_generation);
+    return;
+  }
+
+  usage:
+  console_puts("Usage: midi port "
+      "[list | status <id> | clear <id> |\n"
       "  bind <id> in|out <generation> <cable> |\n"
-      "  open <id> | read <id> | send <id> <hh> [hh ...]]\n");
+      "  open <id> | read <id> | change <id> |\n"
+      "  send <id> <hh> [hh ...]]\n");
 }
 
 void console_midi_command(const char *args) {
