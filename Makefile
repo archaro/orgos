@@ -80,6 +80,12 @@ check: | $(OBJ_DIR)
 		tests/midi_ports_test.c $(SRC_DIR)/midi_ports.c \
 		-o $(OBJ_DIR)/midi_ports_test
 	$(OBJ_DIR)/midi_ports_test
+	$(HOSTCC) $(HOSTCFLAGS) -I$(SRC_DIR) \
+		tests/midi_port_io_test.c $(SRC_DIR)/midi_port_io.c \
+		$(SRC_DIR)/midi_ports.c $(SRC_DIR)/midi_input.c \
+		$(SRC_DIR)/midi_usb_bridge.c $(SRC_DIR)/midi_stream.c \
+		-o $(OBJ_DIR)/midi_port_io_test
+	$(OBJ_DIR)/midi_port_io_test
 
 -include $(DEPS)
 

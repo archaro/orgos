@@ -47,4 +47,12 @@ bool midi_input_get_info(uint32_t generation, midi_input_info_t *info);
 // until the managed record is reused for a new generation.
 bool midi_input_read(uint32_t generation, midi_input_event_t *event);
 
+// Read the earliest event on one virtual cable,
+// leaving events for other cables in FIFO order.
+//
+// This shares the existing device queue; it does
+// not create another consumer or buffer.
+bool midi_input_read_cable(uint32_t generation,
+    unsigned int cable, midi_input_event_t *event);
+
 void midi_input_service(void);

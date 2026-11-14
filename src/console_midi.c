@@ -13,6 +13,7 @@
 #include "midi_stream.h"
 #include "midi_ports.h"
 #include "midi_ports_usb.h"
+#include "midi_port_io.h"
 
 static int midi_hex_digit(char c) {
   if (c >= '0' && c <= '9')
@@ -53,6 +54,39 @@ static bool midi_next_hex_byte(const char **input,
 
   *value = (uint8_t)((high << 4) | low);
   *input = p + 2;
+
+  return true;
+}
+
+static bool midi_console_short_message(const char *args,
+    midi_short_message_t *message) {
+
+  if (!message)
+    return false;
+
+  uint8_t bytes[3] = {0};
+  unsigned int count = 0U;
+
+  while (!console_arg_end(args)) {
+    if (count == 3U || !midi_next_hex_byte(&args, &bytes[count]))
+      return false;
+
+    count++;
+  }
+
+  if (count == 0U)
+    return false;
+
+  *message = (midi_short_message_t){
+    .status = bytes[0],
+    .length = (uint8_t)count
+  };
+
+  if (count > 1U)
+    message->data[0] = bytes[1];
+
+  if (count > 2U)
+    message->data[1] = bytes[2];
 
   return true;
 }
@@ -536,35 +570,29 @@ static void cmd_midi_output(const char *args) {
   if (console_arg_word(&p, "send")) {
     unsigned int generation = 0U;
     unsigned int cable = 0U;
-    uint8_t bytes[3] = {0};
-    unsigned int count = 0U;
-    if (!console_arg_uint(&p, &generation) || generation == 0U ||
-        !console_arg_uint(&p, &cable)) {
+
+    if (!console_arg_uint(&p, &generation) ||
+        generation == 0U || !console_arg_uint(&p, &cable)) {
       console_puts("Usage: midi output send "
           "<generation> <cable> <hh> [hh ...]\n");
       return;
     }
-    while (!console_arg_end(p)) {
-      if (count == 3U || !midi_next_hex_byte(&p, &bytes[count])) {
-        console_puts("Usage: midi output send "
-            "<generation> <cable> <hh> [hh ...]\n");
-        return;
-      }
-      count++;
-    }
-    if (count == 0U) {
+
+    if (console_arg_end(p)) {
       console_puts("Missing MIDI message.\n");
       return;
     }
-    midi_short_message_t message = {
-      .status = bytes[0],
-      .length = (uint8_t)count
-    };
-    if (count > 1U)
-      message.data[0] = bytes[1];
-    if (count > 2U)
-      message.data[1] = bytes[2];
+
+    midi_short_message_t message = {0};
+
+    if (!midi_console_short_message(p, &message)) {
+      console_puts("Usage: midi output send "
+          "<generation> <cable> <hh> [hh ...]\n");
+      return;
+    }
+
     bool queued = midi_output_enqueue_short(generation, cable, &message);
+
     console_printf("MIDI output: %s\n", queued ? "QUEUED" : "NOT QUEUED");
     return;
   }
@@ -762,9 +790,69 @@ static void cmd_midi_port(const char *args) {
     return;
   }
 
+  p = args;
+  if (console_arg_word(&p, "open")) {
+    unsigned int id = 0U;
+
+    if (!console_arg_uint(&p, &id) ||
+        !console_arg_end(p))
+      goto usage;
+
+    bool opened = midi_port_open(id);
+
+    console_printf("MIDI port %u: %s\n",
+        id, opened ? "OPEN" : "NOT READY");
+    return;
+  }
+
+  p = args;
+  if (console_arg_word(&p, "read")) {
+    unsigned int id = 0U;
+
+    if (!console_arg_uint(&p, &id) ||
+        !console_arg_end(p))
+      goto usage;
+
+    midi_port_event_t received = {0};
+
+    if (!midi_port_read(id, &received)) {
+      console_puts("No logical MIDI event available.\n");
+      return;
+    }
+
+    console_printf("MIDI port %u event (generation %u):\n",
+        received.port, (unsigned int)received.generation);
+
+    midi_stream_output_t output = {
+      .count = 1U
+    };
+
+    output.events[0] = received.event;
+    midi_console_emit(&output, true);
+    return;
+  }
+
+  p = args;
+  if (console_arg_word(&p, "send")) {
+    unsigned int id = 0U;
+
+    if (!console_arg_uint(&p, &id))
+      goto usage;
+
+    midi_short_message_t message = {0};
+    if (!midi_console_short_message(p, &message))
+      goto usage;
+
+    bool queued = midi_port_send_short(id, &message);
+    console_printf("MIDI port %u: %s\n",
+        id, queued ? "QUEUED" : "NOT QUEUED");
+    return;
+  }
+
 usage:
-  console_puts("Usage: midi port [list | status <id> | "
-      "bind <id> in|out <generation> <cable> | clear <id>]\n");
+  console_puts("Usage: midi port [list | status <id> | clear <id> |\n"
+      "  bind <id> in|out <generation> <cable> |\n"
+      "  open <id> | read <id> | send <id> <hh> [hh ...]]\n");
 }
 
 void console_midi_command(const char *args) {

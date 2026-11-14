@@ -239,29 +239,52 @@ bool midi_input_stop_generation(uint32_t generation) {
   return true;
 }
 
-bool midi_input_read(uint32_t generation, midi_input_event_t *event) {
+static bool input_read_matching(midi_input_record_t *input,
+    int wanted_cable, midi_input_event_t *event) {
 
-  if (!event)
-    return false;
+  unsigned int depth = input->info.queue_depth;
 
-  *event = (midi_input_event_t){0};
+  for (unsigned int offset = 0U; offset < depth; offset++) {
+    unsigned int index =
+        (input->head + offset) % MIDI_INPUT_QUEUE_CAPACITY;
 
-  midi_input_record_t *input = input_find(generation);
-  if (!input)
-    return false;
+    if (wanted_cable >= 0 &&
+        input->queue[index].cable != (unsigned int)wanted_cable)
+      continue;
 
-  if (input->info.queue_depth != 0U) {
-    *event = input->queue[input->head];
-    input->head = (input->head + 1U) % MIDI_INPUT_QUEUE_CAPACITY;
+    *event = input->queue[index];
+
+    if (offset == 0U) {
+      input->head =
+          (input->head + 1U) % MIDI_INPUT_QUEUE_CAPACITY;
+    } else {
+      // Remove an interior event without disturbing
+      // the relative order of any other events.
+      for (unsigned int j = offset; j + 1U < depth; j++) {
+        unsigned int dest =
+            (input->head + j) % MIDI_INPUT_QUEUE_CAPACITY;
+        unsigned int src =
+            (input->head + j + 1U) % MIDI_INPUT_QUEUE_CAPACITY;
+
+        input->queue[dest] = input->queue[src];
+      }
+    }
+
     input->info.queue_depth--;
     return true;
   }
 
-  // Terminal aborts follow all previously accepted
-  // events; multiple cables are reported in order.
-  for (unsigned int cable = 0U; cable < input->bridge.cables; cable++) {
+  // Terminal SysEx aborts follow the accepted
+  // events belonging to their respective cables.
+  for (unsigned int cable = 0U;
+      cable < input->bridge.cables; cable++) {
+
+    if (wanted_cable >= 0 &&
+        cable != (unsigned int)wanted_cable)
+      continue;
 
     uint16_t bit = (uint16_t)(1U << cable);
+
     if (!(input->pending_abort_cables & bit))
       continue;
 
@@ -269,7 +292,7 @@ bool midi_input_read(uint32_t generation, midi_input_event_t *event) {
     input->info.pending_aborts--;
 
     *event = (midi_input_event_t){
-      .generation = generation,
+      .generation = input->info.generation,
       .cable = (uint8_t)cable,
       .event = {.type = MIDI_STREAM_SYSEX_ABORT}
     };
@@ -278,6 +301,37 @@ bool midi_input_read(uint32_t generation, midi_input_event_t *event) {
   }
 
   return false;
+}
+
+bool midi_input_read(uint32_t generation, midi_input_event_t *event) {
+
+  if (!event)
+    return false;
+
+  *event = (midi_input_event_t){0};
+
+  midi_input_record_t *input = input_find(generation);
+
+  if (!input)
+    return false;
+
+  return input_read_matching(input, -1, event);
+}
+
+bool midi_input_read_cable(uint32_t generation,
+    unsigned int cable, midi_input_event_t *event) {
+
+  if (!event)
+    return false;
+
+  *event = (midi_input_event_t){0};
+
+  midi_input_record_t *input = input_find(generation);
+
+  if (!input || cable >= input->bridge.cables)
+    return false;
+
+  return input_read_matching(input, (int)cable, event);
 }
 
 bool midi_input_get_info(uint32_t generation, midi_input_info_t *info) {
