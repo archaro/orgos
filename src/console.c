@@ -3,6 +3,8 @@
 
 #include "format.h"
 #include "console.h"
+#include "console_args.h"
+#include "console_midi.h"
 #include "board.h"
 #include "mailbox.h"
 #include "timer.h"
@@ -21,11 +23,7 @@
 #include "usb_enumerate.h"
 #include "usb_midi.h"
 #include "usb_midi_rx.h"
-#include "midi_monitor.h"
-#include "midi_auto.h"
-#include "midi_input.h"
 #include "midi_output.h"
-#include "midi_stream.h"
 #include "usb_midi_test.h"
 
 #define CONSOLE_LINE_SIZE 256
@@ -36,14 +34,6 @@ static bool console_last_was_cr;
 static bool console_line_overflowed;
 
 typedef void (*console_command_fn)(const char *args);
-
-static bool end_of_args(const char *p) {
-  while (*p == ' ' || *p == '\t')
-    p++;
-
-  return *p == '\0';
-}
-
 
 static void console_format_putc(char c, void *context) {
   (void)context;
@@ -77,7 +67,7 @@ static void console_puthex64(uint64_t value) {
 }
 
 static void cmd_uptime(const char *args) {
-  if (!end_of_args(args)) {
+  if (!console_arg_end(args)) {
     console_puts("Usage: uptime\n");
     return;
   }
@@ -104,7 +94,7 @@ static void cmd_uptime(const char *args) {
 }
 
 static void cmd_irq(const char *args) {
-  if (!end_of_args(args)) {
+  if (!console_arg_end(args)) {
     console_puts("Usage: irq\n");
     return;
   }
@@ -119,57 +109,6 @@ static void cmd_irq(const char *args) {
 }
 
 static void cmd_help(const char *args);
-
-// Return true if the next whitespace-delimited word
-// matches the supplied string.
-// Advance the input pointer past the matched word.
-static bool next_word_is(const char **input, const char *word) {
-  const char *p = *input;
-  const char *w = word;
-
-  while (*p == ' ' || *p == '\t')
-    p++;
-
-  while (*w && *p == *w) {
-    p++;
-    w++;
-  }
-
-  if (*w || (*p && *p != ' ' && *p != '\t'))
-    return false;
-
-  *input = p;
-  return true;
-}
-
-static bool next_uint(const char **input, unsigned int *value) {
-  // Read an unsigned decimal integer.
-  // Reject missing values, non-decimal characters and overflow.
-  const char *p = *input;
-  unsigned int result = 0;
-  bool found = false;
-
-  while (*p == ' ' || *p == '\t')
-    p++;
-
-  while (*p >= '0' && *p <= '9') {
-    unsigned int digit = (unsigned int)(*p - '0');
-
-    if (result > (UINT32_MAX - digit) / 10U)
-      return false;
-
-    result = result * 10U + digit;
-    found = true;
-    p++;
-  }
-
-  if (!found || (*p && *p != ' ' && *p != '\t'))
-    return false;
-
-  *value = result;
-  *input = p;
-  return true;
-}
 
 static void cmd_pci_dma_test(void) {
   static const struct {
@@ -259,19 +198,19 @@ static void cmd_pci_dma(void) {
 }
 
 static void cmd_pci(const char *args) {
-  if (next_word_is(&args, "dma")) {
-    if (next_word_is(&args, "test") && end_of_args(args)) {
+  if (console_arg_word(&args, "dma")) {
+    if (console_arg_word(&args, "test") && console_arg_end(args)) {
       cmd_pci_dma_test();
       return;
     }
-    if (end_of_args(args)) {
+    if (console_arg_end(args)) {
       cmd_pci_dma();
       return;
     }
     console_puts("Usage: pci [dma [test]]\n");
     return;
   }
-  if (!end_of_args(args)) {
+  if (!console_arg_end(args)) {
     console_puts("Usage: pci [dma [test]]\n");
     return;
   }
@@ -658,15 +597,15 @@ static void cmd_dma_edge_test(void) {
 }
 
 static void cmd_dma(const char *args) {
-  if (next_word_is(&args, "cache") && end_of_args(args)) {
+  if (console_arg_word(&args, "cache") && console_arg_end(args)) {
     cmd_dma_cache_test();
     return;
   }
-  if (next_word_is(&args, "owner") && end_of_args(args)) {
+  if (console_arg_word(&args, "owner") && console_arg_end(args)) {
     cmd_dma_owner_test();
     return;
   }
-  if (next_word_is(&args, "edge") && end_of_args(args)) {
+  if (console_arg_word(&args, "edge") && console_arg_end(args)) {
     cmd_dma_edge_test();
     return;
   }
@@ -1069,8 +1008,8 @@ static void cmd_usb_devices(void) {
 
 static void cmd_usb_enumerate(const char *args) {
   unsigned int requested = 0U;
-  if (!next_word_is(&args, "port") || !next_uint(&args, &requested) ||
-      !end_of_args(args) || requested == 0U || requested > 4U) {
+  if (!console_arg_word(&args, "port") || !console_arg_uint(&args, &requested) ||
+      !console_arg_end(args) || requested == 0U || requested > 4U) {
     console_puts("Usage: usb enumerate port <1-4>\n");
     return;
   }
@@ -1133,8 +1072,8 @@ static const char *xhci_ep_state_name(uint8_t state) {
 
 static void cmd_usb_enumstate(const char *args) {
   unsigned int index = 0U;
-  if (!next_word_is(&args, "record") || !next_uint(&args, &index) ||
-      !end_of_args(args) || index >= USB_MANAGED_DEVICE_CAPACITY) {
+  if (!console_arg_word(&args, "record") || !console_arg_uint(&args, &index) ||
+      !console_arg_end(args) || index >= USB_MANAGED_DEVICE_CAPACITY) {
     console_puts("Usage: usb enumstate record <0-3>\n");
     return;
   }
@@ -1228,19 +1167,9 @@ static const char *usb_recovery_result_name(
   }
 }
 
-static bool usb_parse_generation(const char *args, uint32_t *generation) {
-  if (!args || !generation)
-    return false;
-  unsigned int value = 0U;
-  if (!next_uint(&args, &value) || value == 0U || !end_of_args(args))
-    return false;
-  *generation = (uint32_t)value;
-  return true;
-}
-
 static void cmd_usb_recover_status(const char *args) {
   uint32_t generation = 0U;
-  if (!usb_parse_generation(args, &generation)) {
+  if (!console_arg_generation(args, &generation)) {
     console_puts("Usage: usb recover status <generation>\n");
     return;
   }
@@ -1269,7 +1198,7 @@ static void cmd_usb_recover_status(const char *args) {
 
 static void cmd_usb_recover(const char *args) {
   uint32_t generation = 0U;
-  if (!usb_parse_generation(args, &generation)) {
+  if (!console_arg_generation(args, &generation)) {
     console_puts("Usage: usb recover <generation>\n");
     return;
   }
@@ -1298,7 +1227,7 @@ static void cmd_usb_recover(const char *args) {
 
 static void cmd_usb_transfers(const char *args) {
   uint32_t generation = 0U;
-  if (!usb_parse_generation(args, &generation)) {
+  if (!console_arg_generation(args, &generation)) {
     console_puts("Usage: usb transfers <generation>\n");
     return;
   }
@@ -1413,7 +1342,7 @@ static const char *usb_lifecycle_fault_name(usb_lifecycle_fault_t fault) {
 
 static void cmd_usb_lifecycle_status(const char *args) {
   uint32_t generation = 0U;
-  if (!usb_parse_generation(args, &generation)) {
+  if (!console_arg_generation(args, &generation)) {
     console_puts("Usage: usb lifecycle status <generation>\n");
     return;
   }
@@ -1457,7 +1386,7 @@ static void cmd_usb_lifecycle_status(const char *args) {
 
 static void cmd_usb_lifecycle_port(const char *args) {
   uint32_t generation = 0U;
-  if (!usb_parse_generation(args, &generation)) {
+  if (!console_arg_generation(args, &generation)) {
     console_puts("Usage: usb lifecycle port <generation>\n");
     return;
   }
@@ -1684,7 +1613,7 @@ static bool usb_test_midi_select(const char *args, usb_device_t *device) {
   *device = (usb_device_t){0};
 
   uint32_t generation = 0U;
-  if (!usb_parse_generation(args, &generation))
+  if (!console_arg_generation(args, &generation))
     return false;
 
   return usb_test_midi_active_generation(generation, 0U, device);
@@ -1705,7 +1634,7 @@ static bool usb_test_midi_out_select(const char *args, usb_device_t *device,
 
   // Every USB-MIDI OUT test must identify
   // a specific device incarnation.
-  if (!next_uint(&p, &requested) || requested == 0U)
+  if (!console_arg_uint(&p, &requested) || requested == 0U)
     return false;
 
   uint32_t generation = (uint32_t)requested;
@@ -1717,9 +1646,9 @@ static bool usb_test_midi_out_select(const char *args, usb_device_t *device,
 
   // The virtual cable is optional.
   // Cable zero remains the default.
-  if (!end_of_args(p)) {
-    if (!next_word_is(&p, "cable") || !next_uint(&p, cable) ||
-        !end_of_args(p))
+  if (!console_arg_end(p)) {
+    if (!console_arg_word(&p, "cable") || !console_arg_uint(&p, cable) ||
+        !console_arg_end(p))
       return false;
   }
 
@@ -1829,7 +1758,7 @@ static const char *xhci_async_out_state_name(
 
 static void cmd_usb_test_midiasync(const char *args) {
   const char *p = args;
-  if (next_word_is(&p, "start")) {
+  if (console_arg_word(&p, "start")) {
     usb_device_t device = {0};
     usb_midi_config_t midi = {0};
     unsigned int cable = 0U;
@@ -1853,9 +1782,9 @@ static void cmd_usb_test_midiasync(const char *args) {
     return;
   }
   enum { ASYNC_STATUS, ASYNC_REAP } action;
-  if (next_word_is(&args, "status")) {
+  if (console_arg_word(&args, "status")) {
     action = ASYNC_STATUS;
-  } else if (next_word_is(&args, "reap")) {
+  } else if (console_arg_word(&args, "reap")) {
     action = ASYNC_REAP;
   } else {
     console_puts("Usage: usb test midiasync "
@@ -1863,7 +1792,7 @@ static void cmd_usb_test_midiasync(const char *args) {
     return;
   }
   uint32_t generation = 0U;
-  if (!usb_parse_generation(args, &generation)) {
+  if (!console_arg_generation(args, &generation)) {
     console_puts("Usage: usb test midiasync "
         "[start | status | reap] <generation>\n");
     return;
@@ -1902,13 +1831,13 @@ static void cmd_usb_test_midiasync(const char *args) {
 }
 
 static void cmd_usb_test_midiin_stress(const char *args) {
-  if (next_word_is(&args, "reset") && end_of_args(args)) {
+  if (console_arg_word(&args, "reset") && console_arg_end(args)) {
     bool reset = usb_midi_in_stress_reset();
     console_printf("USB-MIDI IN stress reset: %s\n",
         reset ? "OK" : "NOT READY");
     return;
   }
-  if (next_word_is(&args, "start")) {
+  if (console_arg_word(&args, "start")) {
     usb_device_t device = {0};
     if (!usb_test_midi_select(args, &device)) {
       console_puts("Usage: usb test midiin stress start <generation>\n");
@@ -1924,7 +1853,7 @@ static void cmd_usb_test_midiin_stress(const char *args) {
     }
     return;
   }
-  if (next_word_is(&args, "status") && end_of_args(args)) {
+  if (console_arg_word(&args, "status") && console_arg_end(args)) {
     usb_midi_in_stress_info_t info = {0};
     if (!usb_midi_in_stress_get_info(&info)) {
       console_puts("USB-MIDI IN stress status unavailable.\n");
@@ -2001,7 +1930,7 @@ static const char *usb_bulk_in_arm_result_name(
 
 static void cmd_usb_test_midiin(const char *args) {
   const char *sub_args = args;
-  if (next_word_is(&sub_args, "stress")) {
+  if (console_arg_word(&sub_args, "stress")) {
     cmd_usb_test_midiin_stress(sub_args);
     return;
   }
@@ -2009,11 +1938,11 @@ static void cmd_usb_test_midiin(const char *args) {
   // resolving its mandatory device generation.
   enum { MIDI_IN_STREAM, MIDI_IN_READ, MIDI_IN_STATUS } action;
   sub_args = args;
-  if (next_word_is(&sub_args, "stream")) {
+  if (console_arg_word(&sub_args, "stream")) {
     action = MIDI_IN_STREAM;
-  } else if (next_word_is(&sub_args, "read")) {
+  } else if (console_arg_word(&sub_args, "read")) {
     action = MIDI_IN_READ;
-  } else if (next_word_is(&sub_args, "status")) {
+  } else if (console_arg_word(&sub_args, "status")) {
     action = MIDI_IN_STATUS;
   } else {
     console_puts("Usage: usb test midiin "
@@ -2361,29 +2290,29 @@ static void cmd_usb_resources(void) {
 }
 
 static void cmd_usb_auto(const char *args) {
-  if (end_of_args(args)) {
+  if (console_arg_end(args)) {
     cmd_usb_auto_status();
     return;
   }
   const char *word = args;
-  if (next_word_is(&word, "on") && end_of_args(word)) {
+  if (console_arg_word(&word, "on") && console_arg_end(word)) {
     usb_auto_enum_set_enabled(true);
     console_puts("USB auto enumeration: ON\n");
     return;
   }
   word = args;
-  if (next_word_is(&word, "off") && end_of_args(word)) {
+  if (console_arg_word(&word, "off") && console_arg_end(word)) {
     usb_auto_enum_set_enabled(false);
     console_puts("USB auto enumeration: OFF\n");
     return;
   }
   word = args;
-  if (next_word_is(&word, "status") && end_of_args(word)) {
+  if (console_arg_word(&word, "status") && console_arg_end(word)) {
     cmd_usb_auto_status();
     return;
   }
   word = args;
-  if (next_word_is(&word, "ports") && end_of_args(word)) {
+  if (console_arg_word(&word, "ports") && console_arg_end(word)) {
     cmd_usb_auto_ports();
     return;
   }
@@ -2394,44 +2323,44 @@ static void cmd_usb(const char *args) {
   // The VL805 is configured at boot. Subcommands inspect
   // controller state and exercise explicit diagnostics.
   const char *other_args = args;
-  if (next_word_is(&args, "topology")) {
-    if (end_of_args(args)) {
+  if (console_arg_word(&args, "topology")) {
+    if (console_arg_end(args)) {
       cmd_usb_topology(false);
       return;
     }
-    if (next_word_is(&args, "detail") && end_of_args(args)) {
+    if (console_arg_word(&args, "detail") && console_arg_end(args)) {
       cmd_usb_topology(true);
       return;
     }
     console_puts("Usage: usb topology [detail]\n");
     return;
   }
-  if (next_word_is(&args, "hubirq")) {
-    if (end_of_args(args)) {
+  if (console_arg_word(&args, "hubirq")) {
+    if (console_arg_end(args)) {
       cmd_usb_hubirq();
       return;
     }
     console_puts("Usage: usb hubirq\n");
     return;
   }
-  if (next_word_is(&args, "auto")) {
+  if (console_arg_word(&args, "auto")) {
     cmd_usb_auto(args);
     return;
   }
-  if (next_word_is(&args, "recover")) {
-    if (next_word_is(&args, "status")) {
+  if (console_arg_word(&args, "recover")) {
+    if (console_arg_word(&args, "status")) {
       cmd_usb_recover_status(args);
       return;
     }
     cmd_usb_recover(args);
     return;
   }
-  if (next_word_is(&args, "lifecycle")) {
-    if (next_word_is(&args, "status")) {
+  if (console_arg_word(&args, "lifecycle")) {
+    if (console_arg_word(&args, "status")) {
       cmd_usb_lifecycle_status(args);
       return;
     }
-    if (next_word_is(&args, "port")) {
+    if (console_arg_word(&args, "port")) {
       cmd_usb_lifecycle_port(args);
       return;
     }
@@ -2439,87 +2368,87 @@ static void cmd_usb(const char *args) {
         "[status <generation> | port <generation>]\n");
     return;
   }
-  if (next_word_is(&args, "resources") && end_of_args(args)) {
+  if (console_arg_word(&args, "resources") && console_arg_end(args)) {
     cmd_usb_resources();
     return;
   }
-  if (next_word_is(&args, "transfers")) {
+  if (console_arg_word(&args, "transfers")) {
     cmd_usb_transfers(args);
     return;
   }
-  if (next_word_is(&args, "changes")) {
-    if (end_of_args(args)) {
+  if (console_arg_word(&args, "changes")) {
+    if (console_arg_end(args)) {
       cmd_usb_changes();
       return;
     }
-    if (next_word_is(&args, "status") && end_of_args(args)) {
+    if (console_arg_word(&args, "status") && console_arg_end(args)) {
       cmd_usb_changes();
       return;
     }
-    if (next_word_is(&args, "dump") && end_of_args(args)) {
+    if (console_arg_word(&args, "dump") && console_arg_end(args)) {
       cmd_usb_changes_dump();
       return;
     }
     console_puts("Usage: usb changes [status | dump]\n");
     return;
   }
-  if (next_word_is(&args, "devices") && end_of_args(args)) {
+  if (console_arg_word(&args, "devices") && console_arg_end(args)) {
     cmd_usb_devices();
     return;
   }
-  if (next_word_is(&args, "enumerate")) {
+  if (console_arg_word(&args, "enumerate")) {
     cmd_usb_enumerate(args);
     return;
   }
-  if (next_word_is(&args, "enumstate")) {
+  if (console_arg_word(&args, "enumstate")) {
     cmd_usb_enumstate(args);
     return;
   }
-  if (next_word_is(&args, "hubports") && end_of_args(args)) {
+  if (console_arg_word(&args, "hubports") && console_arg_end(args)) {
     cmd_usb_hubports();
     return;
   }
-  if (next_word_is(&args, "events") && end_of_args(args)) {
+  if (console_arg_word(&args, "events") && console_arg_end(args)) {
     cmd_usb_events();
     return;
   }
-  if (next_word_is(&other_args, "test")) {
-    if (next_word_is(&other_args, "ep0match") &&
-        end_of_args(other_args)) {
+  if (console_arg_word(&other_args, "test")) {
+    if (console_arg_word(&other_args, "ep0match") &&
+        console_arg_end(other_args)) {
       cmd_usb_test_ep0match();
       return;
     }
-    if (next_word_is(&other_args, "noops") &&
-        end_of_args(other_args)) {
+    if (console_arg_word(&other_args, "noops") &&
+        console_arg_end(other_args)) {
       cmd_usb_test_noops();
       return;
     }
-    if (next_word_is(&other_args, "midiout")) {
+    if (console_arg_word(&other_args, "midiout")) {
       cmd_usb_test_midiout(other_args);
       return;
     }
-    if (next_word_is(&other_args, "midiwrap")) {
+    if (console_arg_word(&other_args, "midiwrap")) {
       cmd_usb_test_midiwrap(other_args);
       return;
     }
-    if (next_word_is(&other_args, "midiin")) {
+    if (console_arg_word(&other_args, "midiin")) {
       cmd_usb_test_midiin(other_args);
       return;
     }
-    if (next_word_is(&other_args, "midiasync")) {
+    if (console_arg_word(&other_args, "midiasync")) {
       cmd_usb_test_midiasync(other_args);
       return;
     }
     console_puts(
-        "Usage: usb test [ep0match | "
-        "noops | midiout | midiwrap | midiin]\n");
+        "Usage: usb test [ep0match | noops | midiout | midiwrap | "
+        "midiin | midiasync]\n");
     return;
   }
-  if (next_word_is(&args, "state") && end_of_args(args)) {
+  if (console_arg_word(&args, "state") && console_arg_end(args)) {
     cmd_usb_state();
     return;
   }
-  if (!end_of_args(args)) {
+  if (!console_arg_end(args)) {
     console_puts(
         "Usage: usb [state | events | changes | devices | topology | "
         "test | recover | transfers | resources | auto | hubirq | "
@@ -2663,16 +2592,16 @@ static void cmd_fdt_memory(void) {
 }
 
 static void cmd_fdt(const char *args) {
-  if (next_word_is(&args, "dma") && end_of_args(args)) {
+  if (console_arg_word(&args, "dma") && console_arg_end(args)) {
     cmd_fdt_dma();
     return;
   }
-  if (next_word_is(&args, "memory") && end_of_args(args)) {
+  if (console_arg_word(&args, "memory") && console_arg_end(args)) {
     cmd_fdt_memory();
     return;
   }
 
-  if (!end_of_args(args)) {
+  if (!console_arg_end(args)) {
     console_puts("Usage: fdt [dma | memory]\n");
     return;
   }
@@ -2719,7 +2648,7 @@ static void cmd_fdt(const char *args) {
 }
 
 static void cmd_physmem(const char *args) {
-  if (!end_of_args(args)) {
+  if (!console_arg_end(args)) {
     console_puts("Usage: physmem\n");
     return;
   }
@@ -2984,15 +2913,15 @@ static void cmd_page_run_test(void) {
 }
 
 static void cmd_page(const char *args) {
-  if (next_word_is(&args, "runtest") && end_of_args(args)) {
+  if (console_arg_word(&args, "runtest") && console_arg_end(args)) {
     cmd_page_run_test();
     return;
   }
-  if (next_word_is(&args, "test") && end_of_args(args)) {
+  if (console_arg_word(&args, "test") && console_arg_end(args)) {
     cmd_page_test();
     return;
   }
-  if (!end_of_args(args)) {
+  if (!console_arg_end(args)) {
     console_puts(
         "Usage: page [test | runtest]\n");
     return;
@@ -3019,7 +2948,7 @@ static void cmd_page(const char *args) {
 }
 
 static void cmd_cache(const char *args) {
-  if (!end_of_args(args)) {
+  if (!console_arg_end(args)) {
     console_puts("Usage: cache\n");
     return;
   }
@@ -3127,682 +3056,6 @@ static void cmd_memory(const char *args) {
   }
 }
 
-static int midi_hex_digit(char c) {
-  if (c >= '0' && c <= '9')
-    return c - '0';
-
-  if (c >= 'a' && c <= 'f')
-    return c - 'a' + 10;
-
-  if (c >= 'A' && c <= 'F')
-    return c - 'A' + 10;
-
-  return -1;
-}
-
-static bool midi_next_hex_byte(const char **input,
-    uint8_t *value) {
-
-  if (!input || !*input || !value)
-    return false;
-
-  const char *p = *input;
-
-  while (*p == ' ' || *p == '\t')
-    p++;
-
-  int high = midi_hex_digit(p[0]);
-
-  if (high < 0)
-    return false;
-
-  int low = midi_hex_digit(p[1]);
-
-  if (low < 0)
-    return false;
-
-  if (p[2] != '\0' && p[2] != ' ' && p[2] != '\t')
-    return false;
-
-  *value = (uint8_t)((high << 4) | low);
-  *input = p + 2;
-
-  return true;
-}
-
-static void cmd_midi_decode(const char *args) {
-  uint8_t packet[4] = {0};
-  if (!midi_next_hex_byte(&args, &packet[0]) ||
-      !midi_next_hex_byte(&args, &packet[1]) ||
-      !midi_next_hex_byte(&args, &packet[2]) ||
-      !midi_next_hex_byte(&args, &packet[3]) ||
-      !end_of_args(args)) {
-    console_puts("Usage: midi decode <hh> <hh> <hh> <hh>\n");
-    return;
-  }
-  usb_midi_event_t event = {0};
-  if (!usb_midi_decode_packet(packet, &event)) {
-    console_puts("USB-MIDI: reserved or invalid CIN.\n");
-    return;
-  }
-  console_puts("USB-MIDI decoded event:\n");
-  console_printf("  Cable  : %u\n", (unsigned int)event.cable);
-  console_printf("  CIN    : 0x%01x\n", (unsigned int)event.cin);
-  console_printf("  Length : %u\n", (unsigned int)event.length);
-  console_puts("  Data   :");
-  for (unsigned int i = 0U; i < event.length; i++) {
-    console_putc(' ');
-    console_puthex(event.data[i], 2U);
-  }
-  console_putc('\n');
-}
-
-static const char *midi_rx_state_name(usb_midi_rx_state_t state) {
-  switch (state) {
-    case USB_MIDI_RX_IDLE: return "Idle";
-    case USB_MIDI_RX_RUNNING: return "Running";
-    case USB_MIDI_RX_DISCONNECTED: return "Disconnected";
-    case USB_MIDI_RX_FAILED: return "Failed";
-    default: return "Unknown";
-  }
-}
-
-static void cmd_midi_rx(const char *args) {
-  enum { RX_START, RX_STATUS, RX_READ } action;
-  if (next_word_is(&args, "start")) {
-    action = RX_START;
-  } else if (next_word_is(&args, "status")) {
-    action = RX_STATUS;
-  } else if (next_word_is(&args, "read")) {
-    action = RX_READ;
-  } else {
-    console_puts("Usage: midi rx [start | status | read] <generation>\n");
-    return;
-  }
-  uint32_t generation = 0U;
-  if (!usb_parse_generation(args, &generation)) {
-    console_puts("Usage: midi rx [start | status | read] <generation>\n");
-    return;
-  }
-  if (action == RX_START) {
-    bool started = usb_midi_rx_start_generation(generation);
-    console_printf("MIDI receiver: %s\n", started ? "STARTED" : "NOT READY");
-    return;
-  }
-  if (action == RX_STATUS) {
-    usb_midi_rx_info_t info = {0};
-    if (!usb_midi_rx_get_info(generation, &info)) {
-      console_puts("MIDI receiver unavailable.\n");
-      return;
-    }
-    console_printf("MIDI receiver (generation %u):\n",
-        (unsigned int)generation);
-    console_printf("  State      : %s\n", midi_rx_state_name(info.state));
-    console_printf("  Slot       : %u\n", (unsigned int)info.slot_id);
-    console_printf("  IN cables  : %u\n", (unsigned int)info.cables);
-    console_printf("  Transfers  : %llu\n",
-        (unsigned long long)info.transfers);
-    console_printf("  Events     : %llu\n", (unsigned long long)info.events);
-    console_printf("  Rejected   : %llu\n",
-        (unsigned long long)info.rejected);
-    console_printf("  Staged     : %u\n", info.staged);
-    console_printf("  Queue      : %u / %u\n",
-        info.queue_depth, USB_MIDI_RX_QUEUE_CAPACITY);
-    console_printf("  Queue peak : %u\n", info.queue_peak);
-    return;
-  }
-  usb_midi_event_t event = {0};
-  if (!usb_midi_rx_read(generation, &event)) {
-    console_puts("No decoded MIDI event available.\n");
-    return;
-  }
-  console_printf("MIDI RX event (generation %u):\n",
-      (unsigned int)generation);
-  console_printf("  Cable  : %u\n", (unsigned int)event.cable);
-  console_printf("  CIN    : 0x%01x\n", (unsigned int)event.cin);
-  console_printf("  Length : %u\n", (unsigned int)event.length);
-  console_puts("  Data   :");
-  for (unsigned int i = 0U; i < event.length; i++) {
-    console_putc(' ');
-    console_puthex(event.data[i], 2U);
-  }
-  console_putc('\n');
-}
-
-static void cmd_midi_monitor(const char *args) {
-  enum { MONITOR_START, MONITOR_STOP, MONITOR_STATUS } action;
-  if (next_word_is(&args, "start")) {
-    action = MONITOR_START;
-  } else if (next_word_is(&args, "stop")) {
-    action = MONITOR_STOP;
-  } else if (next_word_is(&args, "status")) {
-    action = MONITOR_STATUS;
-  } else {
-    console_puts("Usage: midi monitor "
-        "[start | stop | status] <generation>\n");
-    return;
-  }
-  uint32_t generation = 0U;
-  if (!usb_parse_generation(args, &generation)) {
-    console_puts("Usage: midi monitor "
-        "[start | stop | status] <generation>\n");
-    return;
-  }
-  if (action == MONITOR_START) {
-    bool started = midi_monitor_start(generation);
-    console_printf("MIDI monitor: %s\n", started ? "ATTACHED" : "NOT READY");
-    return;
-  }
-  if (action == MONITOR_STOP) {
-    bool stopped = midi_monitor_stop(generation);
-    console_printf("MIDI monitor: %s\n", stopped ? "DETACHED" : "NOT READY");
-    return;
-  }
-  midi_monitor_info_t info = {0};
-  if (!midi_monitor_get_info(generation, &info)) {
-    console_puts("MIDI monitor unavailable.\n");
-    return;
-  }
-  console_printf("MIDI monitor (generation %u):\n", (unsigned int)generation);
-  console_printf("  Attached : %s\n", info.attached ? "Yes" : "No");
-  console_printf("  Events   : %llu\n", (unsigned long long)info.events);
-  for (unsigned int cable = 0U; cable < USB_MIDI_MAX_CABLES; cable++) {
-    if (info.by_cable[cable] == 0U)
-      continue;
-    console_printf("  Cable %u  : %llu events\n",
-        cable, (unsigned long long)info.by_cable[cable]);
-  }
-  if (!info.have_last)
-    return;
-  console_printf("  Last     : cable %u, CIN 0x%x\n",
-      (unsigned int)info.last.cable, (unsigned int)info.last.cin);
-  console_puts("  Data     :");
-  for (unsigned int i = 0U; i < info.last.length; i++) {
-    console_putc(' ');
-    console_puthex(info.last.data[i], 2U);
-  }
-  console_putc('\n');
-}
-
-static void cmd_midi_auto(const char *args) {
-  const char *p = args;
-  if (next_word_is(&p, "on") && end_of_args(p)) {
-    midi_auto_set_enabled(true);
-    console_puts("Automatic MIDI reception: ON\n");
-    return;
-  }
-  p = args;
-  if (next_word_is(&p, "off") && end_of_args(p)) {
-    midi_auto_set_enabled(false);
-    console_puts("Automatic MIDI reception: OFF\n");
-    console_puts("Existing receivers retain their ownership.\n");
-    return;
-  }
-  p = args;
-  if (end_of_args(args) || (next_word_is(&p, "status") && end_of_args(p))) {
-
-    midi_auto_info_t info = {0};
-    if (!midi_auto_get_info(&info)) {
-      console_puts("Automatic MIDI reception unavailable.\n");
-      return;
-    }
-    console_puts("Automatic MIDI reception:\n");
-    console_printf("  Enabled    : %s\n", info.enabled ? "Yes" : "No");
-    console_printf("  Attempts   : %u\n", (unsigned int)info.attempts);
-    console_printf("  Started    : %u\n", (unsigned int)info.started);
-    console_printf("  Skipped    : %u\n", (unsigned int)info.skipped);
-    console_printf("  Failed     : %u\n", (unsigned int)info.failed);
-    if (info.attempts != 0U)
-      console_printf("  Last gen   : %u\n",
-          (unsigned int)info.last_generation);
-    return;
-  }
-  console_puts("Usage: midi auto [on | off | status]\n");
-}
-
-static midi_stream_parser_t console_stream_parser;
-
-static bool midi_valid_byte_list(const char *args) {
-  uint8_t byte = 0U;
-  bool found = false;
-  while (!end_of_args(args)) {
-    if (!midi_next_hex_byte(&args, &byte))
-      return false;
-    found = true;
-  }
-  return found;
-}
-
-static unsigned int midi_console_emit(
-    const midi_stream_output_t *output, bool show_sysex) {
-  unsigned int short_count = 0U;
-  for (unsigned int i = 0U; i < output->count; i++) {
-    const midi_stream_event_t *event = &output->events[i];
-    if (event->type == MIDI_STREAM_SHORT) {
-      const midi_short_message_t *message = &event->message;
-      console_puts("  ");
-      console_puthex(message->status, 2U);
-      for (unsigned int j = 1U; j < message->length; j++) {
-        console_putc(' ');
-        console_puthex(message->data[j - 1U], 2U);
-      }
-      console_putc('\n');
-      short_count++;
-      continue;
-    }
-    if (!show_sysex)
-      continue;
-    switch (event->type) {
-      case MIDI_STREAM_SYSEX_BEGIN:
-        console_puts("  SysEx BEGIN\n");
-        break;
-      case MIDI_STREAM_SYSEX_DATA:
-        console_puts("  SysEx DATA ");
-        console_puthex(event->byte, 2U);
-        console_putc('\n');
-        break;
-      case MIDI_STREAM_SYSEX_END:
-        console_puts("  SysEx END\n");
-        break;
-      case MIDI_STREAM_SYSEX_ABORT:
-        console_puts("  SysEx ABORT");
-        if (event->byte != 0U) {
-          console_puts(" (status ");
-          console_puthex(event->byte, 2U);
-          console_putc(')');
-        }
-        console_putc('\n');
-        break;
-      default:
-        break;
-    }
-  }
-  return short_count;
-}
-
-static unsigned int midi_console_feed(midi_stream_parser_t *parser,
-    const char *args, bool show_sysex) {
-  unsigned int short_count = 0U;
-  while (!end_of_args(args)) {
-    uint8_t byte = 0U;
-    // The complete argument list was validated
-    // before this function was called.
-    if (!midi_next_hex_byte(&args, &byte))
-      break;
-    midi_stream_output_t output = {0};
-    if (!midi_stream_parser_feed(parser, byte, &output))
-      break;
-    short_count += midi_console_emit(&output, show_sysex);
-  }
-  return short_count;
-}
-
-static void cmd_midi_stream(const char *args) {
-  const char *p = args;
-  if (next_word_is(&p, "reset") && end_of_args(p)) {
-    midi_stream_output_t output = {0};
-    midi_stream_parser_cancel(&console_stream_parser, &output);
-    midi_console_emit(&output, true);
-    console_puts("MIDI stream parser reset.\n");
-    return;
-  }
-  p = args;
-  if (next_word_is(&p, "status") && end_of_args(p)) {
-    console_puts("MIDI stream parser state:\n");
-    console_printf("  SysEx   : %s\n",
-        console_stream_parser.in_sysex ? "Yes" : "No");
-    console_printf("  Running : 0x%02x\n",
-        (unsigned int)console_stream_parser.running_status);
-    console_printf("  Active  : 0x%02x\n",
-        (unsigned int)console_stream_parser.active_status);
-    return;
-  }
-  if (!midi_valid_byte_list(args)) {
-    console_puts("Usage: midi stream [reset | status | <hh> [hh ...]]\n");
-    return;
-  }
-  console_puts("MIDI stream events:\n");
-  midi_console_feed(&console_stream_parser, args, true);
-}
-
-static void cmd_midi_input(const char *args) {
-  enum { INPUT_START, INPUT_STOP, INPUT_STATUS, INPUT_READ } action;
-
-  if (next_word_is(&args, "start")) {
-    action = INPUT_START;
-  } else if (next_word_is(&args, "stop")) {
-    action = INPUT_STOP;
-  } else if (next_word_is(&args, "status")) {
-    action = INPUT_STATUS;
-  } else if (next_word_is(&args, "read")) {
-    action = INPUT_READ;
-  } else {
-    console_puts("Usage: midi input [start | stop | status | read] <generation>\n");
-    return;
-  }
-
-  uint32_t generation = 0U;
-
-  if (!usb_parse_generation(args, &generation)) {
-    console_puts("Usage: midi input [start | stop | status] <generation>\n");
-    return;
-  }
-
-  if (action == INPUT_START) {
-    bool started = midi_input_start_generation(generation);
-    console_printf("MIDI input: %s\n", started ? "ATTACHED" : "NOT READY");
-    return;
-  }
-
-  if (action == INPUT_STOP) {
-    bool stopped = midi_input_stop_generation(generation);
-    console_printf("MIDI input: %s\n", stopped ? "DETACHED" : "NOT READY");
-    return;
-  }
-
-  if (action == INPUT_READ) {
-    midi_input_event_t received = {0};
-
-    if (!midi_input_read(generation, &received)) {
-      console_puts("MIDI input queue empty.\n");
-      return;
-    }
-
-    console_printf( "MIDI input event (generation %u, cable %u):\n",
-        (unsigned int)received.generation, (unsigned int)received.cable);
-
-    // Reuse the existing stream-event formatter.
-    midi_stream_output_t output = {
-      .count = 1U
-    };
-
-    output.events[0] = received.event;
-    midi_console_emit(&output, true);
-    return;
-  }
-
-  midi_input_info_t info = {0};
-
-  if (!midi_input_get_info(generation, &info)) {
-    console_puts("MIDI input unavailable.\n");
-    return;
-  }
-
-  console_printf("MIDI input (generation %u):\n", (unsigned int)generation);
-  console_printf("  Attached    : %s\n", info.attached ? "Yes" : "No");
-  console_printf("  Lost        : %s\n", info.lost ? "Yes" : "No");
-  console_printf("  Cables      : %u\n", (unsigned int)info.cables);
-  console_printf("  Packets     : %llu\n", (unsigned long long)info.packets);
-  console_printf("  Malformed   : %llu\n",
-      (unsigned long long)info.malformed);
-  console_printf("  Short       : %llu\n",
-      (unsigned long long)info.short_messages);
-  console_printf("  SysEx begin : %llu\n",
-      (unsigned long long)info.sysex_begins);
-  console_printf("  SysEx bytes : %llu\n",
-      (unsigned long long)info.sysex_bytes);
-  console_printf("  SysEx end   : %llu\n",
-      (unsigned long long)info.sysex_ends);
-  console_printf("  SysEx abort : %llu\n",
-      (unsigned long long)info.sysex_aborts);
-  console_printf("  Queue       : %u / %u\n",
-      info.queue_depth, MIDI_INPUT_QUEUE_CAPACITY);
-  console_printf("  Queue peak  : %u\n", info.queue_peak);
-  console_printf("  Pending end : %u aborts\n", info.pending_aborts);
-  console_printf("  Stalls      : %llu\n", (unsigned long long)info.stalls);
-
-  if (!info.have_last)
-    return;
-
-  console_printf("  Last cable  : %u\n", (unsigned int)info.last_cable);
-  console_puts("  Last event:\n");
-
-  // Reuse the existing stream-event formatter.
-  midi_stream_output_t output = {
-    .count = 1U
-  };
-
-  output.events[0] = info.last;
-  midi_console_emit(&output, true);
-}
-
-static const char *midi_output_state_name(midi_output_state_t state) {
-  switch (state) {
-    case MIDI_OUTPUT_IDLE: return "Idle";
-    case MIDI_OUTPUT_RUNNING: return "Running";
-    case MIDI_OUTPUT_STOPPED: return "Stopped";
-    case MIDI_OUTPUT_DISCONNECTED: return "Disconnected";
-    case MIDI_OUTPUT_FAILED: return "Failed";
-    default: return "Unknown";
-  }
-}
-
-static void cmd_midi_output_sysex(const char *args) {
-  const char *p = args;
-  if (next_word_is(&p, "begin")) {
-    unsigned int generation = 0U;
-    unsigned int cable = 0U;
-    if (!next_uint(&p, &generation) || generation == 0U ||
-        !next_uint(&p, &cable) || !end_of_args(p)) {
-      console_puts("Usage: midi output sysex begin "
-          "<generation> <cable>\n");
-      return;
-    }
-    bool started = midi_output_sysex_begin(generation, cable);
-    console_printf("MIDI SysEx: %s\n", started ? "STARTED" : "NOT READY");
-    return;
-  }
-  p = args;
-  if (next_word_is(&p, "write")) {
-    unsigned int generation = 0U;
-    if (!next_uint(&p, &generation) || generation == 0U || end_of_args(p)) {
-      console_puts("Usage: midi output sysex write "
-          "<generation> <hh> [hh ...]\n");
-      return;
-    }
-    // Validate the whole argument list before
-    // accepting any part of it.
-    const char *probe = p;
-    unsigned int total = 0U;
-    uint8_t byte = 0U;
-    while (!end_of_args(probe)) {
-      if (!midi_next_hex_byte(&probe, &byte) || byte >= 0x80U) {
-        console_puts("SysEx payload must contain "
-            "seven-bit hexadecimal bytes.\n");
-        return;
-      }
-      total++;
-    }
-    unsigned int accepted = 0U;
-    while (!end_of_args(p)) {
-      if (!midi_next_hex_byte(&p, &byte))
-        break;
-      if (!midi_output_sysex_write(generation, byte))
-        break;
-      accepted++;
-    }
-    console_printf("SysEx payload: %u / %u bytes accepted\n",
-        accepted, total);
-    if (accepted != total)
-      console_puts("Retry starting with the first unaccepted byte.\n");
-    return;
-  }
-  p = args;
-  if (next_word_is(&p, "end")) {
-    uint32_t generation = 0U;
-    if (!usb_parse_generation(p, &generation)) {
-      console_puts("Usage: midi output sysex end <generation>\n");
-      return;
-    }
-    bool ended = midi_output_sysex_end(generation);
-    console_printf("MIDI SysEx end: %s\n", ended ? "QUEUED" : "NOT READY");
-    return;
-  }
-  console_puts("Usage: midi output sysex [begin | write | end]\n");
-}
-
-static void cmd_midi_output(const char *args) {
-  const char *p = args;
-  if (next_word_is(&p, "sysex")) {
-    cmd_midi_output_sysex(p);
-    return;
-  }
-  if (next_word_is(&p, "send")) {
-    unsigned int generation = 0U;
-    unsigned int cable = 0U;
-    uint8_t bytes[3] = {0};
-    unsigned int count = 0U;
-    if (!next_uint(&p, &generation) || generation == 0U ||
-        !next_uint(&p, &cable)) {
-      console_puts("Usage: midi output send "
-          "<generation> <cable> <hh> [hh ...]\n");
-      return;
-    }
-    while (!end_of_args(p)) {
-      if (count == 3U || !midi_next_hex_byte(&p, &bytes[count])) {
-        console_puts("Usage: midi output send "
-            "<generation> <cable> <hh> [hh ...]\n");
-        return;
-      }
-      count++;
-    }
-    if (count == 0U) {
-      console_puts("Missing MIDI message.\n");
-      return;
-    }
-    midi_short_message_t message = {
-      .status = bytes[0],
-      .length = (uint8_t)count
-    };
-    if (count > 1U)
-      message.data[0] = bytes[1];
-    if (count > 2U)
-      message.data[1] = bytes[2];
-    bool queued = midi_output_enqueue_short(generation, cable, &message);
-    console_printf("MIDI output: %s\n", queued ? "QUEUED" : "NOT QUEUED");
-    return;
-  }
-  if (next_word_is(&p, "test")) {
-    unsigned int generation = 0U;
-    unsigned int count = 0U;
-    if (!next_uint(&p, &generation) || generation == 0U ||
-        !next_uint(&p, &count) || count == 0U ||
-        count > 128U || !end_of_args(p)) {
-      console_puts( "Usage: midi output test <generation> <count 1..128>\n");
-      return;
-    }
-    console_puts("WARNING: Sends real MIDI OUT messages: "
-        "channel 16, CC 102.\n");
-    unsigned int accepted = 0U;
-    for (unsigned int i = 0U; i < count; i++) {
-      midi_short_message_t message = {
-        .status = 0xbfU,
-        .data = {0x66U, (uint8_t)(i & 0x7fU)},
-        .length = 3U
-      };
-      if (midi_output_enqueue_short(generation, 0U, &message))
-        accepted++;
-    }
-    console_printf("  Accepted : %u\n", accepted);
-    console_printf("  Rejected : %u\n", count - accepted);
-    return;
-  }
-  enum { OUTPUT_START, OUTPUT_STOP, OUTPUT_STATUS } action;
-  if (next_word_is(&args, "start")) {
-    action = OUTPUT_START;
-  } else if (next_word_is(&args, "stop")) {
-    action = OUTPUT_STOP;
-  } else if (next_word_is(&args, "status")) {
-    action = OUTPUT_STATUS;
-  } else {
-    console_puts("Usage: midi output "
-        "[start | stop | status | send | test]\n");
-    return;
-  }
-  uint32_t generation = 0U;
-  if (!usb_parse_generation(args, &generation)) {
-    console_puts("Usage: midi output "
-        "[start | stop | status] <generation>\n");
-    return;
-  }
-  if (action == OUTPUT_START) {
-    bool started = midi_output_start_generation(generation);
-    console_printf("MIDI output: %s\n", started ? "STARTED" : "NOT READY");
-    return;
-  }
-  if (action == OUTPUT_STOP) {
-    bool stopped = midi_output_stop_generation(generation);
-    console_printf("MIDI output: %s\n", stopped ? "STOPPED" : "NOT READY");
-    return;
-  }
-  midi_output_info_t info = {0};
-  if (!midi_output_get_info(generation, &info)) {
-    console_puts("MIDI output unavailable.\n");
-    return;
-  }
-  console_printf("MIDI output (generation %u):\n", (unsigned int)generation);
-  console_printf("  State       : %s\n", midi_output_state_name(info.state));
-  console_printf("  Slot        : %u\n", (unsigned int)info.slot_id);
-  console_printf("  OUT cables  : %u\n", (unsigned int)info.cables);
-  console_printf("  Accepted    : %llu\n", (unsigned long long)info.accepted);
-  console_printf("  Confirmed   : %llu\n",
-      (unsigned long long)info.confirmed);
-  console_printf("  Transfers   : %llu\n",
-      (unsigned long long)info.transfers);
-  console_printf("  Failures    : %llu\n", (unsigned long long)info.failures);
-  console_printf("  Queue       : %u / %u\n",
-      info.queue_depth, MIDI_OUTPUT_QUEUE_CAPACITY);
-  console_printf("  Queue peak  : %u\n", info.queue_peak);
-  console_printf("  In flight   : %u packets\n", info.in_flight);
-  console_printf("  Full rejects: %llu\n",
-      (unsigned long long)info.full_rejections);
-  console_printf("  Last error  : %u\n", (unsigned int)info.last_error);
-  console_printf("  SysEx active: %s\n", info.sysex_active ? "Yes" : "No");
-  if (info.sysex_active) {
-    console_printf("  SysEx cable : %u\n", (unsigned int)info.sysex_cable);
-    console_printf("  SysEx staged: %u bytes\n",
-        (unsigned int)info.sysex_staged);
-  }
-  console_printf("  SysEx starts: %llu\n",
-      (unsigned long long)info.sysex_started);
-  console_printf("  SysEx ends  : %llu\n",
-      (unsigned long long)info.sysex_completed);
-  console_printf("  SysEx data  : %llu bytes\n",
-      (unsigned long long)info.sysex_payload_bytes);
-}
-
-static void cmd_midi(const char *args) {
-  if (next_word_is(&args, "decode")) {
-    cmd_midi_decode(args);
-    return;
-  }
-  if (next_word_is(&args, "rx")) {
-    cmd_midi_rx(args);
-    return;
-  }
-  if (next_word_is(&args, "monitor")) {
-    cmd_midi_monitor(args);
-    return;
-  }
-  if (next_word_is(&args, "auto")) {
-    cmd_midi_auto(args);
-    return;
-  }
-  if (next_word_is(&args, "stream")) {
-    cmd_midi_stream(args);
-    return;
-  }
-  if (next_word_is(&args, "input")) {
-    cmd_midi_input(args);
-    return;
-  }
-  if (next_word_is(&args, "output")) {
-    cmd_midi_output(args);
-    return;
-  }
-  console_puts("Usage: midi [decode | rx | monitor | auto | stream | input | output]\n");
-}
-
 // Commands will be added here as they are implemented.
 // The NULL entry terminates the table.
 static const console_command_t commands[] = {
@@ -3817,12 +3070,12 @@ static const console_command_t commands[] = {
   { "page", cmd_page, "Inspect physical page statistics and run tests" },
   { "dma", cmd_dma, "Run DMA ownership and cache tests" },
   { "usb", cmd_usb, "Inspect and test USB controller and MIDI transport" },
-  { "midi", cmd_midi, "Decode, receive and monitor MIDI" },
+  { "midi", console_midi_command, "Decode, receive and monitor MIDI" },
   { NULL, NULL, NULL }
 };
 
 static void cmd_help(const char *args) {
-  if (!end_of_args(args)) {
+  if (!console_arg_end(args)) {
     console_puts("Usage: help\n");
     return;
   }
