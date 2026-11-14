@@ -1142,6 +1142,8 @@ static const char *usb_recovery_result_name(
       return "Ready";
     case USB_RECOVERY_READY_EP0_ERROR:
       return "Ready (confirmed EP0 error)";
+    case USB_RECOVERY_READY_EP0_LATE_SUCCESS:
+      return "Ready (reconciled late EP0 success)";
     case USB_RECOVERY_NO_FAILED_DEVICE:
       return "No failed device";
     case USB_RECOVERY_NO_CONFIRMED_SLOT:
@@ -1188,6 +1190,8 @@ static void cmd_usb_recover_status(const char *args) {
       info.ep0_completion_seen ? "Yes" : "No");
   console_printf("  Code       : %u\n",
       (unsigned int)info.ep0_completion_code);
+  console_printf("  Late events: %u\n",
+      (unsigned int)info.ep0_late_completions);
   if (info.ep0_state_valid) {
     console_printf("  EP0 state  : %s (%u)\n",
         xhci_ep_state_name(info.ep0_state), (unsigned int)info.ep0_state);
@@ -1209,7 +1213,8 @@ static void cmd_usb_recover(const char *args) {
   usb_recovery_info_t recovery = {0};
   if (!usb_enumeration_recovery_inspect_generation(generation, &recovery) ||
       (recovery.result != USB_RECOVERY_READY &&
-       recovery.result != USB_RECOVERY_READY_EP0_ERROR)) {
+       recovery.result != USB_RECOVERY_READY_EP0_ERROR &&
+       recovery.result != USB_RECOVERY_READY_EP0_LATE_SUCCESS)) {
     console_puts("USB recovery: NOT READY\n");
     return;
   }
@@ -2428,6 +2433,12 @@ static void cmd_usb(const char *args) {
           xhci_ep0_late_selftest() ? "PASS" : "FAILED");
       return;
     }
+    if (console_arg_word(&other_args, "ep0recovery") &&
+        console_arg_end(other_args)) {
+      console_printf("EP0 recovery classification: %s\n",
+          xhci_ep0_recovery_selftest() ? "PASS" : "FAILED");
+      return;
+    }
     if (console_arg_word(&other_args, "noops") &&
         console_arg_end(other_args)) {
       cmd_usb_test_noops();
@@ -2450,8 +2461,8 @@ static void cmd_usb(const char *args) {
       return;
     }
     console_puts(
-        "Usage: usb test [ep0match | ep0late | noops | midiout | midiwrap | "
-        "midiin | midiasync]\n");
+        "Usage: usb test [ep0match | ep0late | ep0recovery | noops | "
+	"midiout | midiwrap | midiin | midiasync]\n");
     return;
   }
   if (console_arg_word(&args, "state") && console_arg_end(args)) {

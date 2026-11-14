@@ -112,6 +112,7 @@ bool usb_get_device_by_generation(uint32_t generation, usb_device_t *device);
 typedef enum {
   USB_RECOVERY_READY,
   USB_RECOVERY_READY_EP0_ERROR,
+  USB_RECOVERY_READY_EP0_LATE_SUCCESS,
   USB_RECOVERY_NO_FAILED_DEVICE,
   USB_RECOVERY_NO_CONFIRMED_SLOT,
   USB_RECOVERY_ADDRESS_UNCONFIRMED,
@@ -133,6 +134,7 @@ typedef struct {
   uint8_t ep0_completion_code;
   bool ep0_state_valid;
   uint8_t ep0_state;
+  uint32_t ep0_late_completions;
 } usb_recovery_info_t;
 
 // Recovery inspection for one explicitly selected

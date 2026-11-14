@@ -85,9 +85,9 @@
 #define XHCI_EP_TYPE_OUT   2U
 #define XHCI_EP_TYPE_IN    6U
 #define XHCI_EP_TYPE_INTERRUPT_IN 7U
+#define XHCI_EP_STATE_RUNNING 1U
 #define XHCI_EP_STATE_HALTED 2U
 #define XHCI_EP_STATE_ERROR  4U
-#define XHCI_COMPLETION_SHORT_PACKET 13U
 
 typedef struct {
   // Operations which must not be retried after
@@ -804,7 +804,6 @@ xhci_port_reset_result_t xhci_port_reset(
 #define XHCI_TRB_PORT_STATUS_EVENT 34U
 
 #define XHCI_TRANSFER_TIMEOUT_US 1000000ULL
-#define XHCI_COMPLETION_SUCCESS 1U
 #define XHCI_COMMAND_TIMEOUT_US    1000000ULL
 
 // The xHCI structures have fixed hardware layouts.
@@ -4876,39 +4875,117 @@ static bool xhci_downstream_ep0_state(xhci_device_t *device, uint8_t *state) {
   return true;
 }
 
-bool xhci_downstream_ep0_fault_reclaimable(uint8_t slot_id) {
+static xhci_ep0_recovery_t xhci_ep0_recovery_classify(
+    const xhci_ep0_completion_t *owner, bool failed,
+    bool active, uint8_t state) {
+
+  if (!owner || !failed || active || !owner->submitted ||
+      !owner->completion_seen || owner->completion_code == 0U ||
+      owner->uncertain || owner->waiter)
+    return XHCI_EP0_RECOVERY_BLOCKED;
+
+  if (owner->completion_code == XHCI_COMPLETION_SUCCESS) {
+    // Only an explicitly reconciled late success
+    // can recover a timed-out operation this way.
+    //
+    // Its Status Stage has completed, and no
+    // further EP0 TD may have been submitted.
+    if (owner->late_completions != 0U && state == XHCI_EP_STATE_RUNNING)
+      return XHCI_EP0_RECOVERY_LATE_SUCCESS;
+
+    return XHCI_EP0_RECOVERY_BLOCKED;
+  }
+
+  // For an error completion, preserve the existing
+  // requirement that EP0 has ceased execution.
+  if (state == XHCI_EP_STATE_HALTED || state == XHCI_EP_STATE_ERROR)
+    return XHCI_EP0_RECOVERY_HALTED_ERROR;
+
+  return XHCI_EP0_RECOVERY_BLOCKED;
+}
+
+bool xhci_ep0_recovery_selftest(void) {
+  xhci_ep0_completion_t owner = {
+    .submitted = true,
+    .completion_seen = true,
+    .completion_code = XHCI_COMPLETION_SUCCESS,
+    .late_completions = 1U
+  };
+
+  if (xhci_ep0_recovery_classify(
+          &owner, true, false, XHCI_EP_STATE_RUNNING) !=
+      XHCI_EP0_RECOVERY_LATE_SUCCESS)
+    return false;
+
+  // An ordinary success must not masquerade
+  // as a reconciled late completion.
+  owner.late_completions = 0U;
+
+  if (xhci_ep0_recovery_classify(
+          &owner, true, false, XHCI_EP_STATE_RUNNING) !=
+      XHCI_EP0_RECOVERY_BLOCKED)
+    return false;
+
+  // An explicit error completion requires a
+  // terminal endpoint hardware state.
+  owner.completion_code = 6U;
+
+  if (xhci_ep0_recovery_classify(&owner, true, false, XHCI_EP_STATE_HALTED) !=
+      XHCI_EP0_RECOVERY_HALTED_ERROR)
+    return false;
+
+  if (xhci_ep0_recovery_classify(&owner, true, false, XHCI_EP_STATE_ERROR) !=
+      XHCI_EP0_RECOVERY_HALTED_ERROR)
+    return false;
+
+  if (xhci_ep0_recovery_classify(
+          &owner, true, false, XHCI_EP_STATE_RUNNING) !=
+      XHCI_EP0_RECOVERY_BLOCKED)
+    return false;
+
+  // Uncertain and incomplete outcomes must
+  // never acquire teardown permission.
+  owner.uncertain = true;
+
+  if (xhci_ep0_recovery_classify(&owner, true, false, XHCI_EP_STATE_HALTED) !=
+      XHCI_EP0_RECOVERY_BLOCKED)
+    return false;
+
+  owner.uncertain = false;
+  owner.completion_seen = false;
+
+  if (xhci_ep0_recovery_classify(&owner, true, false, XHCI_EP_STATE_HALTED) !=
+      XHCI_EP0_RECOVERY_BLOCKED)
+    return false;
+
+  return true;
+}
+
+xhci_ep0_recovery_t xhci_downstream_ep0_recovery(uint8_t slot_id) {
   xhci_device_t *device = xhci_downstream_by_slot(slot_id);
+  if (!device || device->slot_id == 0U || !device->addressed ||
+      !controller_running || !controller_verified || command_outstanding ||
+      command_ring_failed || dispatch_fault != XHCI_DISPATCH_NONE ||
+      device->lifecycle.slot_disabled)
+    return XHCI_EP0_RECOVERY_BLOCKED;
 
-  if (!device)
-    return false;
-
-  if (device->slot_id == 0U || !device->addressed || !controller_running ||
-      !controller_verified || command_outstanding || command_ring_failed ||
-      dispatch_fault != XHCI_DISPATCH_NONE || device->lifecycle.slot_disabled ||
-      device->ep0_active || !device->ep0_failed || !device->ep0_completion.submitted ||
-      !device->ep0_completion.completion_seen || device->ep0_completion.completion_code == 0U ||
-      device->ep0_completion.completion_code == XHCI_COMPLETION_SUCCESS ||
-      device->ep0_completion.uncertain || device->ep0_completion.waiter)
-    return false;
-
-  // No completion owner may remain on EP0.
+  // A completed transfer must have no outstanding
+  // EP0 completion owner.
   for (unsigned int i = 0U; i < XHCI_EVENT_WAITERS; i++) {
-    xhci_event_waiter_t *waiter = &event_waiters[i];
+    const xhci_event_waiter_t *waiter = &event_waiters[i];
 
     if (waiter->active && waiter->slot_id == device->slot_id &&
         waiter->endpoint_id == 1U)
-      return false;
+      return XHCI_EP0_RECOVERY_BLOCKED;
   }
 
   uint8_t state = 0U;
 
   if (!xhci_downstream_ep0_state(device, &state))
-    return false;
+    return XHCI_EP0_RECOVERY_BLOCKED;
 
-  // Halted and Error endpoints are not executing
-  // transfers. Their slot may be discarded without
-  // restarting the failed endpoint.
-  return state == XHCI_EP_STATE_HALTED || state == XHCI_EP_STATE_ERROR;
+  return xhci_ep0_recovery_classify(&device->ep0_completion,
+      device->ep0_failed, device->ep0_active, state);
 }
 
 static bool xhci_downstream_endpoint_states(
@@ -5330,10 +5407,13 @@ xhci_disable_result_t xhci_downstream_disable(uint8_t slot_id,
       device->bulk_out_active)
     return XHCI_DISABLE_NOT_READY;
 
-  // A failed EP0 must have a confirmed terminal
-  // outcome before its slot can be disabled.
-  if (device->ep0_failed &&
-      !xhci_downstream_ep0_fault_reclaimable(device->slot_id))
+  // An EP0 fault must have a definitive terminal
+  // outcome before Disable Slot is permitted.
+  //
+  // Enumeration recovery and hardware teardown
+  // use the same authoritative decision.
+  if (device->ep0_failed && xhci_downstream_ep0_recovery(device->slot_id) ==
+          XHCI_EP0_RECOVERY_BLOCKED)
     return XHCI_DISABLE_NOT_READY;
 
   // Outstanding completions must retain their owners.

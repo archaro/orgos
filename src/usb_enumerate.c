@@ -797,6 +797,7 @@ static bool usb_enumeration_recovery_inspect_record(
   info->ep0_submitted = transfers.ep0_submitted;
   info->ep0_completion_seen = transfers.ep0_completion_seen;
   info->ep0_completion_code = transfers.ep0_completion_code;
+  info->ep0_late_completions = transfers.ep0_late_completions;
   info->ep0_state_valid = transfers.ep0_state_valid;
   info->ep0_state = transfers.ep0_state;
 
@@ -817,30 +818,38 @@ static bool usb_enumeration_recovery_inspect_record(
     return true;
   }
 
-  // EP0 error recovery limitations:
+  // An unresolved completion remains blocked.
+  // This includes a timeout whose waiter is
+  // still retained by the xHCI driver.
   //
-  // TODO: Uncertain completions (timeouts and event
-  // dispatch failures) have no proven cancellation
-  // or reconciliation path. They remain blocked.
-  //
-  // TODO: Controlled hardware failure testing has
-  // not yet verified teardown following a genuine
-  // EP0 error completion. The confirmed-error path
-  // is implemented but remains unproven on hardware.
+  // Controlled hardware fault testing remains
+  // outstanding; do not relax these conditions.
   if (record->enumeration.ep0_operation_failed || transfers.ep0_failed) {
-    if (record->enumeration.ep0_operation_failed &&
-        record->enumeration.ep0_result == XHCI_CONTROL_TRANSFER_FAILED &&
-        transfers.ep0_failed &&
-       	xhci_downstream_ep0_fault_reclaimable(record->device.slot_id)) {
+    xhci_ep0_recovery_t terminal =
+        xhci_downstream_ep0_recovery(record->device.slot_id);
+
+    if (record->enumeration.ep0_operation_failed && transfers.ep0_failed &&
+        terminal == XHCI_EP0_RECOVERY_LATE_SUCCESS) {
+
+      info->result = USB_RECOVERY_READY_EP0_LATE_SUCCESS;
+
+    } else if (record->enumeration.ep0_operation_failed &&
+        transfers.ep0_failed && terminal == XHCI_EP0_RECOVERY_HALTED_ERROR) {
+
       info->result = USB_RECOVERY_READY_EP0_ERROR;
-    } else if (transfers.ep0_submitted && transfers.ep0_completion_seen &&
-        transfers.ep0_completion_code != 1U) {
-      info->result = USB_RECOVERY_EP0_ERROR_COMPLETION;
+
     } else if (transfers.ep0_submitted && !transfers.ep0_completion_seen) {
       info->result = USB_RECOVERY_EP0_OUTCOME_UNKNOWN;
+
+    } else if (transfers.ep0_submitted && transfers.ep0_completion_seen &&
+        transfers.ep0_completion_code != XHCI_COMPLETION_SUCCESS) {
+
+      info->result = USB_RECOVERY_EP0_ERROR_COMPLETION;
+
     } else {
       info->result = USB_RECOVERY_EP0_FAULT;
     }
+
     return true;
   }
 
@@ -877,7 +886,8 @@ static bool usb_enumeration_recovery_begin_record(
     return false;
 
   if (recovery.result != USB_RECOVERY_READY &&
-      recovery.result != USB_RECOVERY_READY_EP0_ERROR)
+      recovery.result != USB_RECOVERY_READY_EP0_ERROR &&
+      recovery.result != USB_RECOVERY_READY_EP0_LATE_SUCCESS)
     return false;
 
   // An actionable recovery requires a confirmed

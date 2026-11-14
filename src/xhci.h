@@ -15,6 +15,12 @@
 #define XHCI_BULK_IN_MAX_DATA 64U
 #define XHCI_BULK_IN_QUEUE_CAPACITY 16U
 
+// xHCI Transfer and Command Completion Codes.
+// These values are defined by the xHCI specification
+// and may be returned by the public driver API.
+#define XHCI_COMPLETION_SUCCESS 1U
+#define XHCI_COMPLETION_SHORT_PACKET 13U
+
 typedef struct {
   uint8_t capability_length;
   uint16_t version;
@@ -171,6 +177,7 @@ bool xhci_resource_get_info(xhci_resource_info_t *info);
 
 bool xhci_ep0_match_selftest(void);
 bool xhci_ep0_late_selftest(void);
+bool xhci_ep0_recovery_selftest(void);
 
 typedef enum {
   XHCI_SERVICE_IDLE,
@@ -490,7 +497,18 @@ typedef struct {
 
 xhci_ep0_update_result_t xhci_downstream_ep0_update(uint8_t slot_id,
     uint16_t max_packet_size, xhci_ep0_update_info_t *result);
-bool xhci_downstream_ep0_fault_reclaimable(uint8_t slot_id);
+
+typedef enum {
+  XHCI_EP0_RECOVERY_BLOCKED,
+  XHCI_EP0_RECOVERY_LATE_SUCCESS,
+  XHCI_EP0_RECOVERY_HALTED_ERROR
+} xhci_ep0_recovery_t;
+
+// Classify a failed EP0 operation using its
+// retained completion owner and hardware state.
+//
+// This does not quiesce or disable the slot.
+xhci_ep0_recovery_t xhci_downstream_ep0_recovery(uint8_t slot_id);
 
 typedef enum {
   XHCI_HUB_OK,
