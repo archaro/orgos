@@ -1,10 +1,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "midi_ports_usb.h"
 #include "usb.h"
 #include "usb_enumerate.h"
 #include "usb_midi.h"
+#include "midi_ports_usb.h"
+#include "midi_port_io.h"
 
 _Static_assert(MIDI_PORT_MAX_CABLES == USB_MIDI_MAX_CABLES,
     "Logical and USB MIDI cable limits differ");
@@ -53,7 +54,13 @@ void midi_ports_usb_service(void) {
     }
   }
 
-  midi_ports_reconcile(devices, count);
+  // The application must observe the same topology
+  // snapshot used to resolve logical-port bindings.
+  //
+  // In particular, retire old-generation input
+  // before USB lifecycle teardown can recycle it.
+  if (midi_ports_reconcile(devices, count))
+    midi_port_io_service();
 }
 
 bool midi_ports_usb_define(unsigned int id, midi_port_direction_t direction,

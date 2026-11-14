@@ -86,6 +86,11 @@ check: | $(OBJ_DIR)
 		$(SRC_DIR)/midi_usb_bridge.c $(SRC_DIR)/midi_stream.c \
 		-o $(OBJ_DIR)/midi_port_io_test
 	$(OBJ_DIR)/midi_port_io_test
+	$(HOSTCC) $(HOSTCFLAGS) -I$(SRC_DIR) \
+		tests/midi_stream_bridge_test.c $(SRC_DIR)/midi_stream.c \
+		$(SRC_DIR)/midi_usb_bridge.c \
+		-o $(OBJ_DIR)/midi_stream_bridge_test
+	$(OBJ_DIR)/midi_stream_bridge_test
 
 -include $(DEPS)
 

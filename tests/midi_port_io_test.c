@@ -468,6 +468,48 @@ int main(void) {
   assert(midi_port_sysex_cancel(&session));
   assert(!session.active);
 
+    // Exercise the bounded connection-change queue.
+  // Port 3 is an output, so these transitions do
+  // not involve retiring input events.
+  midi_port_change_t ignored = {0};
+
+  while (midi_port_next_change(3U, &ignored)) {
+    // Discard previous test notifications.
+  }
+
+  assert(midi_port_lifecycle_get_info(3U, &lifecycle));
+  assert(lifecycle.pending_changes == 0U);
+
+  uint64_t previous_drops = lifecycle.changes_dropped;
+
+  // Generate twelve transitions without consuming
+  // notifications. Only the newest eight fit.
+  for (unsigned int i = 0U; i < 12U; i++) {
+    if ((i & 1U) == 0U)
+      assert(midi_ports_reconcile(NULL, 0U));
+    else
+      assert(midi_ports_reconcile(&device, 1U));
+
+    midi_port_io_service();
+  }
+
+  assert(midi_port_lifecycle_get_info(3U, &lifecycle));
+  assert(lifecycle.pending_changes == 8U);
+  assert(lifecycle.changes_dropped == previous_drops + 4U);
+
+  // The oldest four transitions were displaced.
+  // The first remaining notification is therefore
+  // the fifth transition: Bound -> Unbound.
+  assert(midi_port_next_change(3U, &ignored));
+  assert(ignored.previous == MIDI_PORT_BOUND);
+  assert(ignored.current == MIDI_PORT_UNBOUND);
+
+  unsigned int remaining = 0U;
+  while (midi_port_next_change(3U, &ignored))
+    remaining++;
+
+  assert(remaining == 7U);
+
   puts("MIDI logical I/O: PASS");
   return 0;
 }
