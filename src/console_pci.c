@@ -93,7 +93,55 @@ static void cmd_pci_dma(void) {
   console_puts("  Note: Inbound DMA configuration is read-only here.\n");
 }
 
+static void cmd_pci_interrupts(void) {
+  pcie_xhci_interrupt_info_t info = {0};
+  if (!pcie_xhci_get_interrupt_info(&info)) {
+    console_puts("PCIe interrupt inspection failed.\n");
+    return;
+  }
+  console_puts("VL805 PCI interrupt capabilities:\n");
+  console_printf("  Interrupt line : 0x%02x\n",
+      (unsigned int)info.interrupt_line);
+  console_printf("  Interrupt pin  : %u\n", (unsigned int)info.interrupt_pin);
+  console_printf("  Capability list: %s\n",
+      info.capabilities_present ? "Present" : "Absent");
+  console_printf("  Capabilities   : %u\n", info.capabilities_scanned);
+  console_puts("\nMSI:\n");
+  console_printf("  Supported      : %s\n", info.msi_present ? "Yes" : "No");
+  if (info.msi_present) {
+    console_printf("  Offset         : 0x%02x\n",
+        (unsigned int)info.msi_offset);
+    console_printf("  Control        : 0x%04x\n",
+        (unsigned int)info.msi_control);
+    console_printf("  Enabled        : %s\n",
+        info.msi_enabled ? "Yes" : "No");
+    console_printf("  64-bit address : %s\n", info.msi_64bit ? "Yes" : "No");
+  }
+  console_puts("\nMSI-X:\n");
+  console_printf("  Supported      : %s\n",
+      info.msix_present ? "Yes" : "No");
+  if (info.msix_present) {
+    console_printf("  Offset         : 0x%02x\n",
+        (unsigned int)info.msix_offset);
+    console_printf("  Control        : 0x%04x\n",
+        (unsigned int)info.msix_control);
+    console_printf("  Enabled        : %s\n",
+        info.msix_enabled ? "Yes" : "No");
+    console_printf("  Function masked: %s\n",
+        info.msix_masked ? "Yes" : "No");
+  }
+  console_puts("\nNo interrupt configuration was changed.\n");
+}
+
 void cmd_pci(const char *args) {
+  if (console_arg_word(&args, "interrupts")) {
+    if (console_arg_end(args)) {
+      cmd_pci_interrupts();
+      return;
+    }
+    console_puts("Usage: pci interrupts\n");
+    return;
+  }
   if (console_arg_word(&args, "dma")) {
     if (console_arg_word(&args, "test") && console_arg_end(args)) {
       cmd_pci_dma_test();
@@ -103,7 +151,7 @@ void cmd_pci(const char *args) {
       cmd_pci_dma();
       return;
     }
-    console_puts("Usage: pci [dma [test]]\n");
+    console_puts("Usage: pci [dma [test] | interrupts]\n");
     return;
   }
   if (!console_arg_end(args)) {

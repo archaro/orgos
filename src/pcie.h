@@ -75,6 +75,26 @@ typedef struct {
 } pcie_xhci_diagnostic_t;
 
 bool pcie_xhci_diagnose(pcie_xhci_diagnostic_t *result);
+
+typedef struct {
+  uint8_t interrupt_line;
+  uint8_t interrupt_pin;
+  bool capabilities_present;
+  bool msi_present;
+  bool msi_enabled;
+  bool msi_64bit;
+  bool msix_present;
+  bool msix_enabled;
+  bool msix_masked;
+  uint8_t msi_offset;
+  uint8_t msix_offset;
+  uint16_t msi_control;
+  uint16_t msix_control;
+  unsigned int capabilities_scanned;
+} pcie_xhci_interrupt_info_t;
+
+bool pcie_xhci_get_interrupt_info(pcie_xhci_interrupt_info_t *info);
+
 bool pcie_xhci_get_firmware_version(uint32_t *version);
 bool pcie_xhci_disable_bus_master(void);
 bool pcie_xhci_enable_bus_master(void);

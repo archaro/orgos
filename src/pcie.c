@@ -637,6 +637,97 @@ bool pcie_xhci_diagnose(pcie_xhci_diagnostic_t *result) {
   return true;
 }
 
+bool pcie_xhci_get_interrupt_info(pcie_xhci_interrupt_info_t *result) {
+  if (!result || !xhci_resources_ready)
+    return false;
+
+  *result = (pcie_xhci_interrupt_info_t){0};
+
+  pcie_info_t info;
+  pcie_probe(&info);
+  if (!info.link_up || !info.endpoint_present ||
+      info.endpoint_vendor != 0x1106U || info.endpoint_device != 0x3483U ||
+      info.endpoint_class != 0x0c0330U)
+    return false;
+
+  uint8_t bus = info.secondary_bus;
+  // PCI interrupt line and pin are at offsets
+  // 0x3c and 0x3d respectively.
+  uint32_t interrupt = device_config_read(bus, 0, 0, 0x3cU);
+  result->interrupt_line = (uint8_t)(interrupt & 0xffU);
+  result->interrupt_pin = (uint8_t)((interrupt >> 8) & 0xffU);
+
+  // PCI Status bit 4 indicates a capability list.
+  uint32_t command_status = device_config_read(bus, 0, 0, 0x04U);
+  uint16_t status = (uint16_t)(command_status >> 16);
+  result->capabilities_present = (status & (1U << 4)) != 0U;
+
+  if (!result->capabilities_present)
+    return true;
+
+  // Standard PCI capabilities occupy configuration
+  // offsets 0x40 through 0xfc, on DWORD boundaries.
+  uint32_t pointer = device_config_read(bus, 0, 0, 0x34U);
+  uint8_t offset = (uint8_t)(pointer & 0xffU);
+  // Record previously visited capability offsets.
+  // This prevents circular or malformed lists
+  // from causing an indefinite traversal.
+  uint32_t visited[2] = {0};
+
+  while (offset != 0U) {
+    if (offset < 0x40U || (offset & 3U) != 0U)
+      return false;
+
+    unsigned int index = (offset - 0x40U) / 4U;
+    if (index >= 48U)
+      return false;
+
+    uint32_t bit = 1U << (index % 32U);
+    unsigned int word = index / 32U;
+
+    if (visited[word] & bit)
+      return false;
+
+    visited[word] |= bit;
+
+    uint32_t capability = device_config_read(bus, 0, 0, offset);
+    uint8_t id = (uint8_t)(capability & 0xffU);
+    uint8_t next = (uint8_t)((capability >> 8) & 0xffU);
+    uint16_t control = (uint16_t)(capability >> 16);
+
+    result->capabilities_scanned++;
+
+    switch (id) {
+      case 0x05U:
+        // MSI capability.
+        if (result->msi_present)
+          return false;
+        result->msi_present = true;
+        result->msi_offset = offset;
+        result->msi_control = control;
+        result->msi_enabled = (control & 1U) != 0U;
+        result->msi_64bit = (control & (1U << 7)) != 0U;
+        break;
+      case 0x11U:
+        // MSI-X capability.
+        if (result->msix_present)
+          return false;
+        result->msix_present = true;
+        result->msix_offset = offset;
+        result->msix_control = control;
+        result->msix_enabled = (control & (1U << 15)) != 0U;
+        result->msix_masked = (control & (1U << 14)) != 0U;
+        break;
+      default:
+        break;
+    }
+
+    offset = next;
+  }
+
+  return true;
+}
+
 bool pcie_xhci_get_firmware_version(uint32_t *version) {
   if (!version || !xhci_resources_ready)
     return false;
