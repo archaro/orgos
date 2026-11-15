@@ -55,6 +55,27 @@ typedef struct {
 } pcie_dma_info_t;
 
 bool pcie_dma_probe(pcie_dma_info_t *info);
+
+typedef struct {
+  uint32_t revision;
+  uint32_t target_lo;
+  uint32_t target_hi;
+  uint32_t data_config;
+  uint32_t interrupt_status;
+} pcie_msi_host_info_t;
+
+bool pcie_msi_host_probe(pcie_msi_host_info_t *info);
+
+typedef enum {
+  PCIE_MSI_PREPARE_OK,
+  PCIE_MSI_PREPARE_NOT_READY,
+  PCIE_MSI_PREPARE_UNSUPPORTED_REVISION,
+  PCIE_MSI_PREPARE_ENDPOINT_STATE,
+  PCIE_MSI_PREPARE_VERIFY_FAILED
+} pcie_msi_prepare_result_t;
+
+pcie_msi_prepare_result_t pcie_msi_host_prepare(void);
+
 bool pcie_dma_init(void);
 bool pcie_phys_to_dma(uint64_t physical,
     uint64_t length, uint64_t *dma_address);

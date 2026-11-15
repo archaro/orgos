@@ -57,6 +57,20 @@
 #define PCIE_RC_BAR2_LO        (PCIE_BASE + 0x4034)
 #define PCIE_RC_BAR2_HI        (PCIE_BASE + 0x4038)
 #define PCIE_RC_BAR3_LO        (PCIE_BASE + 0x403c)
+#define PCIE_MSI_BAR_LO        (PCIE_BASE + 0x4044)
+#define PCIE_MSI_BAR_HI        (PCIE_BASE + 0x4048)
+#define PCIE_MSI_DATA_CONFIG   (PCIE_BASE + 0x404c)
+#define PCIE_MSI_STATUS        (PCIE_BASE + 0x4500)
+#define PCIE_MSI_CLEAR         (PCIE_BASE + 0x4508)
+#define PCIE_MSI_MASK_SET      (PCIE_BASE + 0x4510)
+
+// BCM2711 MSI target above the 4 GiB DMA aperture.
+#define PCIE_MSI_TARGET_LO  0xfffffffcU
+#define PCIE_MSI_TARGET_HI  0x0000000fU
+
+// Broadcom 32-vector MSI data configuration.
+#define PCIE_MSI_DATA_VALUE 0xffe06540U
+#define PCIE_MSI_ALL_VECTORS 0xffffffffU
 
 // Root-complex vendor-specific BAR2 endian control.
 #define PCIE_RC_ENDIAN_CTRL    (PCIE_BASE + 0x0188)
@@ -445,6 +459,79 @@ bool pcie_dma_probe(pcie_dma_info_t *info) {
   info->bar3_lo = mmio_read(PCIE_RC_BAR3_LO);
   info->endian_ctrl = mmio_read(PCIE_RC_ENDIAN_CTRL);
   return true;
+}
+
+bool pcie_msi_host_probe(pcie_msi_host_info_t *info) {
+  if (!info || !pcie_link_initialised)
+    return false;
+
+  *info = (pcie_msi_host_info_t){0};
+
+  if (!(mmio_read(PCIE_STATUS) & PCIE_STATUS_RC))
+    return false;
+
+  info->revision = mmio_read(PCIE_REVISION);
+  info->target_lo = mmio_read(PCIE_MSI_BAR_LO);
+  info->target_hi = mmio_read(PCIE_MSI_BAR_HI);
+  info->data_config = mmio_read(PCIE_MSI_DATA_CONFIG);
+  info->interrupt_status = mmio_read(PCIE_MSI_STATUS);
+
+  return true;
+}
+
+pcie_msi_prepare_result_t pcie_msi_host_prepare(void) {
+  if (!pcie_link_initialised || !xhci_resources_ready || !dma_window_ready)
+    return PCIE_MSI_PREPARE_NOT_READY;
+
+  // This implementation is explicitly for the
+  // BCM2711 PCIe controller revision 0x0304.
+  if (mmio_read(PCIE_REVISION) != 0x00000304U)
+    return PCIE_MSI_PREPARE_UNSUPPORTED_REVISION;
+
+  pcie_xhci_interrupt_info_t endpoint = {0};
+
+  if (!pcie_xhci_get_interrupt_info(&endpoint) || !endpoint.msi_present ||
+      endpoint.msi_enabled || endpoint.msix_enabled)
+    return PCIE_MSI_PREPARE_ENDPOINT_STATE;
+
+  // First mask every vector, then discard any
+  // pending MSI status from earlier activity.
+  mmio_write(PCIE_MSI_MASK_SET, PCIE_MSI_ALL_VECTORS);
+  mmio_write(PCIE_MSI_CLEAR, PCIE_MSI_ALL_VECTORS);
+
+  __asm__ volatile("dsb sy" ::: "memory");
+
+  // Program the receiver while the endpoint is
+  // unable to generate MSI messages.
+  //
+  // Write the enabled low DWORD last.
+  mmio_write(PCIE_MSI_BAR_HI, PCIE_MSI_TARGET_HI);
+  mmio_write(PCIE_MSI_DATA_CONFIG, PCIE_MSI_DATA_VALUE);
+
+  __asm__ volatile("dsb sy" ::: "memory");
+
+  mmio_write(PCIE_MSI_BAR_LO, PCIE_MSI_TARGET_LO | 1U);
+
+  __asm__ volatile("dsb sy" ::: "memory");
+
+  // Verify registers that can be read back.
+  // MASK_SET is a write-one register; do not
+  // mistake a read from it for mask verification.
+  if (mmio_read(PCIE_MSI_BAR_LO) != (PCIE_MSI_TARGET_LO | 1U) ||
+      mmio_read(PCIE_MSI_BAR_HI) != PCIE_MSI_TARGET_HI ||
+      mmio_read(PCIE_MSI_DATA_CONFIG) != PCIE_MSI_DATA_VALUE ||
+      mmio_read(PCIE_MSI_STATUS) != 0U) {
+
+    // Fail closed: disable the receiver and
+    // mask all vectors again.
+    mmio_write(PCIE_MSI_MASK_SET, PCIE_MSI_ALL_VECTORS);
+    mmio_write(PCIE_MSI_BAR_LO, PCIE_MSI_TARGET_LO);
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    return PCIE_MSI_PREPARE_VERIFY_FAILED;
+  }
+
+  return PCIE_MSI_PREPARE_OK;
 }
 
 // Important: This function must only

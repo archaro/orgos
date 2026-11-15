@@ -133,7 +133,60 @@ static void cmd_pci_interrupts(void) {
   console_puts("\nNo interrupt configuration was changed.\n");
 }
 
+static void cmd_pci_msi_host(void) {
+  pcie_msi_host_info_t info = {0};
+  if (!pcie_msi_host_probe(&info)) {
+    console_puts("PCIe MSI host registers unavailable.\n");
+    return;
+  }
+  console_puts("BCM2711 PCIe MSI receiver:\n");
+  console_printf("  Revision       : 0x%08x\n", info.revision);
+  console_printf("  Target low     : 0x%08x\n", info.target_lo);
+  console_printf("  Target high    : 0x%08x\n", info.target_hi);
+  console_printf("  Data config    : 0x%08x\n", info.data_config);
+  console_printf("  Pending status : 0x%08x\n", info.interrupt_status);
+  console_printf("  Receiver enable: %s\n",
+      (info.target_lo & 1U) ? "Yes" : "No");
+}
+
+static void cmd_pci_msi_prepare(void) {
+  pcie_msi_prepare_result_t result = pcie_msi_host_prepare();
+  switch (result) {
+    case PCIE_MSI_PREPARE_OK:
+      console_puts("PCIe MSI receiver prepared.\n");
+      break;
+    case PCIE_MSI_PREPARE_NOT_READY:
+      console_puts("PCIe or DMA subsystem not ready.\n");
+      return;
+    case PCIE_MSI_PREPARE_UNSUPPORTED_REVISION:
+      console_puts("Unsupported PCIe controller revision.\n");
+      return;
+    case PCIE_MSI_PREPARE_ENDPOINT_STATE:
+      console_puts("VL805 MSI capability not in a safe state.\n");
+      return;
+    case PCIE_MSI_PREPARE_VERIFY_FAILED:
+      console_puts("MSI receiver verification failed.\n");
+      return;
+  }
+  console_puts("All MSI vectors requested masked.\n");
+  console_puts("VL805 MSI remains disabled.\n\n");
+  cmd_pci_msi_host();
+}
+
 void cmd_pci(const char *args) {
+  if (console_arg_word(&args, "msi")) {
+    if (console_arg_end(args)) {
+      cmd_pci_msi_host();
+      return;
+    }
+    if (console_arg_word(&args, "prepare") &&
+        console_arg_end(args)) {
+      cmd_pci_msi_prepare();
+      return;
+    }
+    console_puts("Usage: pci msi [prepare]\n");
+    return;
+  }
   if (console_arg_word(&args, "interrupts")) {
     if (console_arg_end(args)) {
       cmd_pci_interrupts();
@@ -151,7 +204,7 @@ void cmd_pci(const char *args) {
       cmd_pci_dma();
       return;
     }
-    console_puts("Usage: pci [dma [test] | interrupts]\n");
+    console_puts("Usage: pci [dma [test] | interrupts | msi]\n");
     return;
   }
   if (!console_arg_end(args)) {
