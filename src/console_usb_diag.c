@@ -1,20 +1,10 @@
 #include <stddef.h>
-#include <stdarg.h>
-
-#include "format.h"
+#include <stdint.h>
+#include <stdbool.h>
 #include "console.h"
 #include "console_args.h"
-#include "board.h"
-#include "mailbox.h"
-#include "timer.h"
-#include "uart.h"
-#include "fdt.h"
-#include "physmem.h"
-#include "irq.h"
-#include "mmu.h"
-#include "page.h"
-#include "cache.h"
-#include "dma.h"
+#include "console_commands.h"
+#include "console_usb_internal.h"
 #include "pcie.h"
 #include "xhci.h"
 #include "usb.h"
@@ -24,10 +14,6 @@
 #include "usb_midi_rx.h"
 #include "midi_output.h"
 #include "usb_midi_test.h"
-
-#include "console_commands.h"
-
-#include "console_usb_internal.h"
 
 void cmd_usb_state(void) {
   uint16_t pci_command;

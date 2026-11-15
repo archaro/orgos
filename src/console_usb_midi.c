@@ -1,33 +1,18 @@
 #include <stddef.h>
-#include <stdarg.h>
-
-#include "format.h"
+#include <stdint.h>
+#include <stdbool.h>
 #include "console.h"
 #include "console_args.h"
-#include "board.h"
-#include "mailbox.h"
+#include "console_commands.h"
+#include "console_usb_internal.h"
 #include "timer.h"
-#include "uart.h"
-#include "fdt.h"
-#include "physmem.h"
-#include "irq.h"
-#include "mmu.h"
-#include "page.h"
-#include "cache.h"
-#include "dma.h"
-#include "pcie.h"
 #include "xhci.h"
 #include "usb.h"
-#include "usb_hub.h"
 #include "usb_enumerate.h"
 #include "usb_midi.h"
 #include "usb_midi_rx.h"
 #include "midi_output.h"
 #include "usb_midi_test.h"
-
-#include "console_commands.h"
-
-#include "console_usb_internal.h"
 
 static void usb_test_delay_ms(uint32_t milliseconds) {
   uint64_t started = timer_now_us();
