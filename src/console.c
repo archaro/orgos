@@ -2475,8 +2475,14 @@ static void cmd_usb(const char *args) {
       cmd_usb_test_midiasync(other_args);
       return;
     }
+    if (console_arg_word(&other_args, "routefault") &&
+        console_arg_end(other_args)) {
+      console_printf("xHCI completion routing: %s\n",
+          xhci_route_fault_selftest() ?  "PASS" : "FAILED");
+      return;
+    }
     console_puts(
-        "Usage: usb test [ep0match | ep0late | ep0recovery | stopout | faultpaths | "
+        "Usage: usb test [ep0match | ep0late | ep0recovery | stopout | faultpaths | routefault"
 	"noops | midiout | midiwrap | midiin | midiasync]\n");
     return;
   }

@@ -1934,6 +1934,95 @@ static bool xhci_stop_event_record(xhci_stop_event_state_t *stop,
   return true;
 }
 
+typedef enum {
+  XHCI_ROUTE_MATCHED,
+  XHCI_ROUTE_STOPPED,
+  XHCI_ROUTE_DUPLICATE,
+  XHCI_ROUTE_UNMATCHED,
+  XHCI_ROUTE_INVALID
+} xhci_route_result_t;
+
+static xhci_route_result_t xhci_route_completion(const xhci_event_t *event,
+    xhci_device_t *device, xhci_event_waiter_t *waiters, unsigned int count) {
+
+  if (!event || !waiters || (event->type != XHCI_TRB_COMMAND_EVENT &&
+       event->type != XHCI_TRB_TRANSFER_EVENT))
+    return XHCI_ROUTE_INVALID;
+
+  if (device && (event->type != XHCI_TRB_TRANSFER_EVENT ||
+      device->slot_id != event->slot_id))
+    return XHCI_ROUTE_INVALID;
+
+  uint8_t endpoint_id = 0U;
+  xhci_stop_event_state_t *stop = NULL;
+  const dma_buffer_t *ring = NULL;
+
+  if (event->type == XHCI_TRB_TRANSFER_EVENT) {
+    endpoint_id = (uint8_t)((event->control >> 16) & 0x1fU);
+
+    if (device && endpoint_id == XHCI_BULK_IN_DCI) {
+      stop = &device->stop_in;
+      ring = &device->bulk_in_ring;
+
+    } else if (device && endpoint_id == XHCI_BULK_OUT_DCI) {
+
+      stop = &device->stop_out;
+      ring = &device->bulk_out_ring;
+    }
+  }
+
+  // First try to deliver to an existing transfer
+  // or command owner. Matching is independent of
+  // whether the endpoint is being stopped.
+  for (unsigned int i = 0U; i < count; i++) {
+    xhci_event_waiter_t *waiter = &waiters[i];
+
+    if (!xhci_waiter_matches(waiter, event, endpoint_id))
+      continue;
+
+    if (waiter->completed)
+      return XHCI_ROUTE_DUPLICATE;
+
+    waiter->event = *event;
+    waiter->completed = true;
+
+    // A stopped event may match the pending TD.
+    // Record it without yet releasing its waiter.
+    if (stop)
+      xhci_stop_event_record(stop, event, endpoint_id);
+
+    // A timed-out EP0 request retains the waiter.
+    // A matching late event resolves that owner.
+    if (device && endpoint_id == 1U && device->ep0_completion.uncertain &&
+        device->ep0_completion.waiter == waiter &&
+        !xhci_ep0_late_reconcile(&device->ep0_completion, waiter))
+      return XHCI_ROUTE_INVALID;
+
+    return XHCI_ROUTE_MATCHED;
+  }
+
+  // Stop Endpoint may report its dequeue position
+  // rather than the TRB belonging to the pending
+  // transfer. This is a separate, verified path.
+  if (stop && stop->armed && !stop->received &&
+      xhci_stopped_code(event->completion_code)) {
+
+    if (!ring || ring->pages == 0U ||
+        event->parameter < ring->bus) return XHCI_ROUTE_INVALID;
+
+    uint64_t offset = event->parameter - ring->bus;
+    if (offset >= PAGE_SIZE || (offset % sizeof(xhci_trb_t)) != 0U)
+      return XHCI_ROUTE_INVALID;
+
+    if (!xhci_stop_event_record(stop, event, endpoint_id))
+      return XHCI_ROUTE_INVALID;
+
+    return XHCI_ROUTE_STOPPED;
+  }
+
+  return XHCI_ROUTE_UNMATCHED;
+}
+
 static xhci_dispatch_result_t xhci_dispatch_one(void) {
   // Never consume further events after a fatal
   // dispatch error. Preserve the original fault.
@@ -1976,103 +2065,35 @@ static xhci_dispatch_result_t xhci_dispatch_one(void) {
     return xhci_dispatch_unhandled(&event);
   }
 
-  uint8_t endpoint_id = 0U;
+  // Resolve the hardware slot exactly once.
+  // Command events belong to the controller,
+  // rather than to an individual device.
   xhci_device_t *device = NULL;
-  xhci_stop_event_state_t *in_stop = NULL;
-  xhci_stop_event_state_t *out_stop = NULL;
-  if (event.type == XHCI_TRB_TRANSFER_EVENT) {
-    endpoint_id = (uint8_t)((event.control >> 16) & 0x1fU);
+  if (event.type == XHCI_TRB_TRANSFER_EVENT)
     device = xhci_device_by_slot(event.slot_id);
-    if (device) {
-      in_stop = &device->stop_in;
-      out_stop = &device->stop_out;
-    }
-  }
 
-  for (unsigned int i = 0; i < XHCI_EVENT_WAITERS; i++) {
-    xhci_event_waiter_t *waiter = &event_waiters[i];
+  xhci_route_result_t routed = xhci_route_completion(
+      &event, device, event_waiters, XHCI_EVENT_WAITERS);
 
-    if (!xhci_waiter_matches(waiter, &event, endpoint_id))
-      continue;
+  if (routed == XHCI_ROUTE_MATCHED || routed == XHCI_ROUTE_STOPPED) {
 
-    // A duplicate completion is a protocol error.
-    if (waiter->completed) {
-      event_stats.duplicate_events++;
-      return xhci_dispatch_unhandled(&event);
-    }
-    waiter->event = event;
-    waiter->completed = true;
-    // A stopped event can refer directly to the
-    // outstanding IN or OUT transfer's TRB.
-    //
-    // Retain the original waiter until the
-    // corresponding Stop Endpoint command has
-    // been verified.
-    xhci_stop_event_record(in_stop, &event, endpoint_id);
-    xhci_stop_event_record(out_stop, &event, endpoint_id);
-    // A timed-out EP0 operation retains its
-    // completion owner. Reconcile the first
-    // definitive event without restarting EP0.
-    if (device && endpoint_id == 1U && device->ep0_completion.uncertain &&
-        device->ep0_completion.waiter == waiter &&
-        !xhci_ep0_late_reconcile(&device->ep0_completion, waiter))
-      return xhci_dispatch_unhandled(&event);
     if (event.type == XHCI_TRB_COMMAND_EVENT)
       event_stats.command_events++;
     else
       event_stats.transfer_events++;
+
     return XHCI_DISPATCH_OK;
   }
 
-  // Stop Endpoint may report a dequeue position
-  // rather than the outstanding Bulk IN TD.
-  if (in_stop && in_stop->armed && !in_stop->received &&
-      event.slot_id == in_stop->slot_id &&
-      endpoint_id == in_stop->endpoint_id &&
-      xhci_stopped_code(event.completion_code)) {
+  if (routed == XHCI_ROUTE_DUPLICATE)
+    event_stats.duplicate_events++;
 
-    if (device->bulk_in_ring.pages == 0U)
-      return xhci_dispatch_unhandled(&event);
+  if (routed == XHCI_ROUTE_UNMATCHED)
+    event_stats.unmatched_events++;
 
-    uint64_t base = device->bulk_in_ring.bus;
-    if (event.parameter < base || event.parameter - base >= PAGE_SIZE ||
-        ((event.parameter - base) % sizeof(xhci_trb_t)) != 0U)
-      return xhci_dispatch_unhandled(&event);
-
-    if (!xhci_stop_event_record(in_stop, &event, endpoint_id))
-      return xhci_dispatch_unhandled(&event);
-
-    event_stats.transfer_events++;
-    return XHCI_DISPATCH_OK;
-  }
-
-  // Stop Endpoint can force a Transfer Event for
-  // the endpoint's current dequeue position.
-  // It need not correspond to an outstanding TD.
-  if (out_stop && out_stop->armed && !out_stop->received &&
-      event.slot_id == out_stop->slot_id &&
-      endpoint_id == out_stop->endpoint_id &&
-      xhci_stopped_code(event.completion_code)) {
-
-    if (device->bulk_out_ring.pages == 0U)
-      return xhci_dispatch_unhandled(&event);
-
-    uint64_t base = device->bulk_out_ring.bus;
-    uint64_t offset = event.parameter - base;
-    if (event.parameter < base || offset >= PAGE_SIZE ||
-        (offset % sizeof(xhci_trb_t)) != 0U)
-      return xhci_dispatch_unhandled(&event);
-
-    if (!xhci_stop_event_record(out_stop, &event, endpoint_id))
-      return xhci_dispatch_unhandled(&event);
-
-    event_stats.transfer_events++;
-    return XHCI_DISPATCH_OK;
-  }
-
-  // The hardware event has no registered owner.
-  // Retain its contents and prevent further dispatch.
-  event_stats.unmatched_events++;
+  // Invalid, duplicate and unmatched events all
+  // preserve the existing controller-wide
+  // fail-stop policy.
   return xhci_dispatch_unhandled(&event);
 }
 
@@ -5588,6 +5609,227 @@ bool xhci_cancellation_fault_selftest(void) {
     if (xhci_bulk_out_stop_reconcile(&sample, &stop, true))
       return false;
   }
+
+  return true;
+}
+
+bool xhci_route_fault_selftest(void) {
+  // Synthetic records only. No device-table entry,
+  // live waiter or hardware ring is modified.
+  static xhci_device_t sample;
+
+  sample = (xhci_device_t){0};
+  sample.slot_id = 2U;
+
+  xhci_event_waiter_t waiter = {
+    .active = true,
+    .type = XHCI_TRB_TRANSFER_EVENT,
+    .slot_id = 2U,
+    .endpoint_id = XHCI_BULK_OUT_DCI,
+    .trb_address = 0x1000ULL
+  };
+
+  xhci_event_t event = {
+    .type = XHCI_TRB_TRANSFER_EVENT,
+    .slot_id = 3U,
+    .parameter = 0x1000ULL,
+    .control = (uint32_t)XHCI_BULK_OUT_DCI << 16,
+    .completion_code = XHCI_COMPLETION_SUCCESS
+  };
+
+  // An event for another slot has no claim on
+  // this transfer, even with the same TRB address.
+  if (xhci_route_completion(&event, NULL, &waiter, 1U) !=
+      XHCI_ROUTE_UNMATCHED || waiter.completed)
+    return false;
+
+  // The correct slot but wrong endpoint is
+  // equally insufficient.
+  event.slot_id = 2U;
+  event.control = (uint32_t)XHCI_BULK_IN_DCI << 16;
+
+  if (xhci_route_completion(&event, &sample, &waiter, 1U) !=
+      XHCI_ROUTE_UNMATCHED || waiter.completed)
+    return false;
+
+  event.control = (uint32_t)XHCI_BULK_OUT_DCI << 16;
+
+  if (xhci_route_completion(&event, &sample, &waiter, 1U) !=
+      XHCI_ROUTE_MATCHED || !waiter.completed)
+    return false;
+
+  // Duplicate delivery must be detected rather
+  // than silently consuming the same event twice.
+  if (xhci_route_completion(&event, &sample, &waiter, 1U) !=
+      XHCI_ROUTE_DUPLICATE)
+    return false;
+
+  // Simulate a fresh pending transfer.
+  waiter.completed = false;
+  waiter.event = (xhci_event_t){0};
+
+  sample.stop_out = (xhci_stop_event_state_t){
+    .armed = true,
+    .slot_id = 2U,
+    .endpoint_id = XHCI_BULK_OUT_DCI
+  };
+
+  sample.bulk_out_ring.pages = 1U;
+  sample.bulk_out_ring.bus = 0x1000ULL;
+
+  // A forced stopped event outside the original
+  // transfer ring must be rejected.
+  event.completion_code = XHCI_COMPLETION_STOPPED;
+  event.parameter = 0x2000ULL;
+
+  if (xhci_route_completion(&event, &sample, &waiter, 1U) !=
+      XHCI_ROUTE_INVALID || sample.stop_out.received || waiter.completed)
+    return false;
+
+  // The controller may identify its dequeue
+  // position instead of the outstanding TD.
+  event.parameter = 0x1010ULL;
+
+  if (xhci_route_completion(&event, &sample, &waiter, 1U) !=
+      XHCI_ROUTE_STOPPED || !sample.stop_out.received || waiter.completed)
+    return false;
+
+  // Event delivery alone must not release the
+  // original Bulk OUT completion owner.
+  sample.bulk_out_active = true;
+  sample.bulk_out_async_waiter = &waiter;
+  sample.bulk_out_buffer.owner = DMA_OWNER_DEVICE;
+
+  sample.bulk_out_async = (xhci_bulk_out_async_info_t){
+    .state = XHCI_BULK_OUT_ASYNC_PENDING,
+    .transfer = {
+      .slot_id = 2U,
+      .endpoint_id = XHCI_BULK_OUT_DCI,
+      .transfer_trb = 0x1000ULL,
+      .length = 4U
+    }
+  };
+
+  if (!xhci_bulk_out_owner_pending(&sample))
+    return false;
+
+  // Simulate successful command completion and
+  // a verified Stopped endpoint context.
+  sample.stop_out.armed = false;
+
+  xhci_command_completion_t completion = {
+    .slot_id = 2U
+  };
+
+  if (!xhci_stop_verified(XHCI_COMMAND_OK, &completion, &sample.stop_out,
+          2U, XHCI_BULK_OUT_DCI, XHCI_EP_STATE_STOPPED))
+    return false;
+
+  if (!xhci_bulk_out_stop_reconcile(&sample, &sample.stop_out, true))
+    return false;
+
+  if (waiter.active || sample.bulk_out_active ||
+      sample.bulk_out_async_waiter ||
+      sample.bulk_out_buffer.owner != DMA_OWNER_DEVICE)
+    return false;
+
+  // A later event for the retired TD must not
+  // acquire a new owner. The live dispatcher
+  // would treat this as an unmatched-event fault.
+  event.parameter = 0x1000ULL;
+  event.completion_code = XHCI_COMPLETION_SUCCESS;
+
+  if (xhci_route_completion(&event, &sample, &waiter, 1U) !=
+      XHCI_ROUTE_UNMATCHED)
+    return false;
+
+  // A stopped event can also match the pending
+  // TD directly. Both event forms must work.
+  sample = (xhci_device_t){0};
+  sample.slot_id = 2U;
+
+  waiter = (xhci_event_waiter_t){
+    .active = true,
+    .type = XHCI_TRB_TRANSFER_EVENT,
+    .slot_id = 2U,
+    .endpoint_id = XHCI_BULK_OUT_DCI,
+    .trb_address = 0x1000ULL
+  };
+
+  sample.stop_out = (xhci_stop_event_state_t){
+    .armed = true,
+    .slot_id = 2U,
+    .endpoint_id = XHCI_BULK_OUT_DCI
+  };
+
+  event = (xhci_event_t){
+    .type = XHCI_TRB_TRANSFER_EVENT,
+    .slot_id = 2U,
+    .parameter = 0x1000ULL,
+    .control = (uint32_t)XHCI_BULK_OUT_DCI << 16,
+    .completion_code = XHCI_COMPLETION_STOPPED
+  };
+
+  if (xhci_route_completion(&event, &sample, &waiter, 1U) !=
+      XHCI_ROUTE_MATCHED || !waiter.completed || !sample.stop_out.received)
+    return false;
+
+  // A late EP0 completion must pass through the
+  // same dispatcher and reconcile its original
+  // owner exactly once.
+  sample = (xhci_device_t){0};
+  sample.slot_id = 2U;
+
+  waiter = (xhci_event_waiter_t){
+    .active = true,
+    .type = XHCI_TRB_TRANSFER_EVENT,
+    .slot_id = 2U,
+    .endpoint_id = 1U,
+    .trb_address = 0x3000ULL
+  };
+
+  sample.ep0_completion = (xhci_ep0_completion_t){
+    .submitted = true,
+    .uncertain = true,
+    .waiter = &waiter
+  };
+
+  event = (xhci_event_t){
+    .type = XHCI_TRB_TRANSFER_EVENT,
+    .slot_id = 2U,
+    .parameter = 0x3000ULL,
+    .control = 1U << 16,
+    .completion_code = XHCI_COMPLETION_SUCCESS
+  };
+
+  if (xhci_route_completion(&event, &sample, &waiter, 1U) !=
+      XHCI_ROUTE_MATCHED)
+    return false;
+
+  if (!sample.ep0_completion.completion_seen ||
+      sample.ep0_completion.uncertain ||
+      sample.ep0_completion.waiter ||
+      sample.ep0_completion.late_completions != 1U ||
+      waiter.active)
+    return false;
+
+  // Command completions must continue to use
+  // their own controller-level waiter.
+  waiter = (xhci_event_waiter_t){
+    .active = true,
+    .type = XHCI_TRB_COMMAND_EVENT,
+    .trb_address = 0x4000ULL
+  };
+
+  event = (xhci_event_t){
+    .type = XHCI_TRB_COMMAND_EVENT,
+    .parameter = 0x4000ULL,
+    .completion_code = XHCI_COMPLETION_SUCCESS
+  };
+
+  if (xhci_route_completion(&event, NULL, &waiter, 1U) !=
+      XHCI_ROUTE_MATCHED || !waiter.completed)
+    return false;
 
   return true;
 }
