@@ -46,21 +46,24 @@ static usb_lifecycle_run_info_t lifecycle_runs[USB_LIFECYCLE_RUN_CAPACITY];
 // per pass, even when several runs are armed.
 static unsigned int lifecycle_next_index;
 
-static uint64_t auto_enum_next_check_us;
-static usb_auto_enum_info_t auto_enum = {
-  .enabled = true,
-  .pending = true
+// Automatic enumeration owns both global scheduling status and
+// the per-port requests that trigger another admission check.
+// A connection epoch never wraps into a previous request.
+typedef struct {
+  usb_auto_enum_info_t status;
+  uint64_t next_check_us;
+  uint16_t pending_ports;
+  uint8_t next_port;
+  uint32_t port_epoch[5];
+} usb_auto_enum_scheduler_t;
+
+static usb_auto_enum_scheduler_t auto_enum_scheduler = {
+  .status = {
+    .enabled = true,
+    .pending = true
+  },
+  .next_port = 1U
 };
-
-// Retain connection requests by physical port.
-// A disconnection cancels an unprocessed request.
-// Wake the per-port scheduler after a change.
-static uint16_t auto_enum_port_pending;
-static uint8_t auto_enum_next_port = 1U;
-
-// Incremented for each observed connection change.
-// Zero means that no observation has been recorded.
-static uint32_t auto_enum_port_epoch[5];
 
 // A completed notification may identify several ports.
 // Retain progress until all have been processed.
@@ -292,7 +295,7 @@ bool usb_auto_enum_get_info(usb_auto_enum_info_t *info) {
   if (!info)
     return false;
 
-  *info = auto_enum;
+  *info = auto_enum_scheduler.status;
   return true;
 }
 
@@ -303,27 +306,27 @@ static void usb_auto_enum_port_observe(uint8_t port, bool connected) {
   uint16_t bit = (uint16_t)(1U << port);
 
   // Retire the previous request, if any.
-  auto_enum_port_pending &= (uint16_t)~bit;
+  auto_enum_scheduler.pending_ports &= (uint16_t)~bit;
 
   // Never wrap an epoch and accidentally match
   // an earlier request. Exhaustion fails closed.
-  if (auto_enum_port_epoch[port] == UINT32_MAX)
+  if (auto_enum_scheduler.port_epoch[port] == UINT32_MAX)
     return;
 
-  auto_enum_port_epoch[port]++;
+  auto_enum_scheduler.port_epoch[port]++;
 
   if (connected)
-    auto_enum_port_pending |= bit;
+    auto_enum_scheduler.pending_ports |= bit;
 }
 
 uint32_t usb_auto_enum_port_request_epoch(uint8_t port) {
   if (port == 0U || port > 4U)
     return 0U;
 
-  if (!(auto_enum_port_pending & (1U << port)))
+  if (!(auto_enum_scheduler.pending_ports & (1U << port)))
     return 0U;
 
-  return auto_enum_port_epoch[port];
+  return auto_enum_scheduler.port_epoch[port];
 }
 
 bool usb_auto_enum_ports_seed(uint8_t ports, uint16_t connected) {
@@ -339,7 +342,7 @@ bool usb_auto_enum_ports_seed(uint8_t ports, uint16_t connected) {
   // the physical port number as its bit index.
   for (uint8_t port = 1U; port <= ports; port++) {
     uint16_t bit = (uint16_t)(1U << port);
-    if ((connected & (1U << (port - 1U))) && !(auto_enum_port_pending & bit))
+    if ((connected & (1U << (port - 1U))) && !(auto_enum_scheduler.pending_ports & bit))
       usb_auto_enum_port_observe(port, true);
   }
 
@@ -354,21 +357,21 @@ void usb_auto_enum_attempt_recorded(uint8_t port, uint32_t epoch) {
 
   // Consume only the request observed before
   // this enumeration attempt began.
-  if (epoch != 0U && auto_enum_port_epoch[port] == epoch)
-    auto_enum_port_pending &= (uint16_t)~(1U << port);
+  if (epoch != 0U && auto_enum_scheduler.port_epoch[port] == epoch)
+    auto_enum_scheduler.pending_ports &= (uint16_t)~(1U << port);
 
   // An actual attempt advances the cursor even
   // when there was no pending request to consume.
-  auto_enum_next_port = port == 4U ? 1U : (uint8_t)(port + 1U);
+  auto_enum_scheduler.next_port = port == 4U ? 1U : (uint8_t)(port + 1U);
 }
 
 static void usb_auto_enum_request(void) {
-  auto_enum.pending = true;
-  auto_enum_next_check_us = 0ULL;
+  auto_enum_scheduler.status.pending = true;
+  auto_enum_scheduler.next_check_us = 0ULL;
 }
 
 void usb_auto_enum_set_enabled(bool enabled) {
-  auto_enum.enabled = enabled;
+  auto_enum_scheduler.status.enabled = enabled;
 
   // Enabling requests a fresh admission check.
   // It never overrides existing enumeration
@@ -1161,13 +1164,13 @@ static void usb_lifecycle_service(void) {
 }
 
 static void usb_auto_enum_service(void) {
-  if (!auto_enum.enabled)
+  if (!auto_enum_scheduler.status.enabled)
     return;
 
   // The per-port requests are now authoritative.
-  auto_enum.pending = auto_enum_port_pending != 0U;
-  if (!auto_enum.pending) {
-    auto_enum_next_check_us = 0ULL;
+  auto_enum_scheduler.status.pending = auto_enum_scheduler.pending_ports != 0U;
+  if (!auto_enum_scheduler.status.pending) {
+    auto_enum_scheduler.next_check_us = 0ULL;
     return;
   }
 
@@ -1179,8 +1182,8 @@ static void usb_auto_enum_service(void) {
 
   // Avoid repeatedly inspecting blocked candidates
   // at foreground-loop speed.
-  if (auto_enum_next_check_us != 0ULL &&
-      timer_now_us() < auto_enum_next_check_us)
+  if (auto_enum_scheduler.next_check_us != 0ULL &&
+      timer_now_us() < auto_enum_scheduler.next_check_us)
     return;
 
   usb_auto_enum_select_info_t selection = {0};
@@ -1188,14 +1191,14 @@ static void usb_auto_enum_service(void) {
     // Keep all pending requests. Admission may become
     // possible after another device has been released
     // or a connection-change notification is processed.
-    auto_enum_next_check_us = timer_now_us() + USB_AUTO_ENUM_RECHECK_US;
+    auto_enum_scheduler.next_check_us = timer_now_us() + USB_AUTO_ENUM_RECHECK_US;
     return;
   }
 
   uint8_t port = selection.selected_port;
   uint32_t epoch = usb_auto_enum_port_request_epoch(port);
   if (port == 0U || epoch == 0U) {
-    auto_enum_next_check_us = timer_now_us() + USB_AUTO_ENUM_RECHECK_US;
+    auto_enum_scheduler.next_check_us = timer_now_us() + USB_AUTO_ENUM_RECHECK_US;
     return;
   }
 
@@ -1211,22 +1214,22 @@ static void usb_auto_enum_service(void) {
   // An actual attempt consumes its connection epoch,
   // irrespective of the enumeration result.
   if (usb_auto_enum_port_request_epoch(port) == epoch) {
-    auto_enum_next_check_us = timer_now_us() + USB_AUTO_ENUM_RECHECK_US;
+    auto_enum_scheduler.next_check_us = timer_now_us() + USB_AUTO_ENUM_RECHECK_US;
     return;
   }
 
-  auto_enum.attempts++;
-  auto_enum.last_result = (uint32_t)result;
+  auto_enum_scheduler.status.attempts++;
+  auto_enum_scheduler.status.last_result = (uint32_t)result;
 
   if (result == USB_ENUM_OK)
-    auto_enum.successes++;
+    auto_enum_scheduler.status.successes++;
   else
-    auto_enum.failures++;
+    auto_enum_scheduler.status.failures++;
 
   // Other ports may still have outstanding requests.
   // The next service pass may dispatch another port.
-  auto_enum.pending = auto_enum_port_pending != 0U;
-  auto_enum_next_check_us = 0ULL;
+  auto_enum_scheduler.status.pending = auto_enum_scheduler.pending_ports != 0U;
+  auto_enum_scheduler.next_check_us = 0ULL;
 }
 
 void usb_service(void) {
@@ -1571,8 +1574,8 @@ bool usb_auto_enum_select_inspect(usb_auto_enum_select_info_t *info) {
     return false;
 
   *info = (usb_auto_enum_select_info_t){
-    .pending_ports = auto_enum_port_pending,
-    .next_port = auto_enum_next_port
+    .pending_ports = auto_enum_scheduler.pending_ports,
+    .next_port = auto_enum_scheduler.next_port
   };
 
   usb_hub_init_info_t hub = {0};
