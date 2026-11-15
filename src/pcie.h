@@ -76,6 +76,10 @@ typedef enum {
 
 pcie_msi_prepare_result_t pcie_msi_host_prepare(void);
 
+// Quiesce all MSI vectors and acknowledge any pending
+// receiver status. Safe for use in IRQ context.
+uint32_t pcie_msi_host_irq_quiesce(void);
+
 bool pcie_dma_init(void);
 bool pcie_phys_to_dma(uint64_t physical,
     uint64_t length, uint64_t *dma_address);

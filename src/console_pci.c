@@ -248,6 +248,22 @@ static void cmd_pci_msi_test(void) {
   console_printf("  Result           : %s\n", passed ? "PASS" : "FAILED");
 }
 
+static void cmd_pci_msi_irq(void) {
+  console_puts("PCIe MSI interrupt statistics:\n");
+  console_printf("  Total IRQs     : %u\n", irq_pcie_msi_count());
+  console_printf("  Hardware IRQs  : %u\n", irq_pcie_msi_hardware_count());
+  console_printf("  Last MSI status: 0x%08x\n", irq_pcie_msi_last_status());
+  gic_pcie_msi_info_t gic = {0};
+  if (gic_get_pcie_msi_info(&gic)) {
+    console_printf("  GIC enabled    : %s\n", gic.enabled ? "Yes" : "No");
+    console_printf("  GIC pending    : %s\n", gic.pending ? "Yes" : "No");
+  }
+  pcie_msi_host_info_t host = {0};
+  if (pcie_msi_host_probe(&host)) {
+    console_printf("  Host pending   : 0x%08x\n", host.interrupt_status);
+  }
+}
+
 void cmd_pci(const char *args) {
   if (console_arg_word(&args, "msi")) {
     if (console_arg_end(args)) {
@@ -264,12 +280,17 @@ void cmd_pci(const char *args) {
       cmd_pci_msi_route();
       return;
     }
+    if (console_arg_word(&args, "irq") &&
+        console_arg_end(args)) {
+      cmd_pci_msi_irq();
+      return;
+    }
     if (console_arg_word(&args, "test") &&
         console_arg_end(args)) {
       cmd_pci_msi_test();
       return;
     }
-    console_puts("Usage: pci msi [prepare | route | test]\n");
+    console_puts("Usage: pci msi [prepare | route | irq | test]\n");
     return;
   }
   if (console_arg_word(&args, "interrupts")) {

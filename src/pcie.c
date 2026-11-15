@@ -534,6 +534,26 @@ pcie_msi_prepare_result_t pcie_msi_host_prepare(void) {
   return PCIE_MSI_PREPARE_OK;
 }
 
+uint32_t pcie_msi_host_irq_quiesce(void) {
+  // Prevent further MSI vector delivery before
+  // inspecting the receiver's pending bits.
+  mmio_write(PCIE_MSI_MASK_SET, PCIE_MSI_ALL_VECTORS);
+
+  __asm__ volatile("dsb sy" ::: "memory");
+
+  uint32_t pending = mmio_read(PCIE_MSI_STATUS);
+
+  // Acknowledge only the status bits observed.
+  if (pending != 0U)
+    mmio_write(PCIE_MSI_CLEAR, pending);
+
+  // Ensure the source is cleared before the GIC
+  // interrupt is completed.
+  __asm__ volatile("dsb sy" ::: "memory");
+
+  return pending;
+}
+
 // Important: This function must only
 // ever be called once, during startup.
 bool pcie_dma_init(void) {

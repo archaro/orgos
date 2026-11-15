@@ -1,12 +1,23 @@
 
 #include <stdint.h>
 
+#include "pcie.h"
 #include "gic.h"
 #include "irq.h"
 #include "uart.h"
 
 static volatile uint64_t total_irqs;
 static volatile uint32_t pcie_msi_irqs;
+static volatile uint32_t pcie_msi_hardware_irqs;
+static volatile uint32_t pcie_msi_last_vector_status;
+
+uint32_t irq_pcie_msi_hardware_count(void) {
+  return pcie_msi_hardware_irqs;
+}
+
+uint32_t irq_pcie_msi_last_status(void) {
+  return pcie_msi_last_vector_status;
+}
 
 uint64_t irq_count(void) {
   return total_irqs;
@@ -34,12 +45,23 @@ void irq_dispatch(void) {
     case GIC_IRQ_UART0:
       uart_handle_irq();
       break;
-    case GIC_IRQ_PCIE_MSI:
-      // This is currently a one-shot software
-      // interrupt test, not a PCIe ISR.
+    case GIC_IRQ_PCIE_MSI: {
+      // This handler serves both software-pending
+      // tests and subsequent hardware MSI tests.
+      //
+      // Quiesce the Broadcom receiver before
+      // completing the level-triggered GIC IRQ.
+      uint32_t pending = pcie_msi_host_irq_quiesce();
       pcie_msi_irqs++;
+      if (pending != 0U) {
+        pcie_msi_hardware_irqs++;
+        pcie_msi_last_vector_status = pending;
+      }
+      // Keep the route disabled until explicitly
+      // prepared again by the foreground console.
       gic_pcie_msi_test_finish();
       break;
+    }
     default:
       // We have no handler for this interrupt.
       // Do not silently treat an unexpected interrupt
