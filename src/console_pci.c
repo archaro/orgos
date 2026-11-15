@@ -1,9 +1,11 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
+
 #include "console.h"
 #include "console_args.h"
 #include "console_commands.h"
+#include "gic.h"
 #include "pcie.h"
 
 static void cmd_pci_dma_test(void) {
@@ -173,6 +175,31 @@ static void cmd_pci_msi_prepare(void) {
   cmd_pci_msi_host();
 }
 
+static void cmd_pci_msi_route(void) {
+  uint32_t capacity = gic_interrupt_capacity();
+  console_puts("BCM2711 PCIe MSI GIC route:\n");
+  console_printf("  Interrupt ID : %u\n", GIC_IRQ_PCIE_MSI);
+  console_printf("  GIC capacity : %u\n", capacity);
+  if (GIC_IRQ_PCIE_MSI >= capacity) {
+    console_puts("  Result       : Interrupt ID unavailable.\n");
+    return;
+  }
+  bool prepared = gic_prepare_pcie_msi();
+  gic_pcie_msi_info_t info = {0};
+  if (!gic_get_pcie_msi_info(&info)) {
+    console_puts("  Result       : GIC inspection failed.\n");
+    return;
+  }
+  console_printf("  Enabled      : %s\n", info.enabled ? "Yes" : "No");
+  console_printf("  Pending      : %s\n", info.pending ? "Yes" : "No");
+  console_printf("  Trigger      : %s\n",
+      info.edge_triggered ? "Edge" : "Level");
+  console_printf("  Priority     : 0x%02x\n", (unsigned int)info.priority);
+  console_printf("  CPU targets  : 0x%02x\n", (unsigned int)info.targets);
+  console_printf("  Verification : %s\n", prepared ? "PASS" : "FAILED");
+  console_puts("\nGIC interrupt delivery remains disabled.\n");
+}
+
 void cmd_pci(const char *args) {
   if (console_arg_word(&args, "msi")) {
     if (console_arg_end(args)) {
@@ -184,7 +211,12 @@ void cmd_pci(const char *args) {
       cmd_pci_msi_prepare();
       return;
     }
-    console_puts("Usage: pci msi [prepare]\n");
+    if (console_arg_word(&args, "route") &&
+        console_arg_end(args)) {
+      cmd_pci_msi_route();
+      return;
+    }
+    console_puts("Usage: pci msi [prepare | route]\n");
     return;
   }
   if (console_arg_word(&args, "interrupts")) {
