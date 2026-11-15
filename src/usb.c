@@ -31,20 +31,17 @@ static unsigned int change_count;
 static usb_change_stats_t change_stats;
 static usb_change_event_t last_port_change[16];
 
-// Lifecycle storage for the four downstream
-// ports of the internal USB 2.0 hub.
-//
-// Independent executors may be armed together.
-// Hardware operations are dispatched serially.
+// Lifecycle executors for the four downstream ports of the
+// internal USB 2.0 hub, with their round-robin cursor.
+// Independent executors may be armed together, but only one
+// hardware operation is dispatched per foreground pass.
 #define USB_LIFECYCLE_RUN_CAPACITY 4U
-static usb_lifecycle_run_info_t lifecycle_runs[USB_LIFECYCLE_RUN_CAPACITY];
+typedef struct {
+  usb_lifecycle_run_info_t runs[USB_LIFECYCLE_RUN_CAPACITY];
+  unsigned int next_index;
+} usb_lifecycle_scheduler_t;
 
-// Index from which the next foreground lifecycle
-// scheduling pass begins.
-//
-// Only one lifecycle operation may be dispatched
-// per pass, even when several runs are armed.
-static unsigned int lifecycle_next_index;
+static usb_lifecycle_scheduler_t lifecycle_scheduler;
 
 // Automatic enumeration owns both global scheduling status and
 // the per-port requests that trigger another admission check.
@@ -78,7 +75,7 @@ static usb_lifecycle_run_info_t *usb_lifecycle_by_generation(
 
   usb_lifecycle_run_info_t *found = NULL;
   for (unsigned int i = 0U; i < USB_LIFECYCLE_RUN_CAPACITY; i++) {
-    usb_lifecycle_run_info_t *run = &lifecycle_runs[i];
+    usb_lifecycle_run_info_t *run = &lifecycle_scheduler.runs[i];
     if (run->state == USB_LIFECYCLE_RUN_DISARMED ||
         run->generation != generation)
       continue;
@@ -96,7 +93,7 @@ static usb_lifecycle_run_info_t *usb_lifecycle_by_generation(
 
 static bool usb_lifecycle_any_armed(void) {
   for (unsigned int i = 0U; i < USB_LIFECYCLE_RUN_CAPACITY; i++) {
-    if (lifecycle_runs[i].state == USB_LIFECYCLE_RUN_ARMED)
+    if (lifecycle_scheduler.runs[i].state == USB_LIFECYCLE_RUN_ARMED)
       return true;
   }
 
@@ -105,7 +102,7 @@ static bool usb_lifecycle_any_armed(void) {
 
 static bool usb_lifecycle_any_failed(void) {
   for (unsigned int i = 0U; i < USB_LIFECYCLE_RUN_CAPACITY; i++) {
-    if (lifecycle_runs[i].state == USB_LIFECYCLE_RUN_FAILED)
+    if (lifecycle_scheduler.runs[i].state == USB_LIFECYCLE_RUN_FAILED)
       return true;
   }
 
@@ -123,7 +120,7 @@ static usb_lifecycle_run_info_t *usb_lifecycle_select_for_arm(
   // exclusive ownership of its original slot.
   for (unsigned int i = 0U; i < USB_LIFECYCLE_RUN_CAPACITY; i++) {
 
-    usb_lifecycle_run_info_t *run = &lifecycle_runs[i];
+    usb_lifecycle_run_info_t *run = &lifecycle_scheduler.runs[i];
     if (run->state != USB_LIFECYCLE_RUN_DISARMED &&
         run->generation == generation)
       return NULL;
@@ -137,7 +134,7 @@ static usb_lifecycle_run_info_t *usb_lifecycle_select_for_arm(
 
   for (unsigned int i = 0U; i < USB_LIFECYCLE_RUN_CAPACITY; i++) {
 
-    usb_lifecycle_run_info_t *run = &lifecycle_runs[i];
+    usb_lifecycle_run_info_t *run = &lifecycle_scheduler.runs[i];
     // Preserve completed history where possible.
     if (run->state == USB_LIFECYCLE_RUN_DISARMED)
       return run;
@@ -930,7 +927,7 @@ static void usb_lifecycle_fail(usb_lifecycle_fault_t fault) {
   // Preserve completed and previously failed
   // records without modifying their history.
   for (unsigned int i = 0U; i < USB_LIFECYCLE_RUN_CAPACITY; i++) {
-    usb_lifecycle_fail_run(&lifecycle_runs[i], fault);
+    usb_lifecycle_fail_run(&lifecycle_scheduler.runs[i], fault);
   }
 }
 
@@ -1148,15 +1145,15 @@ static void usb_lifecycle_service(void) {
       scanned < USB_LIFECYCLE_RUN_CAPACITY; scanned++) {
 
     unsigned int index =
-        (lifecycle_next_index + scanned) % USB_LIFECYCLE_RUN_CAPACITY;
-    usb_lifecycle_run_info_t *run = &lifecycle_runs[index];
+        (lifecycle_scheduler.next_index + scanned) % USB_LIFECYCLE_RUN_CAPACITY;
+    usb_lifecycle_run_info_t *run = &lifecycle_scheduler.runs[index];
     if (run->state != USB_LIFECYCLE_RUN_ARMED)
       continue;
 
     // Start the next scheduling pass after the
     // selected executor, even if this operation
     // completes or fails.
-    lifecycle_next_index = (index + 1U) % USB_LIFECYCLE_RUN_CAPACITY;
+    lifecycle_scheduler.next_index = (index + 1U) % USB_LIFECYCLE_RUN_CAPACITY;
 
     usb_lifecycle_service_run(run);
     return;
