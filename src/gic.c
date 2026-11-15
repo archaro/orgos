@@ -12,6 +12,7 @@
 #define GICD_ISENABLER  (GICD_BASE + 0x100)
 #define GICD_ICENABLER  (GICD_BASE + 0x180)
 #define GICD_ISPENDR    (GICD_BASE + 0x200)
+#define GICD_ICPENDR    (GICD_BASE + 0x280)
 #define GICD_IPRIORITYR (GICD_BASE + 0x400)
 #define GICD_ITARGETSR  (GICD_BASE + 0x800)
 #define GICD_ICFGR      (GICD_BASE + 0xc00)
@@ -151,5 +152,38 @@ void gic_end_irq(uint32_t token) {
 // Write back the complete acknowledgement token,
 // not merely the extracted interrupt ID.
   mmio_write(GICC_EOIR, token);
+}
+
+bool gic_pcie_msi_test_trigger(void) {
+  const uint32_t id = GIC_IRQ_PCIE_MSI;
+
+  gic_pcie_msi_info_t info = {0};
+  if (!gic_get_pcie_msi_info(&info) || info.enabled || info.pending ||
+      info.edge_triggered || info.priority != 0xa0U || info.targets != 0x01U)
+    return false;
+
+  uint32_t offset = 4U * (id / 32U);
+  uint32_t bit = 1U << (id % 32U);
+
+  // Software-pend the SPI before enabling it.
+  // No PCIe device needs to generate an interrupt.
+  mmio_write(GICD_ISPENDR + offset, bit);
+  __asm__ volatile("dsb sy" ::: "memory");
+
+  gic_enable_irq(id);
+
+  return true;
+}
+
+void gic_pcie_msi_test_finish(void) {
+  const uint32_t id = GIC_IRQ_PCIE_MSI;
+  uint32_t offset = 4U * (id / 32U);
+  uint32_t bit = 1U << (id % 32U);
+
+  // Remove the test interrupt from circulation.
+  mmio_write(GICD_ICENABLER + offset, bit);
+  mmio_write(GICD_ICPENDR + offset, bit);
+
+  __asm__ volatile("dsb sy" ::: "memory");
 }
 

@@ -6,9 +6,14 @@
 #include "uart.h"
 
 static volatile uint64_t total_irqs;
+static volatile uint32_t pcie_msi_irqs;
 
 uint64_t irq_count(void) {
   return total_irqs;
+}
+
+uint32_t irq_pcie_msi_count(void) {
+  return pcie_msi_irqs;
 }
 
 void irq_dispatch(void) {
@@ -29,7 +34,12 @@ void irq_dispatch(void) {
     case GIC_IRQ_UART0:
       uart_handle_irq();
       break;
-
+    case GIC_IRQ_PCIE_MSI:
+      // This is currently a one-shot software
+      // interrupt test, not a PCIe ISR.
+      pcie_msi_irqs++;
+      gic_pcie_msi_test_finish();
+      break;
     default:
       // We have no handler for this interrupt.
       // Do not silently treat an unexpected interrupt

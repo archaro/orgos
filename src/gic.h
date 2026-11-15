@@ -23,3 +23,6 @@ bool gic_get_pcie_msi_info(gic_pcie_msi_info_t *info);
 
 uint32_t gic_acknowledge(void);
 void gic_end_irq(uint32_t token);
+
+bool gic_pcie_msi_test_trigger(void);
+void gic_pcie_msi_test_finish(void);

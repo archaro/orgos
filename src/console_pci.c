@@ -5,7 +5,9 @@
 #include "console.h"
 #include "console_args.h"
 #include "console_commands.h"
+#include "timer.h"
 #include "gic.h"
+#include "irq.h"
 #include "pcie.h"
 
 static void cmd_pci_dma_test(void) {
@@ -200,6 +202,52 @@ static void cmd_pci_msi_route(void) {
   console_puts("\nGIC interrupt delivery remains disabled.\n");
 }
 
+static void cmd_pci_msi_test(void) {
+  pcie_xhci_interrupt_info_t endpoint = {0};
+  if (!pcie_xhci_get_interrupt_info(&endpoint) ||
+      endpoint.msi_enabled || endpoint.msix_enabled) {
+    console_puts("VL805 interrupt state is unsafe for test.\n");
+    return;
+  }
+  pcie_msi_host_info_t host = {0};
+  if (!pcie_msi_host_probe(&host) || !(host.target_lo & 1U) ||
+      host.interrupt_status != 0U) {
+    console_puts("PCIe MSI receiver is not ready for test.\n");
+    return;
+  }
+  // Preparation leaves interrupt delivery disabled.
+  if (!gic_prepare_pcie_msi()) {
+    console_puts("GIC MSI route preparation failed.\n");
+    return;
+  }
+  uint32_t before = irq_pcie_msi_count();
+  console_puts("Testing software delivery of GIC IRQ 180...\n");
+  if (!gic_pcie_msi_test_trigger()) {
+    console_puts("Unable to trigger test interrupt.\n");
+    return;
+  }
+  uint64_t started = timer_now_us();
+  while (irq_pcie_msi_count() == before &&
+      timer_now_us() - started < 100000ULL) {
+    timer_delay_ms(1U);
+  }
+  // Ensure the test leaves interrupt 180 disabled,
+  // whether or not the processor received it.
+  gic_pcie_msi_test_finish();
+  uint32_t after = irq_pcie_msi_count();
+  gic_pcie_msi_info_t info = {0};
+  bool inspected = gic_get_pcie_msi_info(&info);
+  console_printf("  IRQ count before : %u\n", before);
+  console_printf("  IRQ count after  : %u\n", after);
+  if (inspected) {
+    console_printf("  GIC enabled      : %s\n", info.enabled ? "Yes" : "No");
+    console_printf("  GIC pending      : %s\n", info.pending ? "Yes" : "No");
+  }
+  bool passed = after == before + 1U &&
+      inspected && !info.enabled && !info.pending;
+  console_printf("  Result           : %s\n", passed ? "PASS" : "FAILED");
+}
+
 void cmd_pci(const char *args) {
   if (console_arg_word(&args, "msi")) {
     if (console_arg_end(args)) {
@@ -216,7 +264,12 @@ void cmd_pci(const char *args) {
       cmd_pci_msi_route();
       return;
     }
-    console_puts("Usage: pci msi [prepare | route]\n");
+    if (console_arg_word(&args, "test") &&
+        console_arg_end(args)) {
+      cmd_pci_msi_test();
+      return;
+    }
+    console_puts("Usage: pci msi [prepare | route | test]\n");
     return;
   }
   if (console_arg_word(&args, "interrupts")) {

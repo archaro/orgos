@@ -2,5 +2,6 @@
 
 #include <stdint.h>
 
-void irq_dispatch(void);
 uint64_t irq_count(void);
+uint32_t irq_pcie_msi_count(void);
+void irq_dispatch(void);
