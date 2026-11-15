@@ -5164,6 +5164,194 @@ static bool xhci_release_buffer(
   return true;
 }
 
+static bool xhci_disable_commit(xhci_device_t *device,
+    xhci_command_result_t result,
+    const xhci_command_completion_t *completion) {
+
+  if (!device || !completion || !device->lifecycle.disable_attempted ||
+      !device->lifecycle.quiesced ||
+      device->lifecycle.slot_disabled || device->slot_id == 0U ||
+      result != XHCI_COMMAND_OK || completion->slot_id != device->slot_id ||
+      completion->completion_code != XHCI_COMPLETION_SUCCESS)
+    return false;
+
+  // This is the only transition which grants
+  // permission to reclaim device-owned DMA.
+  //
+  // No speculative inference from a timeout or
+  // controller state is permitted.
+  device->lifecycle.slot_disabled = true;
+
+  return true;
+}
+
+typedef enum {
+  XHCI_DMA_RELEASE_NOT_READY,
+  XHCI_DMA_RELEASE_BUSY,
+  XHCI_DMA_RELEASE_READY
+} xhci_dma_release_gate_t;
+
+static xhci_dma_release_gate_t xhci_dma_release_gate(
+    const xhci_device_t *device, const xhci_event_waiter_t *waiters,
+    unsigned int count) {
+
+  if (!device || (!waiters && count != 0U))
+    return XHCI_DMA_RELEASE_NOT_READY;
+
+  // Disable Slot must have been attempted and
+  // definitively confirmed for this exact slot.
+  if (!device->lifecycle.quiesced || !device->lifecycle.disable_attempted ||
+      !device->lifecycle.slot_disabled || device->slot_id == 0U ||
+      device->ep0_active ||
+      device->ep0_completion.uncertain || device->ep0_completion.waiter ||
+      (device->ep0_completion.submitted &&
+       !device->ep0_completion.completion_seen) ||
+      device->bulk_out_active || device->bulk_out_async_waiter ||
+      device->bulk_out_async.state == XHCI_BULK_OUT_ASYNC_PENDING ||
+      device->bulk_out_async.state == XHCI_BULK_OUT_ASYNC_UNCERTAIN)
+    return XHCI_DMA_RELEASE_NOT_READY;
+
+  // An active receive stream must be retired
+  // after Disable Slot, before its DMA is freed.
+  if (device->receiver.started || device->receiver.waiter ||
+      device->receiver.state == XHCI_BULK_IN_PENDING)
+    return XHCI_DMA_RELEASE_BUSY;
+
+  // No old completion owner may survive cleanup,
+  // even if another device still has active work.
+  for (unsigned int i = 0U; i < count; i++) {
+    if (waiters[i].active && waiters[i].slot_id == device->slot_id)
+      return XHCI_DMA_RELEASE_BUSY;
+  }
+
+  return XHCI_DMA_RELEASE_READY;
+}
+
+bool xhci_disable_fault_selftest(void) {
+  // No real device, DMA allocation or controller
+  // state is modified by this test.
+  static xhci_device_t sample;
+
+  xhci_event_waiter_t waiters[2] = {0};
+
+  const struct {
+    xhci_command_result_t result;
+    uint8_t slot;
+    uint8_t code;
+    bool accepted;
+  } cases[] = {
+    {XHCI_COMMAND_TIMEOUT, 2U, 0U, false},
+    {XHCI_COMMAND_FAILED, 2U, 6U, false},
+    {XHCI_COMMAND_OK, 3U, XHCI_COMPLETION_SUCCESS, false},
+    {XHCI_COMMAND_OK, 2U, 6U, false},
+    {XHCI_COMMAND_OK, 2U, XHCI_COMPLETION_SUCCESS, true}
+  };
+
+  for (unsigned int i = 0U; i < sizeof(cases) / sizeof(cases[0]); i++) {
+
+    // Each scenario represents an independent
+    // device incarnation. No failed command
+    // is retried within the same incarnation.
+    sample = (xhci_device_t){0};
+    sample.slot_id = 2U;
+    sample.lifecycle.quiesced = true;
+    sample.lifecycle.disable_attempted = true;
+
+    sample.bulk_out_buffer.owner = DMA_OWNER_DEVICE;
+    sample.bulk_out_buffer.pages = 1U;
+
+    xhci_command_completion_t completion = {
+      .slot_id = cases[i].slot,
+      .completion_code = cases[i].code
+    };
+
+    bool accepted = xhci_disable_commit(
+        &sample, cases[i].result, &completion);
+
+    if (accepted != cases[i].accepted ||
+        sample.lifecycle.slot_disabled != accepted ||
+        !sample.lifecycle.disable_attempted)
+      return false;
+
+    xhci_dma_release_gate_t gate = xhci_dma_release_gate(
+            &sample, waiters, 2U);
+
+    if (gate != (accepted ?  XHCI_DMA_RELEASE_READY :
+            XHCI_DMA_RELEASE_NOT_READY))
+      return false;
+
+    // Rejected completions cannot reclaim DMA.
+    if (sample.bulk_out_buffer.owner != DMA_OWNER_DEVICE ||
+        sample.bulk_out_buffer.pages != 1U)
+      return false;
+  }
+
+  // The final scenario was a confirmed success.
+  // Its slot may not be disabled a second time.
+  xhci_command_completion_t completion = {
+    .slot_id = 2U,
+    .completion_code = XHCI_COMPLETION_SUCCESS
+  };
+
+  if (xhci_disable_commit(&sample, XHCI_COMMAND_OK, &completion))
+    return false;
+
+  // An unresolved EP0 overrides an otherwise
+  // confirmed Disable Slot operation.
+  sample.ep0_completion.uncertain = true;
+  if (xhci_dma_release_gate(&sample, waiters, 2U) !=
+      XHCI_DMA_RELEASE_NOT_READY)
+    return false;
+
+  sample.ep0_completion.uncertain = false;
+
+  // Inconsistent outstanding Bulk OUT ownership
+  // must also prevent reclamation.
+  sample.bulk_out_async.state = XHCI_BULK_OUT_ASYNC_UNCERTAIN;
+  if (xhci_dma_release_gate(
+          &sample, waiters, 2U) != XHCI_DMA_RELEASE_NOT_READY)
+    return false;
+
+  // A definitively cancelled transfer may be
+  // cleaned up once its slot is disabled.
+  sample.bulk_out_async.state = XHCI_BULK_OUT_ASYNC_FAILED;
+  if (xhci_dma_release_gate(&sample, waiters, 2U) != XHCI_DMA_RELEASE_READY)
+    return false;
+
+  // An old Bulk IN stream still needs retirement.
+  sample.receiver.started = true;
+  if (xhci_dma_release_gate(&sample, waiters, 2U) != XHCI_DMA_RELEASE_BUSY)
+    return false;
+
+  sample.receiver.started = false;
+
+  // A waiter belonging to another slot is not
+  // grounds for rejecting this device's cleanup.
+  waiters[0] = (xhci_event_waiter_t){
+    .active = true,
+    .slot_id = 3U,
+    .type = XHCI_TRB_TRANSFER_EVENT
+  };
+  if (xhci_dma_release_gate(&sample, waiters, 2U) != XHCI_DMA_RELEASE_READY)
+    return false;
+
+  // But a waiter belonging to the original
+  // hardware slot must prohibit reclamation.
+  waiters[0].slot_id = 2U;
+  if (xhci_dma_release_gate(&sample, waiters, 2U) != XHCI_DMA_RELEASE_BUSY)
+    return false;
+
+  // A cleared waiter restores eligibility.
+  waiters[0].active = false;
+  if (xhci_dma_release_gate(&sample, waiters, 2U) != XHCI_DMA_RELEASE_READY)
+    return false;
+
+  // None of these decisions may have modified
+  // the synthetic DMA allocation or its owner.
+  return sample.bulk_out_buffer.pages == 1U &&
+      sample.bulk_out_buffer.owner == DMA_OWNER_DEVICE;
+}
+
 bool xhci_downstream_is_cleaned(uint8_t slot_id) {
   xhci_device_t *device = xhci_downstream_by_slot(slot_id);
 
@@ -5188,28 +5376,20 @@ xhci_cleanup_result_t xhci_downstream_cleanup(
   if (device->lifecycle.cleaned)
     return XHCI_CLEANUP_ALREADY_DONE;
 
-  if (!device->lifecycle.slot_disabled || !device->lifecycle.quiesced ||
-      device->slot_id == 0U || !controller_running ||
-      !controller_verified || command_outstanding ||
-      device->ep0_completion.uncertain || device->ep0_completion.waiter ||
-      command_ring_failed || device->ep0_active || device->bulk_out_active)
+  if (!controller_running || !controller_verified ||
+      command_outstanding || command_ring_failed)
     return XHCI_CLEANUP_NOT_READY;
 
-  info->slot_id = device->slot_id;
+  xhci_dma_release_gate_t gate = xhci_dma_release_gate(
+      device, event_waiters, XHCI_EVENT_WAITERS);
 
-  // A continuous receiver must be retired
-  // before its buffers can be reclaimed.
-  if (device->receiver.started || device->receiver.waiter ||
-      device->receiver.state == XHCI_BULK_IN_PENDING)
+  if (gate == XHCI_DMA_RELEASE_NOT_READY)
+    return XHCI_CLEANUP_NOT_READY;
+
+  if (gate == XHCI_DMA_RELEASE_BUSY)
     return XHCI_CLEANUP_BUSY;
 
-  // Never destroy the state belonging
-  // to an unresolved transfer.
-  for (unsigned int i = 0U; i < XHCI_EVENT_WAITERS; i++) {
-    xhci_event_waiter_t *waiter = &event_waiters[i];
-    if (waiter->active && waiter->slot_id == device->slot_id)
-      return XHCI_CLEANUP_BUSY;
-  }
+  info->slot_id = device->slot_id;
 
   // Keep the DMA descriptors intact
   // until each allocation is released.
@@ -6135,10 +6315,9 @@ xhci_disable_result_t xhci_downstream_disable(uint8_t slot_id,
   info->command_result = status;
   info->completion_code = completion.completion_code;
 
-  if (status != XHCI_COMMAND_OK || completion.slot_id != device->slot_id)
+  if (!xhci_disable_commit(device, status, &completion))
     return XHCI_DISABLE_COMMAND_FAILED;
 
-  device->lifecycle.slot_disabled = true;
   return XHCI_DISABLE_OK;
 }
 

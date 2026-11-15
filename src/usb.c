@@ -1090,6 +1090,51 @@ static void usb_lifecycle_service_run(usb_lifecycle_run_info_t *run) {
   }
 }
 
+bool usb_lifecycle_disable_fault_selftest(void) {
+  usb_lifecycle_run_info_t run = {
+    .state = USB_LIFECYCLE_RUN_ARMED,
+    .generation = 7U,
+    .observed_generation = 7U,
+    .slot_id = 2U,
+    .steps = 3U,
+    .last_action = USB_LIFECYCLE_DISABLE,
+    .last_result = XHCI_DISABLE_COMMAND_FAILED,
+    .last_succeeded = true
+  };
+
+  // Simulate a failed or uncertain Disable Slot
+  // result from the lifecycle executor.
+  usb_lifecycle_fail_run(&run, USB_LIFECYCLE_FAULT_OPERATION);
+
+  if (run.state != USB_LIFECYCLE_RUN_FAILED ||
+      run.fault != USB_LIFECYCLE_FAULT_OPERATION ||
+      run.last_succeeded || run.last_action != USB_LIFECYCLE_DISABLE ||
+      run.last_result != XHCI_DISABLE_COMMAND_FAILED)
+    return false;
+
+  // A failed executor must not enter another
+  // lifecycle operation on a later service pass.
+  // The function returns before hardware access.
+  usb_lifecycle_service_run(&run);
+
+  if (run.state != USB_LIFECYCLE_RUN_FAILED || run.steps != 3U ||
+      run.slot_id != 2U || run.generation != 7U ||
+      run.last_action != USB_LIFECYCLE_DISABLE)
+    return false;
+
+  // A completed executor must not be changed by
+  // failure propagation from another operation.
+  usb_lifecycle_run_info_t complete = {
+    .state = USB_LIFECYCLE_RUN_COMPLETE,
+    .generation = 6U
+  };
+
+  usb_lifecycle_fail_run(&complete, USB_LIFECYCLE_FAULT_OPERATION);
+
+  return complete.state == USB_LIFECYCLE_RUN_COMPLETE &&
+      complete.generation == 6U && complete.fault == USB_LIFECYCLE_FAULT_NONE;
+}
+
 static void usb_lifecycle_service(void) {
   // Visit armed executors in round-robin order.
   //

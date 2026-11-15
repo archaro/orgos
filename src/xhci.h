@@ -184,6 +184,7 @@ bool xhci_ep0_recovery_selftest(void);
 bool xhci_bulk_out_stop_selftest(void);
 bool xhci_cancellation_fault_selftest(void);
 bool xhci_route_fault_selftest(void);
+bool xhci_disable_fault_selftest(void);
 
 typedef enum {
   XHCI_SERVICE_IDLE,

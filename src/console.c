@@ -2481,8 +2481,16 @@ static void cmd_usb(const char *args) {
           xhci_route_fault_selftest() ?  "PASS" : "FAILED");
       return;
     }
+    if (console_arg_word(&other_args, "disablefault") &&
+        console_arg_end(other_args)) {
+      console_printf("Disable Slot ownership: %s\n",
+          xhci_disable_fault_selftest() ? "PASS" : "FAILED");
+      console_printf("Lifecycle failure isolation: %s\n",
+          usb_lifecycle_disable_fault_selftest() ? "PASS" : "FAILED");
+      return;
+    }
     console_puts(
-        "Usage: usb test [ep0match | ep0late | ep0recovery | stopout | faultpaths | routefault"
+        "Usage: usb test [ep0match | ep0late | ep0recovery | stopout | faultpaths | routefault | disablefault | "
 	"noops | midiout | midiwrap | midiin | midiasync]\n");
     return;
   }
