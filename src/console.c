@@ -2446,6 +2446,14 @@ static void cmd_usb(const char *args) {
           xhci_bulk_out_stop_selftest() ?  "PASS" : "FAILED");
       return;
     }
+    if (console_arg_word(&other_args, "faultpaths") &&
+        console_arg_end(other_args)) {
+      console_printf("xHCI cancellation fault paths: %s\n",
+          xhci_cancellation_fault_selftest() ? "PASS" : "FAILED");
+      console_printf("USB lifecycle fault paths: %s\n",
+          usb_lifecycle_fault_selftest() ? "PASS" : "FAILED");
+      return;
+    }
     if (console_arg_word(&other_args, "noops") &&
         console_arg_end(other_args)) {
       cmd_usb_test_noops();
@@ -2468,8 +2476,8 @@ static void cmd_usb(const char *args) {
       return;
     }
     console_puts(
-        "Usage: usb test [ep0match | ep0late | ep0recovery | stopout | noops | "
-	"midiout | midiwrap | midiin | midiasync]\n");
+        "Usage: usb test [ep0match | ep0late | ep0recovery | stopout | faultpaths | "
+	"noops | midiout | midiwrap | midiin | midiasync]\n");
     return;
   }
   if (console_arg_word(&args, "state") && console_arg_end(args)) {

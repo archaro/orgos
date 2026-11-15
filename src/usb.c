@@ -610,6 +610,37 @@ static void usb_service_hub_changes(void) {
     usb_change_fail(0U);
 }
 
+static usb_lifecycle_action_t usb_lifecycle_transfer_action(
+    const xhci_downstream_transfer_state_t *state) {
+
+  if (!state || state->ep0_active || state->ep0_uncertain)
+    return USB_LIFECYCLE_BLOCKED;
+
+  if (state->bulk_out_active) {
+    if (state->bulk_out_waiter_pending && state->endpoint_states_valid &&
+        state->bulk_out_ep_state == 1U)
+      return USB_LIFECYCLE_STOP_OUT;
+
+    return USB_LIFECYCLE_BLOCKED;
+  }
+
+  if (state->bulk_in_pending) {
+    if (!state->bulk_in_started || state->active_waiters != 1U)
+      return USB_LIFECYCLE_BLOCKED;
+
+    if (state->bulk_in_completed)
+      return USB_LIFECYCLE_RECONCILE_IN;
+
+    if (state->endpoint_states_valid && state->bulk_in_ep_state == 1U)
+      return USB_LIFECYCLE_STOP_IN;
+
+    return USB_LIFECYCLE_BLOCKED;
+  }
+
+  return state->active_waiters == 0U ?
+      USB_LIFECYCLE_DISABLE : USB_LIFECYCLE_BLOCKED;
+}
+
 static bool usb_lifecycle_inspect_record(const usb_device_t *device,
     const usb_lifecycle_run_info_t *run, bool enumeration_attempted,
     usb_lifecycle_info_t *info) {
@@ -726,43 +757,7 @@ static bool usb_lifecycle_inspect_record(const usb_device_t *device,
     return true;
   }
 
-  if (transfers.ep0_active || transfers.ep0_uncertain) {
-    info->next = USB_LIFECYCLE_BLOCKED;
-    return true;
-  }
-
-  // Resolve a pending Bulk OUT transaction before
-  // attempting to stop Bulk IN or disable the slot.
-  //
-  // A completed transfer is normally reconciled
-  // earlier in usb_service(). Never stop an
-  // endpoint whose waiter cannot be identified.
-  if (transfers.bulk_out_active) {
-    if (transfers.bulk_out_waiter_pending &&
-        transfers.endpoint_states_valid && transfers.bulk_out_ep_state == 1U) {
-      info->next = USB_LIFECYCLE_STOP_OUT;
-    } else {
-      info->next = USB_LIFECYCLE_BLOCKED;
-    }
-    return true;
-  }
-
-  if (transfers.bulk_in_pending) {
-    if (!transfers.bulk_in_started || transfers.active_waiters != 1U) {
-      info->next = USB_LIFECYCLE_BLOCKED;
-    } else if (transfers.bulk_in_completed) {
-      info->next = USB_LIFECYCLE_RECONCILE_IN;
-    } else if (transfers.endpoint_states_valid &&
-        transfers.bulk_in_ep_state == 1U) {
-      info->next = USB_LIFECYCLE_STOP_IN;
-    } else {
-      info->next = USB_LIFECYCLE_BLOCKED;
-    }
-    return true;
-  }
-
-  info->next = transfers.active_waiters == 0U ?
-      USB_LIFECYCLE_DISABLE : USB_LIFECYCLE_BLOCKED;
+  info->next = usb_lifecycle_transfer_action(&transfers);
 
   return true;
 }
@@ -1588,6 +1583,95 @@ bool usb_auto_enum_select_inspect(usb_auto_enum_select_info_t *info) {
   // to enumeration until it is safely released.
   info->would_admit = info->resources_ready && info->selected_port != 0U &&
       !usb_lifecycle_any_armed() && !usb_lifecycle_any_failed();
+
+  return true;
+}
+
+bool usb_lifecycle_fault_selftest(void) {
+  xhci_downstream_transfer_state_t state = {0};
+
+  // No outstanding transfers or waiters.
+  if (usb_lifecycle_transfer_action(&state) != USB_LIFECYCLE_DISABLE)
+    return false;
+
+  // A waiter without a resolvable operation.
+  state.active_waiters = 1U;
+
+  if (usb_lifecycle_transfer_action(&state) != USB_LIFECYCLE_BLOCKED)
+    return false;
+
+  // A valid pending Bulk OUT transfer.
+  state.bulk_out_active = true;
+  state.bulk_out_waiter_pending = true;
+  state.endpoint_states_valid = true;
+  state.bulk_out_ep_state = 1U;
+
+  if (usb_lifecycle_transfer_action(&state) != USB_LIFECYCLE_STOP_OUT)
+    return false;
+
+  // Missing ownership must prohibit stopping.
+  state.bulk_out_waiter_pending = false;
+
+  if (usb_lifecycle_transfer_action(&state) != USB_LIFECYCLE_BLOCKED)
+    return false;
+
+  state.bulk_out_waiter_pending = true;
+
+  // The endpoint must be Running before STOP_OUT.
+  state.bulk_out_ep_state = 3U;
+
+  if (usb_lifecycle_transfer_action(&state) != USB_LIFECYCLE_BLOCKED)
+    return false;
+
+  state.bulk_out_ep_state = 1U;
+
+  // An unresolved EP0 takes precedence over
+  // otherwise eligible Bulk OUT cancellation.
+  state.ep0_uncertain = true;
+
+  if (usb_lifecycle_transfer_action(&state) != USB_LIFECYCLE_BLOCKED)
+    return false;
+
+  state.ep0_uncertain = false;
+
+  // Bulk OUT has now been reconciled. Bulk IN
+  // remains pending on the same device.
+  state.bulk_out_active = false;
+  state.bulk_out_waiter_pending = false;
+  state.bulk_in_started = true;
+  state.bulk_in_pending = true;
+  state.bulk_in_completed = true;
+  state.bulk_in_ep_state = 1U;
+
+  if (usb_lifecycle_transfer_action(&state) != USB_LIFECYCLE_RECONCILE_IN)
+    return false;
+
+  // An incomplete Bulk IN requires Stop Endpoint.
+  state.bulk_in_completed = false;
+
+  if (usb_lifecycle_transfer_action(&state) != USB_LIFECYCLE_STOP_IN)
+    return false;
+
+  // Unexpected additional waiters prohibit it.
+  state.active_waiters = 2U;
+
+  if (usb_lifecycle_transfer_action(&state) != USB_LIFECYCLE_BLOCKED)
+    return false;
+
+  // The receiver's endpoint must also be Running.
+  state.active_waiters = 1U;
+  state.bulk_in_ep_state = 3U;
+
+  if (usb_lifecycle_transfer_action(&state) != USB_LIFECYCLE_BLOCKED)
+    return false;
+
+  // All transfer ownership has been resolved.
+  state.bulk_in_pending = false;
+  state.bulk_in_started = false;
+  state.active_waiters = 0U;
+
+  if (usb_lifecycle_transfer_action(&state) != USB_LIFECYCLE_DISABLE)
+    return false;
 
   return true;
 }

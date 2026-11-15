@@ -247,3 +247,4 @@ typedef struct {
 } usb_auto_enum_select_info_t;
 bool usb_auto_enum_select_inspect(usb_auto_enum_select_info_t *info);
 
+bool usb_lifecycle_fault_selftest(void);
