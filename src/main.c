@@ -30,8 +30,8 @@ static unsigned int current_el(void) {
   return (unsigned int)((value >> 2) & 3U);
 }
 
-static _Noreturn void boot_halt(void) {
-  console_puts("FAILED.\n");
+static _Noreturn void boot_halt(const char *reason) {
+  console_printf("FAILED (%s).\n", reason);
   console_puts("System halted.\n");
 
   __asm__ volatile("msr daifset, #0xf" ::: "memory");
@@ -226,10 +226,10 @@ static bool pcie_subsystem_init(void) {
   return true;
 }
 
-static void boot_usb_start(void) {
+static bool boot_usb_start(void) {
   if (!pcie_subsystem_init()) {
     console_puts("\nUNABLE TO INITIALISE PCIE BUS!\n");
-    return;
+    return false;
   }
 
   console_puts("Configuring USB subsystem... ");
@@ -238,7 +238,7 @@ static void boot_usb_start(void) {
   if (configure_result != XHCI_CONFIGURE_OK) {
     console_printf("FAILED (configuration result %u).\n",
         (unsigned int)configure_result);
-    return;
+    return false;
   }
   console_puts("OK.\n");
 
@@ -247,7 +247,7 @@ static void boot_usb_start(void) {
   xhci_start_result_t start_result = xhci_start(&start);
   if (start_result != XHCI_START_OK) {
     console_printf("FAILED (start result %u).\n", (unsigned int)start_result);
-    return;
+    return false;
   }
   console_puts("OK.\n");
 
@@ -257,7 +257,7 @@ static void boot_usb_start(void) {
   if (usb_result != USB_INIT_OK) {
     console_printf("FAILED (stage %u, detail 0x%u).\n",
         (unsigned int)usb_result, (unsigned int)usb.detail);
-    return;
+    return false;
   }
   console_printf("OK (address %u).\n", (unsigned int)usb.address);
 
@@ -267,7 +267,7 @@ static void boot_usb_start(void) {
   if (hub_result != USB_HUB_INIT_OK) {
     console_printf("FAILED (result %u, detail %u).\n",
         (unsigned int)hub_result, (unsigned int)hub.detail);
-    return;
+    return false;
   }
   console_printf("OK (%u ports).\n", (unsigned int)hub.ports);
 
@@ -281,20 +281,25 @@ static void boot_usb_start(void) {
   if (scan_result != USB_HUB_OK) {
     console_printf("FAILED (port %u, result %u).\n",
         (unsigned int)scan.failed_port, (unsigned int)scan_result);
-    return;
+    return false;
   }
   console_printf("OK (connected mask 0x%04x).\n",
       (unsigned int)scan.connected);
 
-  if (!usb_auto_enum_ports_seed(scan.ports, scan.connected))
+  if (!usb_auto_enum_ports_seed(scan.ports, scan.connected)) {
     console_puts("USB port request seeding failed.\n");
+    return false;
+  }
 
   console_puts("Starting hub notifications... ");
   xhci_hub_notify_result_t notify_result = xhci_hub_notify_start();
-  if (notify_result == XHCI_HUB_NOTIFY_OK)
-    console_puts("OK.\n");
-  else
+  if (notify_result != XHCI_HUB_NOTIFY_OK) {
     console_printf("FAILED (%u).\n", (unsigned int)notify_result);
+    return false;
+  }
+
+  console_puts("OK.\n");
+  return true;
 }
 
 void main(void) {
@@ -375,7 +380,7 @@ void main(void) {
   // still disabled.
   console_puts("Building physical memory map... ");
   if (!physmem_init())
-    boot_halt();
+    boot_halt("physical memory map");
   console_puts("OK.\n");
 
   // The MMU requires valid memory information.
@@ -383,14 +388,14 @@ void main(void) {
   // later subsystems will depend on translation.
   console_puts("Initialising MMU... ");
   if (!memory_ok || !mmu_init(physmem_get_map()))
-    boot_halt();
+    boot_halt("memory information or MMU");
   console_puts("OK.\n");
 
   // Now we have the physical memory map and the MMU is configured,
   // it is time to initialise the physical page allocator.
   console_puts("Initialising page allocator... ");
   if (!page_init(physmem_get_map()))
-    boot_halt();
+    boot_halt("page allocator");
   console_puts("OK.\n");
 
   // Initialise interrupt delivery.
@@ -415,7 +420,11 @@ void main(void) {
 
   // USB failure is non-fatal. The console remains
   // available even if the controller cannot start.
-  boot_usb_start();
+  bool usb_ready = boot_usb_start();
+  if (!usb_ready)
+    console_puts("USB startup incomplete; console remains available.\n");
+
+  console_start();
 
   // USB failure is non-fatal. The console remains
   // available even if xHCI cannot start.
