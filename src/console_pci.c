@@ -264,6 +264,26 @@ static void cmd_pci_msi_irq(void) {
   }
 }
 
+static void cmd_pci_msi_program(void) {
+  if (!pcie_xhci_msi_program()) {
+    console_puts("VL805 MSI message configuration failed.\n");
+    return;
+  }
+  pcie_xhci_msi_message_t message = {0};
+  if (!pcie_xhci_msi_get_message(&message)) {
+    console_puts("VL805 MSI message readback failed.\n");
+    return;
+  }
+  console_puts("VL805 MSI message configured:\n");
+  console_printf("  Address low : 0x%08x\n", message.address_lo);
+  console_printf("  Address high: 0x%08x\n", message.address_hi);
+  console_printf("  Data        : 0x%04x\n", (unsigned int)message.data);
+  console_printf("  Control     : 0x%04x\n", (unsigned int)message.control);
+  console_printf("  MSI enabled : %s\n",
+      (message.control & 1U) ? "Yes" : "No");
+  console_puts("\nMSI message verified; delivery remains disabled.\n");
+}
+
 void cmd_pci(const char *args) {
   if (console_arg_word(&args, "msi")) {
     if (console_arg_end(args)) {
@@ -285,12 +305,17 @@ void cmd_pci(const char *args) {
       cmd_pci_msi_irq();
       return;
     }
+    if (console_arg_word(&args, "program") &&
+        console_arg_end(args)) {
+      cmd_pci_msi_program();
+      return;
+    }
     if (console_arg_word(&args, "test") &&
         console_arg_end(args)) {
       cmd_pci_msi_test();
       return;
     }
-    console_puts("Usage: pci msi [prepare | route | irq | test]\n");
+    console_puts("Usage: pci msi [prepare | route | irq | program | test]\n");
     return;
   }
   if (console_arg_word(&args, "interrupts")) {

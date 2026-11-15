@@ -120,6 +120,16 @@ typedef struct {
 
 bool pcie_xhci_get_interrupt_info(pcie_xhci_interrupt_info_t *info);
 
+typedef struct {
+  uint32_t address_lo;
+  uint32_t address_hi;
+  uint16_t data;
+  uint16_t control;
+} pcie_xhci_msi_message_t;
+
+bool pcie_xhci_msi_program(void);
+bool pcie_xhci_msi_get_message(pcie_xhci_msi_message_t *message);
+
 bool pcie_xhci_get_firmware_version(uint32_t *version);
 bool pcie_xhci_disable_bus_master(void);
 bool pcie_xhci_enable_bus_master(void);

@@ -835,6 +835,92 @@ bool pcie_xhci_get_interrupt_info(pcie_xhci_interrupt_info_t *result) {
   return true;
 }
 
+bool pcie_xhci_msi_get_message(pcie_xhci_msi_message_t *message) {
+  if (!message)
+    return false;
+
+  pcie_xhci_interrupt_info_t info = {0};
+
+  if (!pcie_xhci_get_interrupt_info(&info) ||
+      !info.msi_present || !info.msi_64bit)
+    return false;
+
+  pcie_info_t pci;
+  pcie_probe(&pci);
+
+  if (!pci.link_up || !pci.endpoint_present)
+    return false;
+
+  uint8_t bus = pci.secondary_bus;
+  uint32_t offset = info.msi_offset;
+
+  message->address_lo = device_config_read(bus, 0, 0, offset + 4U);
+  message->address_hi = device_config_read(bus, 0, 0, offset + 8U);
+  message->data = (uint16_t) device_config_read(bus, 0, 0, offset + 12U);
+  message->control = info.msi_control;
+
+  return true;
+}
+
+bool pcie_xhci_msi_program(void) {
+  pcie_xhci_interrupt_info_t info = {0};
+
+  if (!pcie_xhci_get_interrupt_info(&info) ||
+      !info.msi_present || !info.msi_64bit ||
+      info.msi_enabled || info.msix_enabled)
+    return false;
+
+  // Multiple Message Enable must be zero.
+  if ((info.msi_control & (7U << 4)) != 0U)
+    return false;
+
+  pcie_msi_host_info_t host = {0};
+
+  if (!pcie_msi_host_probe(&host) || host.revision != 0x00000304U ||
+      host.target_lo != 0xfffffffdU || host.target_hi != 0x0000000fU ||
+      host.data_config != 0xffe06540U || host.interrupt_status != 0U)
+    return false;
+
+  pcie_info_t pci;
+  pcie_probe(&pci);
+
+  if (!pci.link_up || !pci.endpoint_present)
+    return false;
+
+  uint32_t offset = info.msi_offset;
+
+  // Select the VL805's extended configuration space.
+  mmio_write(PCIE_CFG_INDEX,(uint32_t)pci.secondary_bus << 20);
+
+  __asm__ volatile("dsb sy" ::: "memory");
+
+  // Program the 64-bit message address.
+  // MSI remains disabled throughout this operation.
+  mmio_write(PCIE_CFG_DATA + offset + 4U, 0xfffffffcU);
+  mmio_write(PCIE_CFG_DATA + offset + 8U, 0x0000000fU);
+
+  // The MSI message data field is only 16 bits.
+  // Do not overwrite the neighbouring configuration
+  // space by using a 32-bit write.
+  volatile uint16_t *data =
+      (volatile uint16_t *)(PCIE_CFG_DATA + offset + 12U);
+
+  *data = 0x6540U;
+
+  __asm__ volatile("dsb sy" ::: "memory");
+
+  // Verify both message fields and the unchanged
+  // disabled state of the MSI capability.
+  pcie_xhci_msi_message_t message = {0};
+
+  return pcie_xhci_msi_get_message(&message) &&
+      message.address_lo == 0xfffffffcU &&
+      message.address_hi == 0x0000000fU &&
+      message.data == 0x6540U &&
+      message.control == info.msi_control &&
+      !(message.control & 1U);
+}
+
 bool pcie_xhci_get_firmware_version(uint32_t *version) {
   if (!version || !xhci_resources_ready)
     return false;
