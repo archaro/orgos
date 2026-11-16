@@ -1414,47 +1414,40 @@ failed:
   usb_msi_mode_disarm();
 }
 
-void usb_service(void) {
-  if (!usb_initialised || usb_service_failed)
-    return;
+static bool usb_service_events(xhci_service_result_t *result) {
+  // The xHCI event ring has one foreground consumer.
+  // Preserve the existing eight-event budget.
+  *result = xhci_service(8U);
 
-  // Observe hardware MSI notifications published by
-  // the IRQ handler. The IRQ never consumes event TRBs.
-  //
-  // A new interrupt can arrive after this snapshot;
-  // the following foreground pass will observe it.
-  uint32_t sequence = irq_pcie_msi_hardware_count();
-  if (sequence != msi_last_observed) {
-    msi_notifications += sequence - msi_last_observed;
-    msi_last_observed = sequence;
-  }
-
-  msi_service_passes++;
-
-  // Dispatch hardware events to their owners.
-  xhci_service_result_t result = xhci_service(8U);
-  if (result == XHCI_SERVICE_FAILED || result == XHCI_SERVICE_NOT_READY) {
+  if (*result == XHCI_SERVICE_FAILED || *result == XHCI_SERVICE_NOT_READY) {
     if (msi_mode.enabled) {
       msi_mode.faulted = true;
       msi_mode.failures++;
       usb_msi_mode_disarm();
     }
+
     usb_lifecycle_fail(USB_LIFECYCLE_FAULT_XHCI_SERVICE);
     usb_service_failed = true;
-    return;
+    return false;
   }
 
+  return true;
+}
+
+static bool usb_service_housekeeping(void) {
   // Consume root-port notifications and acknowledge
   // their change flags before servicing endpoints.
   usb_service_port_events();
+
   if (usb_service_failed) {
     if (msi_mode.enabled) {
       msi_mode.faulted = true;
       msi_mode.failures++;
       usb_msi_mode_disarm();
     }
+
     usb_lifecycle_fail(USB_LIFECYCLE_FAULT_ROOT_PORT);
-    return;
+    return false;
   }
 
   // Finalise any internal hub interrupt notification.
@@ -1463,14 +1456,16 @@ void usb_service(void) {
   // Record and acknowledge hub changes, then
   // automatically rearm the notification endpoint.
   usb_service_hub_changes();
+
   if (change_stats.failed) {
     if (msi_mode.enabled) {
       msi_mode.faulted = true;
       msi_mode.failures++;
       usb_msi_mode_disarm();
     }
+
     usb_lifecycle_fail(USB_LIFECYCLE_FAULT_HUB);
-    return;
+    return false;
   }
 
   // Finalise and rearm completed Bulk IN transfers.
@@ -1520,8 +1515,36 @@ void usb_service(void) {
   // logical ports and their lifecycle observers.
   midi_ports_usb_service();
 
-  // Rearm hardware MSI only after the foreground
-  // event dispatcher has observed an idle ring.
+  return true;
+}
+
+void usb_service(void) {
+  if (!usb_initialised || usb_service_failed)
+    return;
+
+  // Observe notifications published by the IRQ
+  // handler. Event TRBs remain foreground-owned.
+  uint32_t sequence = irq_pcie_msi_hardware_count();
+
+  if (sequence != msi_last_observed) {
+    msi_notifications += sequence - msi_last_observed;
+    msi_last_observed = sequence;
+  }
+
+  msi_service_passes++;
+
+  // Consume hardware events before processing their
+  // consequences in the USB and MIDI subsystems.
+  xhci_service_result_t result;
+
+  if (!usb_service_events(&result))
+    return;
+
+  if (!usb_service_housekeeping())
+    return;
+
+  // Only rearm when the event dispatcher has
+  // observed an idle ring.
   usb_msi_mode_service(result);
 }
 
