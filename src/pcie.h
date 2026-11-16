@@ -128,6 +128,8 @@ typedef struct {
 } pcie_xhci_msi_message_t;
 
 bool pcie_xhci_msi_program(void);
+bool pcie_xhci_msi_set_enabled(bool enabled);
+bool pcie_msi_host_unmask_vector0(void);
 bool pcie_xhci_msi_get_message(pcie_xhci_msi_message_t *message);
 
 bool pcie_xhci_get_firmware_version(uint32_t *version);

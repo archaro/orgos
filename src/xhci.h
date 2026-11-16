@@ -281,6 +281,8 @@ typedef struct {
 
 xhci_start_result_t xhci_start(xhci_start_info_t *result);
 
+bool xhci_msi_test_set_enabled(bool enabled);
+
 typedef struct {
   uint32_t hcsparams2;
   unsigned int scratchpad_buffers;

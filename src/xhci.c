@@ -55,6 +55,9 @@
 #define XHCI_STS_HOST_ERROR (1U << 2)
 #define XHCI_CMD_RUN      (1U << 0)
 #define XHCI_CMD_HCRST    (1U << 1)
+#define XHCI_CMD_INTE     (1U << 2)
+#define XHCI_IMAN_IP      (1U << 0)
+#define XHCI_IMAN_IE      (1U << 1)
 
 #define PCI_CMD_BUS_MASTER (1U << 2)
 
@@ -1322,7 +1325,6 @@ static bool xhci_command_link_cycle(unsigned int cycle) {
 
 
 xhci_start_result_t xhci_start(xhci_start_info_t *result) {
-
   if (!result)
     return XHCI_START_UNAVAILABLE;
 
@@ -1440,6 +1442,52 @@ xhci_start_result_t xhci_start(xhci_start_info_t *result) {
 
   controller_running = true;
   return XHCI_START_OK;
+}
+
+bool xhci_msi_test_set_enabled(bool enabled) {
+  if (!controller_running || !controller_verified)
+    return false;
+
+  xhci_info_t info;
+
+  if (!xhci_probe(&info))
+    return false;
+
+  uint32_t op = info.capability_length;
+  uint32_t intr = info.runtime_offset + XHCI_INTR0_OFFSET;
+  uint32_t command = xhci_read(op + XHCI_USBCMD);
+  uint32_t iman = xhci_read(intr + XHCI_IMAN);
+
+  if (enabled) {
+    // Only arm a controller that is running,
+    // with both interrupt enables initially clear.
+    if (!(command & XHCI_CMD_RUN) || (command & XHCI_CMD_INTE) ||
+        (iman & XHCI_IMAN_IE) || (iman & XHCI_IMAN_IP))
+      return false;
+
+    // The global enable and interrupter enable
+    // must both be set to permit notifications.
+    xhci_write(op + XHCI_USBCMD, command | XHCI_CMD_INTE);
+    xhci_write(intr + XHCI_IMAN, XHCI_IMAN_IE);
+  } else {
+    // Stop interrupt generation before acknowledging
+    // any residual interrupter-pending indication.
+    xhci_write(intr + XHCI_IMAN, 0U);
+    xhci_write(op + XHCI_USBCMD, command & ~XHCI_CMD_INTE);
+
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    // IP is write-one-to-clear; IE remains zero.
+    // This does not consume event-ring TRBs.
+    xhci_write(intr + XHCI_IMAN, XHCI_IMAN_IP);
+  }
+
+  __asm__ volatile("dsb sy" ::: "memory");
+
+  uint32_t command_after = xhci_read(op + XHCI_USBCMD);
+  uint32_t iman_after = xhci_read(intr + XHCI_IMAN);
+  return ((command_after & XHCI_CMD_INTE) != 0U) == enabled &&
+      ((iman_after & XHCI_IMAN_IE) != 0U) == enabled;
 }
 
 static xhci_event_result_t xhci_event_poll(xhci_event_t *result) {

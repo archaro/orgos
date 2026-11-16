@@ -9,6 +9,7 @@
 #include "gic.h"
 #include "irq.h"
 #include "pcie.h"
+#include "xhci.h"
 
 static void cmd_pci_dma_test(void) {
   static const struct {
@@ -284,6 +285,82 @@ static void cmd_pci_msi_program(void) {
   console_puts("\nMSI message verified; delivery remains disabled.\n");
 }
 
+static void cmd_pci_msi_hardware_test(void) {
+  uint32_t irq_before = irq_pcie_msi_count();
+  uint32_t hw_before = irq_pcie_msi_hardware_count();
+  bool armed = false;
+  console_puts("Testing VL805 hardware MSI delivery...\n");
+  // Start from known-disabled GIC and receiver states.
+  if (pcie_msi_host_prepare() != PCIE_MSI_PREPARE_OK ||
+      !gic_prepare_pcie_msi() || !pcie_xhci_msi_program()) {
+    console_puts("MSI preparation failed.\n");
+    return;
+  }
+  // Enable the endpoint while the BCM2711 vector
+  // and GIC route remain disabled.
+  if (!pcie_xhci_msi_set_enabled(true)) {
+    console_puts("Unable to enable VL805 MSI.\n");
+    goto cleanup;
+  }
+  if (!xhci_msi_test_set_enabled(true)) {
+    console_puts("Unable to enable xHCI interrupts.\n");
+    goto cleanup;
+  }
+  if (!pcie_msi_host_unmask_vector0()) {
+    console_puts("Unable to unmask MSI vector zero.\n");
+    goto cleanup;
+  }
+  // Enable GIC delivery last. The handler will
+  // disable it again after the first notification.
+  gic_enable_irq(GIC_IRQ_PCIE_MSI);
+  armed = true;
+  xhci_noop_info_t noop = {0};
+  xhci_noop_result_t result = xhci_noop(&noop);
+  console_printf("  No Op result    : %u\n", (unsigned int)result);
+  console_printf("  Completion code : %u\n",
+      (unsigned int)noop.completion_code);
+  // Allow for xHCI interrupt moderation. A command
+  // completion may be observed before its MSI arrives.
+  uint64_t started = timer_now_us();
+  while (irq_pcie_msi_hardware_count() == hw_before &&
+      timer_now_us() - started < 100000ULL) {
+    timer_delay_ms(1U);
+  }
+cleanup:
+  // Disable the device's interrupt generation
+  // before dismantling the routing configuration.
+  bool xhci_off = xhci_msi_test_set_enabled(false);
+  bool pci_off = pcie_xhci_msi_set_enabled(false);
+  // The IRQ handler may already have disabled the
+  // GIC route and masked the receiver.
+  gic_pcie_msi_test_finish();
+  pcie_msi_host_irq_quiesce();
+  uint32_t irq_after = irq_pcie_msi_count();
+  uint32_t hw_after = irq_pcie_msi_hardware_count();
+  pcie_msi_host_info_t host = {0};
+  gic_pcie_msi_info_t gic = {0};
+  pcie_xhci_interrupt_info_t endpoint = {0};
+  bool inspected = pcie_msi_host_probe(&host) &&
+      gic_get_pcie_msi_info(&gic) && pcie_xhci_get_interrupt_info(&endpoint);
+  console_printf("  IRQ count       : %u -> %u\n", irq_before, irq_after);
+  console_printf("  Hardware IRQs   : %u -> %u\n", hw_before, hw_after);
+  console_printf("  Last MSI status : 0x%08x\n", irq_pcie_msi_last_status());
+  if (inspected) {
+    console_printf("  Host pending    : 0x%08x\n", host.interrupt_status);
+    console_printf("  GIC enabled     : %s\n", gic.enabled ? "Yes" : "No");
+    console_printf("  VL805 MSI       : %s\n",
+        endpoint.msi_enabled ? "Enabled" : "Disabled");
+  }
+  bool delivered = armed && irq_after == irq_before + 1U &&
+      hw_after == hw_before + 1U && irq_pcie_msi_last_status() == 1U;
+  bool disarmed = xhci_off && pci_off && inspected && !gic.enabled &&
+      !endpoint.msi_enabled && host.interrupt_status == 0U;
+  console_printf("  MSI delivery    : %s\n", delivered ? "PASS" : "FAILED");
+  console_printf("  Disarmed        : %s\n", disarmed ? "Yes" : "NO");
+  if (!disarmed)
+    console_puts("WARNING: Interrupt disarming failed.\n");
+}
+
 void cmd_pci(const char *args) {
   if (console_arg_word(&args, "msi")) {
     if (console_arg_end(args)) {
@@ -315,7 +392,12 @@ void cmd_pci(const char *args) {
       cmd_pci_msi_test();
       return;
     }
-    console_puts("Usage: pci msi [prepare | route | irq | program | test]\n");
+    if (console_arg_word(&args, "hardware-test") &&
+        console_arg_end(args)) {
+      cmd_pci_msi_hardware_test();
+      return;
+    }
+    console_puts("Usage: pci msi [prepare | route | irq | program | test | hardware-test]\n");
     return;
   }
   if (console_arg_word(&args, "interrupts")) {

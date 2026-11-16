@@ -63,6 +63,7 @@
 #define PCIE_MSI_STATUS        (PCIE_BASE + 0x4500)
 #define PCIE_MSI_CLEAR         (PCIE_BASE + 0x4508)
 #define PCIE_MSI_MASK_SET      (PCIE_BASE + 0x4510)
+#define PCIE_MSI_MASK_CLR      (PCIE_BASE + 0x4514)
 
 // BCM2711 MSI target above the 4 GiB DMA aperture.
 #define PCIE_MSI_TARGET_LO  0xfffffffcU
@@ -919,6 +920,70 @@ bool pcie_xhci_msi_program(void) {
       message.data == 0x6540U &&
       message.control == info.msi_control &&
       !(message.control & 1U);
+}
+
+bool pcie_xhci_msi_set_enabled(bool enabled) {
+  pcie_xhci_interrupt_info_t info = {0};
+
+  if (!pcie_xhci_get_interrupt_info(&info) ||
+      !info.msi_present || !info.msi_64bit || info.msix_enabled)
+    return false;
+
+  if (enabled) {
+    pcie_xhci_msi_message_t message = {0};
+
+    if (info.msi_enabled || (info.msi_control & (7U << 4)) ||
+        !pcie_xhci_msi_get_message(&message) ||
+        message.address_lo != 0xfffffffcU ||
+        message.address_hi != 0x0000000fU ||
+        message.data != 0x6540U)
+      return false;
+  }
+
+  pcie_info_t pci;
+  pcie_probe(&pci);
+
+  if (!pci.link_up || !pci.endpoint_present)
+    return false;
+
+  mmio_write(PCIE_CFG_INDEX, (uint32_t)pci.secondary_bus << 20);
+  __asm__ volatile("dsb sy" ::: "memory");
+
+  // MSI control occupies the upper half of the
+  // capability's first DWORD. Preserve all other bits.
+  volatile uint16_t *control =
+      (volatile uint16_t *)(PCIE_CFG_DATA + info.msi_offset + 2U);
+
+  uint16_t value = *control;
+
+  if (enabled)
+    value |= 1U;
+  else
+    value &= (uint16_t)~1U;
+
+  *control = value;
+  __asm__ volatile("dsb sy" ::: "memory");
+
+  pcie_xhci_interrupt_info_t verify = {0};
+
+  return pcie_xhci_get_interrupt_info(&verify) &&
+      verify.msi_enabled == enabled;
+}
+
+bool pcie_msi_host_unmask_vector0(void) {
+  pcie_msi_host_info_t info = {0};
+
+  if (!pcie_msi_host_probe(&info) || info.revision != 0x00000304U ||
+      info.target_lo != 0xfffffffdU || info.target_hi != 0x0000000fU ||
+      info.data_config != 0xffe06540U || info.interrupt_status != 0U)
+    return false;
+
+  // The preparation function masked all vectors.
+  // Unmask only vector zero.
+  mmio_write(PCIE_MSI_MASK_CLR, 1U);
+  __asm__ volatile("dsb sy" ::: "memory");
+
+  return true;
 }
 
 bool pcie_xhci_get_firmware_version(uint32_t *version) {
