@@ -370,6 +370,105 @@ cleanup:
     console_puts("WARNING: Interrupt disarming failed.\n");
 }
 
+static void cmd_pci_msi_repeat_test(void) {
+  const unsigned int cycles = 2U;
+  uint32_t start = irq_pcie_msi_hardware_count();
+  unsigned int completed = 0U;
+  bool passed = true;
+  console_puts("Testing repeated VL805 MSI delivery...\n");
+  // Start with both the MSI receiver and GIC route
+  // configured but disabled.
+  if (pcie_msi_host_prepare() != PCIE_MSI_PREPARE_OK ||
+      !gic_prepare_pcie_msi() || !pcie_xhci_msi_program()) {
+    console_puts("MSI preparation failed.\n");
+    return;
+  }
+  // These two enables remain set across both No Ops.
+  if (!pcie_xhci_msi_set_enabled(true)) {
+    console_puts("VL805 MSI enable failed.\n");
+    passed = false;
+    goto cleanup;
+  }
+  if (!xhci_msi_test_set_enabled(true)) {
+    console_puts("xHCI interrupt enable failed.\n");
+    passed = false;
+    goto cleanup;
+  }
+  for (unsigned int i = 0U; i < cycles; i++) {
+    uint32_t before = irq_pcie_msi_hardware_count();
+    // The previous IRQ must have been fully handled
+    // before another MSI can be admitted.
+    gic_pcie_msi_info_t gic = {0};
+    if (!gic_get_pcie_msi_info(&gic) || gic.enabled || gic.pending) {
+      console_puts("GIC not quiescent before rearm.\n");
+      passed = false;
+      break;
+    }
+    // The ISR has already masked all receiver vectors.
+    // Reopen only vector zero, then GIC delivery.
+    if (!pcie_msi_host_unmask_vector0()) {
+      console_puts("MSI vector rearm failed.\n");
+      passed = false;
+      break;
+    }
+    gic_enable_irq(GIC_IRQ_PCIE_MSI);
+    // Detect an unexpected notification that arrives
+    // before we submit the next command.
+    if (irq_pcie_msi_hardware_count() != before) {
+      console_puts("Unexpected MSI during rearm.\n");
+      passed = false;
+      break;
+    }
+    xhci_noop_info_t noop = {0};
+    xhci_noop_result_t result = xhci_noop(&noop);
+    // A completion can precede its moderated MSI.
+    uint64_t started = timer_now_us();
+    while (irq_pcie_msi_hardware_count() == before &&
+        timer_now_us() - started < 100000ULL) {
+      timer_delay_ms(1U);
+    }
+    uint32_t after = irq_pcie_msi_hardware_count();
+    bool correct = result == XHCI_NOOP_OK &&
+        noop.completion_code == XHCI_COMPLETION_SUCCESS &&
+        after == before + 1U && irq_pcie_msi_last_status() == 1U;
+    console_printf("  Cycle %u:\n", i + 1U);
+    console_printf("    No Op result : %u\n", (unsigned int)result);
+    console_printf("    Completion   : %u\n",
+        (unsigned int)noop.completion_code);
+    console_printf("    Hardware IRQ : %u -> %u\n", before, after);
+    console_printf("    MSI status   : 0x%08x\n", irq_pcie_msi_last_status());
+    console_printf("    Result       : %s\n", correct ? "PASS" : "FAILED");
+    if (!correct) {
+      passed = false;
+      break;
+    }
+    completed++;
+  }
+cleanup:
+  // Stop interrupt generation before closing the
+  // receiver and GIC routes.
+  bool xhci_off = xhci_msi_test_set_enabled(false);
+  bool pci_off = pcie_xhci_msi_set_enabled(false);
+  gic_pcie_msi_test_finish();
+  pcie_msi_host_irq_quiesce();
+  pcie_msi_host_info_t host = {0};
+  gic_pcie_msi_info_t gic = {0};
+  pcie_xhci_interrupt_info_t endpoint = {0};
+  bool inspected = pcie_msi_host_probe(&host) &&
+      gic_get_pcie_msi_info(&gic) && pcie_xhci_get_interrupt_info(&endpoint);
+  bool disarmed = xhci_off && pci_off && inspected && !gic.enabled &&
+      !gic.pending && !endpoint.msi_enabled && host.interrupt_status == 0U;
+  uint32_t finish = irq_pcie_msi_hardware_count();
+  console_printf("\n  Completed      : %u of %u\n", completed, cycles);
+  console_printf("  Total hardware : %u -> %u\n", start, finish);
+  console_printf("  Disarmed       : %s\n", disarmed ? "Yes" : "NO");
+  bool success = passed && completed == cycles &&
+      finish == start + cycles && disarmed;
+  console_printf("  Overall result : %s\n", success ? "PASS" : "FAILED");
+  if (!disarmed)
+    console_puts("WARNING: Interrupt disarming failed.\n");
+}
+
 void cmd_pci(const char *args) {
   if (console_arg_word(&args, "msi")) {
     if (console_arg_end(args)) {
@@ -406,7 +505,13 @@ void cmd_pci(const char *args) {
       cmd_pci_msi_hardware_test();
       return;
     }
-    console_puts("Usage: pci msi [prepare | route | irq | program | test | hardware-test]\n");
+    if (console_arg_word(&args, "repeat-test") &&
+        console_arg_end(args)) {
+      cmd_pci_msi_repeat_test();
+      return;
+    }
+    console_puts("Usage: pci msi [prepare | route | irq | program | test | "
+        "hardware-test | repeat-test]\n");
     return;
   }
   if (console_arg_word(&args, "interrupts")) {
