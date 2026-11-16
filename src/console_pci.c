@@ -469,8 +469,56 @@ cleanup:
     console_puts("WARNING: Interrupt disarming failed.\n");
 }
 
+static void cmd_pci_msi_mode_status(void) {
+  usb_msi_mode_info_t info = {0};
+  if (!usb_msi_mode_get_info(&info)) {
+    console_puts("MSI mode information unavailable.\n");
+    return;
+  }
+  console_puts("Experimental continuous MSI mode:\n");
+  console_printf("  Enabled       : %s\n", info.enabled ? "Yes" : "No");
+  console_printf("  Faulted       : %s\n", info.faulted ? "Yes" : "No");
+  console_printf("  Last rearmed  : %u\n", info.last_rearmed);
+  console_printf("  Rearms        : %u\n", info.rearms);
+  console_printf("  Failures      : %u\n", info.failures);
+  console_printf("  Hardware IRQs : %u\n", irq_pcie_msi_hardware_count());
+  console_printf("  Fault stage   : %u\n", info.fault_stage);
+  console_printf("  Fault pending : 0x%08x\n", info.fault_host_pending);
+  console_printf("  Pending defers : %u\n", info.pending_deferrals);
+  console_printf("  Other vectors  : %u\n", info.unexpected_pending);
+}
+
 void cmd_pci(const char *args) {
   if (console_arg_word(&args, "msi")) {
+    if (console_arg_word(&args, "mode")) {
+      if (console_arg_end(args)) {
+        cmd_pci_msi_mode_status();
+        return;
+      }
+      if (console_arg_word(&args, "on") && console_arg_end(args)) {
+        bool ok = usb_msi_mode_set(true);
+        console_puts(ok ? "Continuous MSI enabled.\n" :
+            "Unable to enable continuous MSI.\n");
+        return;
+      }
+      if (console_arg_word(&args, "off") && console_arg_end(args)) {
+        bool ok = usb_msi_mode_set(false);
+        console_puts(ok ? "Continuous MSI disabled.\n" :
+            "MSI disable verification failed.\n");
+        return;
+      }
+      console_puts("Usage: pci msi mode [on | off]\n");
+      return;
+    }
+    // Diagnostics which alter interrupt configuration
+    // must not run during continuous MSI operation.
+    usb_msi_mode_info_t mode = {0};
+    usb_msi_mode_get_info(&mode);
+    if (mode.enabled && !console_arg_end(args) &&
+        !console_arg_word(&args, "irq")) {
+      console_puts("Disable continuous MSI mode first.\n");
+      return;
+    }
     if (console_arg_end(args)) {
       cmd_pci_msi_host();
       return;

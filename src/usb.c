@@ -3,6 +3,8 @@
 #include <stdint.h>
 
 #include "irq.h"
+#include "gic.h"
+#include "pcie.h"
 #include "xhci.h"
 #include "usb.h"
 #include "usb_hub.h"
@@ -34,6 +36,7 @@ static usb_change_event_t last_port_change[16];
 static uint32_t msi_last_observed;
 static uint32_t msi_notifications;
 static uint32_t msi_service_passes;
+static usb_msi_mode_info_t msi_mode;
 
 // Lifecycle executors for the four downstream ports of the
 // internal USB 2.0 hub, with their round-robin cursor.
@@ -235,6 +238,85 @@ bool usb_msi_notification_get_info(usb_msi_notification_info_t *info) {
   };
 
   return true;
+}
+
+static bool usb_msi_mode_disarm(void) {
+  // Stop xHCI interrupt generation first.
+  bool xhci_off = xhci_msi_test_set_enabled(false);
+  bool pci_off = pcie_xhci_msi_set_enabled(false);
+
+  gic_pcie_msi_test_finish();
+  pcie_msi_host_irq_quiesce();
+
+  gic_pcie_msi_info_t gic = {0};
+  pcie_xhci_interrupt_info_t pci = {0};
+  pcie_msi_host_info_t host = {0};
+
+  bool verified = gic_get_pcie_msi_info(&gic) &&
+      pcie_xhci_get_interrupt_info(&pci) && pcie_msi_host_probe(&host);
+
+  msi_mode.enabled = false;
+
+  return xhci_off && pci_off && verified && !gic.enabled &&
+      !gic.pending && !pci.msi_enabled && host.interrupt_status == 0U;
+}
+
+bool usb_msi_mode_get_info(usb_msi_mode_info_t *info) {
+  if (!info)
+    return false;
+
+  *info = msi_mode;
+  return true;
+}
+
+bool usb_msi_mode_set(bool enabled) {
+  if (!enabled) {
+    if (!msi_mode.enabled)
+      return true;
+
+    if (!usb_msi_mode_disarm()) {
+      msi_mode.faulted = true;
+      msi_mode.failures++;
+      return false;
+    }
+
+    return true;
+  }
+
+  if (msi_mode.enabled || !usb_service_available())
+    return false;
+
+  // Establish all three layers in their disabled state.
+  if (pcie_msi_host_prepare() != PCIE_MSI_PREPARE_OK ||
+      !gic_prepare_pcie_msi() || !pcie_xhci_msi_program())
+    return false;
+
+  // Set the rearm baseline before enabling delivery.
+  msi_mode.last_rearmed = irq_pcie_msi_hardware_count();
+  msi_mode.faulted = false;
+  msi_mode.fault_stage = 0U;
+  msi_mode.fault_host_pending = 0U;
+
+  if (!pcie_xhci_msi_set_enabled(true))
+    goto failed;
+
+  if (!xhci_msi_test_set_enabled(true))
+    goto failed;
+
+  if (!pcie_msi_host_unmask_vector0())
+    goto failed;
+
+  // The GIC route becomes live last.
+  msi_mode.enabled = true;
+  gic_enable_irq(GIC_IRQ_PCIE_MSI);
+
+  return true;
+
+failed:
+  msi_mode.faulted = true;
+  msi_mode.failures++;
+  usb_msi_mode_disarm();
+  return false;
 }
 
 bool usb_service_available(void) {
@@ -1247,6 +1329,91 @@ static void usb_auto_enum_service(void) {
   auto_enum_scheduler.next_check_us = 0ULL;
 }
 
+static void usb_msi_mode_service(xhci_service_result_t result) {
+  if (!msi_mode.enabled)
+    return;
+
+  // The foreground dispatcher must have caught up
+  // before we re-enable the interrupt route.
+  if (result != XHCI_SERVICE_IDLE)
+    return;
+
+  uint32_t sequence = irq_pcie_msi_hardware_count();
+
+  // No new hardware interrupt since our last rearm.
+  if (sequence == msi_mode.last_rearmed)
+    return;
+
+  gic_pcie_msi_info_t gic = {0};
+  if (!gic_get_pcie_msi_info(&gic) || gic.enabled || gic.pending ||
+      irq_pcie_msi_last_status() != 1U) {
+    msi_mode.fault_stage = 1U;
+    goto failed;
+  }
+
+  // The receiver can accumulate another MSI while
+  // its vector is masked. Do not treat this as an
+  // unrecoverable error.
+  pcie_msi_host_info_t host = {0};
+
+  if (!pcie_msi_host_probe(&host))
+    goto failed;
+
+  if (host.interrupt_status != 0U) {
+    // Only vector zero belongs to our MSI configuration.
+    // Unexpected vectors remain a genuine fault.
+    if (host.interrupt_status != 1U) {
+      msi_mode.unexpected_pending++;
+      msi_mode.fault_host_pending = host.interrupt_status;
+      msi_mode.fault_stage = 3U;
+      goto failed;
+    }
+
+    // The ISR already left the GIC disabled.
+    // Acknowledge this additional notification while
+    // keeping the receiver masked.
+    uint32_t cleared = pcie_msi_host_irq_quiesce();
+
+    if (cleared != 1U) {
+      msi_mode.fault_stage = 4U;
+      goto failed;
+    }
+
+    msi_mode.pending_deferrals++;
+
+    // Do not rearm yet. Another foreground service
+    // pass must examine the event ring first.
+    return;
+  }
+
+  // The receiver may have accumulated another
+  // pending MSI while vector zero was masked.
+  if (!pcie_msi_host_unmask_vector0()) {
+    pcie_msi_host_info_t host = {0};
+
+    if (pcie_msi_host_probe(&host))
+      msi_mode.fault_host_pending = host.interrupt_status;
+
+    msi_mode.fault_stage = 2U;
+    goto failed;
+  }
+
+  gic_enable_irq(GIC_IRQ_PCIE_MSI);
+
+  // Record a successful rearm, not an attempt.
+  // An immediately arriving IRQ is observed
+  // on the following foreground service pass.
+  msi_mode.last_rearmed = sequence;
+  msi_mode.rearms++;
+
+  return;
+
+failed:
+  msi_mode.faulted = true;
+  msi_mode.failures++;
+  usb_msi_mode_disarm();
+}
+
 void usb_service(void) {
   if (!usb_initialised || usb_service_failed)
     return;
@@ -1267,6 +1434,11 @@ void usb_service(void) {
   // Dispatch hardware events to their owners.
   xhci_service_result_t result = xhci_service(8U);
   if (result == XHCI_SERVICE_FAILED || result == XHCI_SERVICE_NOT_READY) {
+    if (msi_mode.enabled) {
+      msi_mode.faulted = true;
+      msi_mode.failures++;
+      usb_msi_mode_disarm();
+    }
     usb_lifecycle_fail(USB_LIFECYCLE_FAULT_XHCI_SERVICE);
     usb_service_failed = true;
     return;
@@ -1276,6 +1448,11 @@ void usb_service(void) {
   // their change flags before servicing endpoints.
   usb_service_port_events();
   if (usb_service_failed) {
+    if (msi_mode.enabled) {
+      msi_mode.faulted = true;
+      msi_mode.failures++;
+      usb_msi_mode_disarm();
+    }
     usb_lifecycle_fail(USB_LIFECYCLE_FAULT_ROOT_PORT);
     return;
   }
@@ -1287,6 +1464,11 @@ void usb_service(void) {
   // automatically rearm the notification endpoint.
   usb_service_hub_changes();
   if (change_stats.failed) {
+    if (msi_mode.enabled) {
+      msi_mode.faulted = true;
+      msi_mode.failures++;
+      usb_msi_mode_disarm();
+    }
     usb_lifecycle_fail(USB_LIFECYCLE_FAULT_HUB);
     return;
   }
@@ -1337,6 +1519,10 @@ void usb_service(void) {
   // Make newly enumerated devices visible to
   // logical ports and their lifecycle observers.
   midi_ports_usb_service();
+
+  // Rearm hardware MSI only after the foreground
+  // event dispatcher has observed an idle ring.
+  usb_msi_mode_service(result);
 }
 
 bool usb_lifecycle_port_inspect_generation(
