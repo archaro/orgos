@@ -10,6 +10,7 @@
 #include "irq.h"
 #include "pcie.h"
 #include "xhci.h"
+#include "usb.h"
 
 static void cmd_pci_dma_test(void) {
   static const struct {
@@ -254,6 +255,14 @@ static void cmd_pci_msi_irq(void) {
   console_printf("  Total IRQs     : %u\n", irq_pcie_msi_count());
   console_printf("  Hardware IRQs  : %u\n", irq_pcie_msi_hardware_count());
   console_printf("  Last MSI status: 0x%08x\n", irq_pcie_msi_last_status());
+  usb_msi_notification_info_t notification = {0};
+  if (usb_msi_notification_get_info(&notification)) {
+    console_puts("\nForeground USB notification tracking:\n");
+    console_printf("  IRQ sequence   : %u\n", notification.irq_sequence);
+    console_printf("  Last observed  : %u\n", notification.last_observed);
+    console_printf("  Notifications  : %u\n", notification.notifications);
+    console_printf("  Service passes : %u\n", notification.service_passes);
+  }
   gic_pcie_msi_info_t gic = {0};
   if (gic_get_pcie_msi_info(&gic)) {
     console_printf("  GIC enabled    : %s\n", gic.enabled ? "Yes" : "No");

@@ -2,6 +2,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "irq.h"
 #include "xhci.h"
 #include "usb.h"
 #include "usb_hub.h"
@@ -30,6 +31,9 @@ static unsigned int change_head;
 static unsigned int change_count;
 static usb_change_stats_t change_stats;
 static usb_change_event_t last_port_change[16];
+static uint32_t msi_last_observed;
+static uint32_t msi_notifications;
+static uint32_t msi_service_passes;
 
 // Lifecycle executors for the four downstream ports of the
 // internal USB 2.0 hub, with their round-robin cursor.
@@ -216,6 +220,20 @@ bool usb_get_init_info(usb_init_info_t *info) {
     return false;
 
   *info = usb_state;
+  return true;
+}
+
+bool usb_msi_notification_get_info(usb_msi_notification_info_t *info) {
+  if (!info)
+    return false;
+
+  *info = (usb_msi_notification_info_t){
+    .irq_sequence = irq_pcie_msi_hardware_count(),
+    .last_observed = msi_last_observed,
+    .notifications = msi_notifications,
+    .service_passes = msi_service_passes
+  };
+
   return true;
 }
 
@@ -1232,6 +1250,19 @@ static void usb_auto_enum_service(void) {
 void usb_service(void) {
   if (!usb_initialised || usb_service_failed)
     return;
+
+  // Observe hardware MSI notifications published by
+  // the IRQ handler. The IRQ never consumes event TRBs.
+  //
+  // A new interrupt can arrive after this snapshot;
+  // the following foreground pass will observe it.
+  uint32_t sequence = irq_pcie_msi_hardware_count();
+  if (sequence != msi_last_observed) {
+    msi_notifications += sequence - msi_last_observed;
+    msi_last_observed = sequence;
+  }
+
+  msi_service_passes++;
 
   // Dispatch hardware events to their owners.
   xhci_service_result_t result = xhci_service(8U);

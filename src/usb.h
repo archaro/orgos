@@ -36,6 +36,15 @@ void usb_service(void);
 bool usb_service_available(void);
 
 typedef struct {
+  uint32_t irq_sequence;
+  uint32_t last_observed;
+  uint32_t notifications;
+  uint32_t service_passes;
+} usb_msi_notification_info_t;
+
+bool usb_msi_notification_get_info(usb_msi_notification_info_t *info);
+
+typedef struct {
   bool enabled;
   bool pending;
   uint32_t attempts;
