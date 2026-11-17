@@ -22,6 +22,7 @@
 #define USB_ROOT_EVENT_WAIT_MS 100U
 #define USB_CHANGE_QUEUE_CAPACITY 16U
 #define USB_AUTO_ENUM_RECHECK_US 50000ULL
+#define USB_MSI_POLL_FALLBACK_US 5000ULL
 
 static bool usb_initialised;
 static usb_init_info_t usb_state;
@@ -37,6 +38,10 @@ static uint32_t msi_last_observed;
 static uint32_t msi_notifications;
 static uint32_t msi_service_passes;
 static usb_msi_mode_info_t msi_mode;
+static uint32_t msi_dispatch_sequence;
+static uint64_t msi_last_dispatch_us;
+static bool msi_dispatch_catchup;
+static usb_event_dispatch_stats_t event_dispatch_stats;
 
 // Lifecycle executors for the four downstream ports of the
 // internal USB 2.0 hub, with their round-robin cursor.
@@ -296,6 +301,12 @@ bool usb_msi_mode_set(bool enabled) {
   msi_mode.faulted = false;
   msi_mode.fault_stage = 0U;
   msi_mode.fault_host_pending = 0U;
+  // Begin with a fresh scheduling baseline.
+  // No event-ring polling is suppressed before
+  // the mode has been successfully enabled.
+  msi_dispatch_sequence = msi_mode.last_rearmed;
+  msi_last_dispatch_us = timer_now_us();
+  msi_dispatch_catchup = false;
 
   if (!pcie_xhci_msi_set_enabled(true))
     goto failed;
@@ -1381,8 +1392,9 @@ static void usb_msi_mode_service(xhci_service_result_t result) {
 
     msi_mode.pending_deferrals++;
 
-    // Do not rearm yet. Another foreground service
-    // pass must examine the event ring first.
+    // Force a fresh event-ring inspection before
+    // attempting to rearm again.
+    msi_dispatch_catchup = true;
     return;
   }
 
@@ -1414,10 +1426,79 @@ failed:
   usb_msi_mode_disarm();
 }
 
-static bool usb_service_events(xhci_service_result_t *result) {
+static bool usb_msi_dispatch_due(void) {
+  // Preserve the existing polling behaviour
+  // whenever continuous MSI mode is disabled.
+  if (!msi_mode.enabled)
+    return true;
+
+  uint32_t sequence = irq_pcie_msi_hardware_count();
+
+  if (sequence != msi_dispatch_sequence) {
+    msi_mode.irq_dispatches++;
+    return true;
+  }
+
+  // A previous dispatch consumed at least one event.
+  // Continue until the dispatcher observes an idle ring.
+  if (msi_dispatch_catchup) {
+    msi_mode.catchup_dispatches++;
+    return true;
+  }
+
+  // Periodic polling protects against a missed MSI
+  // and events completed without a new notification.
+  if (timer_now_us() - msi_last_dispatch_us >=
+      USB_MSI_POLL_FALLBACK_US) {
+    msi_mode.fallback_dispatches++;
+    return true;
+  }
+
+  msi_mode.skipped_dispatches++;
+  return false;
+}
+
+bool usb_event_dispatch_get_stats(usb_event_dispatch_stats_t *stats) {
+  if (!stats)
+    return false;
+
+  *stats = event_dispatch_stats;
+  return true;
+}
+
+static bool usb_service_events(
+    xhci_service_result_t *result) {
   // The xHCI event ring has one foreground consumer.
   // Preserve the existing eight-event budget.
+  uint64_t started = timer_now_us();
+
   *result = xhci_service(8U);
+
+  uint64_t elapsed = timer_now_us() - started;
+
+  // Record execution cost regardless of outcome.
+  event_dispatch_stats.calls++;
+  event_dispatch_stats.total_us += elapsed;
+
+  if (elapsed > event_dispatch_stats.max_us)
+    event_dispatch_stats.max_us = elapsed;
+
+  // The hardware timer has microsecond resolution.
+  // Very short calls may therefore measure as zero.
+  if (elapsed == 0U)
+    event_dispatch_stats.zero_us++;
+
+  switch (*result) {
+    case XHCI_SERVICE_IDLE:
+      event_dispatch_stats.idle++;
+      break;
+    case XHCI_SERVICE_PROGRESS:
+      event_dispatch_stats.progress++;
+      break;
+    default:
+      event_dispatch_stats.errors++;
+      break;
+  }
 
   if (*result == XHCI_SERVICE_FAILED || *result == XHCI_SERVICE_NOT_READY) {
     if (msi_mode.enabled) {
@@ -1533,19 +1614,36 @@ void usb_service(void) {
 
   msi_service_passes++;
 
-  // Consume hardware events before processing their
-  // consequences in the USB and MIDI subsystems.
-  xhci_service_result_t result;
+  bool dispatch_due = usb_msi_dispatch_due();
+  xhci_service_result_t result = XHCI_SERVICE_IDLE;
 
-  if (!usb_service_events(&result))
-    return;
+  if (dispatch_due) {
+    // Capture the sequence before dispatching.
+    // An interrupt arriving during dispatch must
+    // still be visible to the next service pass.
+    uint32_t dispatch_sequence = irq_pcie_msi_hardware_count();
 
+    if (!usb_service_events(&result))
+      return;
+
+    msi_dispatch_sequence = dispatch_sequence;
+    msi_last_dispatch_us = timer_now_us();
+
+    // PROGRESS is not proof that the ring is empty.
+    msi_dispatch_catchup = (result == XHCI_SERVICE_PROGRESS);
+  }
+
+  // Housekeeping is always serviced, including
+  // passes which skip event-ring inspection.
   if (!usb_service_housekeeping())
     return;
 
-  // Only rearm when the event dispatcher has
-  // observed an idle ring.
-  usb_msi_mode_service(result);
+  if (dispatch_due) {
+    // Do not rearm based on an idle observation
+    // made before a subsequently received MSI.
+    if (irq_pcie_msi_hardware_count() == msi_dispatch_sequence)
+      usb_msi_mode_service(result);
+  }
 }
 
 bool usb_lifecycle_port_inspect_generation(

@@ -486,6 +486,31 @@ static void cmd_pci_msi_mode_status(void) {
   console_printf("  Fault pending : 0x%08x\n", info.fault_host_pending);
   console_printf("  Pending defers : %u\n", info.pending_deferrals);
   console_printf("  Other vectors  : %u\n", info.unexpected_pending);
+  console_puts("\nEvent dispatch scheduling:\n");
+  console_printf("  IRQ dispatches     : %u\n", info.irq_dispatches);
+  console_printf("  Catchup dispatches : %u\n", info.catchup_dispatches);
+  console_printf("  Fallback dispatches: %u\n", info.fallback_dispatches);
+  console_printf("  Skipped dispatches : %u\n", info.skipped_dispatches);
+  usb_event_dispatch_stats_t dispatch = {0};
+  if (usb_event_dispatch_get_stats(&dispatch)) {
+    console_puts("\nxHCI event dispatch timing:\n");
+    console_printf("  Calls        : %u\n", dispatch.calls);
+    console_printf("  Idle         : %u\n", dispatch.idle);
+    console_printf("  Progress     : %u\n", dispatch.progress);
+    console_printf("  Errors       : %u\n", dispatch.errors);
+    console_printf("  Zero-us calls: %u\n", dispatch.zero_us);
+    console_puts("  Total time   : "); console_putu64(dispatch.total_us);
+    console_puts(" us\n");
+    console_puts("  Maximum      : ");
+    console_putu64(dispatch.max_us);
+    console_puts(" us\n");
+    if (dispatch.calls != 0U) {
+      uint64_t average = dispatch.total_us / dispatch.calls;
+      console_puts("  Mean         : ");
+      console_putu64(average);
+      console_puts(" us\n");
+    }
+  }
 }
 
 void cmd_pci(const char *args) {

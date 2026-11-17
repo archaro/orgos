@@ -54,10 +54,26 @@ typedef struct {
   uint32_t fault_host_pending;
   uint32_t pending_deferrals;
   uint32_t unexpected_pending;
+  uint32_t irq_dispatches;
+  uint32_t catchup_dispatches;
+  uint32_t fallback_dispatches;
+  uint32_t skipped_dispatches;
 } usb_msi_mode_info_t;
 
 bool usb_msi_mode_set(bool enabled);
 bool usb_msi_mode_get_info(usb_msi_mode_info_t *info);
+
+typedef struct {
+  uint64_t total_us;
+  uint64_t max_us;
+  uint32_t calls;
+  uint32_t idle;
+  uint32_t progress;
+  uint32_t errors;
+  uint32_t zero_us;
+} usb_event_dispatch_stats_t;
+
+bool usb_event_dispatch_get_stats(usb_event_dispatch_stats_t *stats);
 
 typedef struct {
   bool enabled;
