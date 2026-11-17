@@ -260,10 +260,22 @@ static bool usb_msi_mode_disarm(void) {
   bool verified = gic_get_pcie_msi_info(&gic) &&
       pcie_xhci_get_interrupt_info(&pci) && pcie_msi_host_probe(&host);
 
+  bool safe = xhci_off && pci_off && verified && !gic.enabled &&
+      !gic.pending && !pci.msi_enabled && host.interrupt_status == 0U;
+
   msi_mode.enabled = false;
 
-  return xhci_off && pci_off && verified && !gic.enabled &&
-      !gic.pending && !pci.msi_enabled && host.interrupt_status == 0U;
+  // Polling is a safe fallback only after interrupt
+  // delivery has been successfully quiesced.
+  //
+  // If that cannot be verified, stop USB service.
+  // The console must remain available for diagnosis.
+  if (!safe) {
+    msi_mode.disarm_failed = true;
+    usb_service_failed = true;
+  }
+
+  return safe;
 }
 
 bool usb_msi_mode_get_info(usb_msi_mode_info_t *info) {
@@ -291,23 +303,6 @@ bool usb_msi_mode_set(bool enabled) {
   if (msi_mode.enabled || !usb_service_available())
     return false;
 
-  // Establish all three layers in their disabled state.
-  if (pcie_msi_host_prepare() != PCIE_MSI_PREPARE_OK ||
-      !gic_prepare_pcie_msi() || !pcie_xhci_msi_program())
-    return false;
-
-  // Set the rearm baseline before enabling delivery.
-  msi_mode.last_rearmed = irq_pcie_msi_hardware_count();
-  msi_mode.faulted = false;
-  msi_mode.fault_stage = 0U;
-  msi_mode.fault_host_pending = 0U;
-  // Begin with a fresh scheduling baseline.
-  // No event-ring polling is suppressed before
-  // the mode has been successfully enabled.
-  msi_dispatch_sequence = msi_mode.last_rearmed;
-  msi_last_dispatch_us = timer_now_us();
-  msi_dispatch_catchup = false;
-
   // Establish the interrupt layers in their
   // disabled state before enabling delivery.
   msi_mode.fault_stage = 0U;
@@ -315,16 +310,22 @@ bool usb_msi_mode_set(bool enabled) {
 
   if (pcie_msi_host_prepare() != PCIE_MSI_PREPARE_OK) {
     msi_mode.fault_stage = 10U;
+    msi_mode.faulted = true;
+    msi_mode.failures++;
     return false;
   }
 
   if (!gic_prepare_pcie_msi()) {
     msi_mode.fault_stage = 11U;
+    msi_mode.faulted = true;
+    msi_mode.failures++;
     return false;
   }
 
   if (!pcie_xhci_msi_program()) {
     msi_mode.fault_stage = 12U;
+    msi_mode.faulted = true;
+    msi_mode.failures++;
     return false;
   }
 

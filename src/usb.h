@@ -47,6 +47,7 @@ bool usb_msi_notification_get_info(usb_msi_notification_info_t *info);
 typedef struct {
   bool enabled;
   bool faulted;
+  bool disarm_failed;
   uint32_t last_rearmed;
   uint32_t rearms;
   uint32_t failures;

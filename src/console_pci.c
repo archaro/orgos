@@ -478,6 +478,9 @@ static void cmd_pci_msi_mode_status(void) {
   console_puts("Experimental continuous MSI mode:\n");
   console_printf("  Enabled       : %s\n", info.enabled ? "Yes" : "No");
   console_printf("  Faulted       : %s\n", info.faulted ? "Yes" : "No");
+  console_printf("  Disarm failed: %s\n", info.disarm_failed ? "Yes" : "No");
+  console_printf("  USB available: %s\n",
+      usb_service_available() ? "Yes" : "No");
   console_printf("  Last rearmed  : %u\n", info.last_rearmed);
   console_printf("  Rearms        : %u\n", info.rearms);
   console_printf("  Failures      : %u\n", info.failures);

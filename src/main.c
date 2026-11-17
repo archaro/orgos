@@ -306,17 +306,6 @@ static bool boot_usb_start(void) {
   // Interrupt setup failure is not a controller
   // failure: retain polling as the safe alternative.
   console_puts("Enabling USB MSI interrupts... ");
-  xhci_msi_state_t state = {0};
-
-  if (xhci_msi_get_state(&state)) {
-    console_printf("\n  USBCMD: 0x%08x\n", state.command);
-    console_printf("  USBSTS: 0x%08x\n", state.status);
-    console_printf("  IMAN  : 0x%08x\n", state.iman);
-    console_printf("  ERDP  : 0x%016llx\n",
-        (unsigned long long)state.erdp);
-  } else {
-    console_puts("\n  Unable to inspect xHCI state.\n");
-  }
   if (usb_msi_mode_set(true))
     console_puts("OK.\n");
   else
@@ -446,8 +435,6 @@ void main(void) {
   bool usb_ready = boot_usb_start();
   if (!usb_ready)
     console_puts("USB startup incomplete; console remains available.\n");
-
-  console_start();
 
   // USB failure is non-fatal. The console remains
   // available even if xHCI cannot start.
