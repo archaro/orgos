@@ -9,9 +9,12 @@
 #include "midi_input.h"
 #include "midi_output.h"
 
-// Automatic MIDI attachment remains opt-in while
-// diagnostics require exclusive endpoint access.
-static midi_auto_info_t auto_state;
+// Attach supported MIDI devices automatically.
+// Diagnostics may disable admission before
+// connecting a device they need to control.
+static midi_auto_info_t auto_state = {
+  .enabled = true
+};
 
 // A device generation is attempted at most once.
 // Record indices may be reused, but generations

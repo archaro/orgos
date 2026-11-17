@@ -229,7 +229,9 @@ static void cmd_midi_auto(const char *args) {
   if (console_arg_word(&p, "off") && console_arg_end(p)) {
     midi_auto_set_enabled(false);
     console_puts("Automatic MIDI reception: OFF\n");
-    console_puts("Existing receivers retain their ownership.\n");
+    console_puts("Existing MIDI services retain their ownership.\n");
+    console_puts("Disconnect and reconnect to reserve "
+        "a device for diagnostics.\n");
     return;
   }
   p = args;
