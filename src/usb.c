@@ -1340,6 +1340,7 @@ static void usb_auto_enum_service(void) {
   auto_enum_scheduler.next_check_us = 0ULL;
 }
 
+static bool usb_service_events(xhci_service_result_t *result);
 static void usb_msi_mode_service(xhci_service_result_t result) {
   if (!msi_mode.enabled)
     return;
@@ -1437,11 +1438,44 @@ static void usb_msi_mode_service(xhci_service_result_t result) {
 
   gic_enable_irq(GIC_IRQ_PCIE_MSI);
 
-  // Record a successful rearm, not an attempt.
-  // An immediately arriving IRQ is observed
-  // on the following foreground service pass.
+  // The receiver and GIC route are now armed.
+  // Record the successful transition before
+  // inspecting the event ring again.
   msi_mode.last_rearmed = sequence;
   msi_mode.rearms++;
+
+  // A completion may have arrived after the
+  // earlier idle observation but before rearming.
+  //
+  // Perform one bounded foreground inspection.
+  // Event-ring ownership remains unchanged.
+  uint32_t before = irq_pcie_msi_hardware_count();
+  xhci_service_result_t check = XHCI_SERVICE_IDLE;
+
+  msi_mode.post_rearm_checks++;
+
+  if (!usb_service_events(&check)) {
+    // usb_service_events() already applies the
+    // normal USB fault policy and disarms MSI.
+    msi_mode.post_rearm_failures++;
+    return;
+  }
+
+  if (check == XHCI_SERVICE_PROGRESS) {
+    msi_mode.post_rearm_progress++;
+
+    // PROGRESS does not guarantee an empty ring.
+    // Force another dispatch on the next pass.
+    msi_dispatch_catchup = true;
+  } else {
+    msi_mode.post_rearm_idle++;
+  }
+
+  // If an interrupt arrived during the inspection,
+  // preserve the existing dispatch sequence so the
+  // next foreground pass notices the new IRQ.
+  if (irq_pcie_msi_hardware_count() != before)
+    msi_mode.post_rearm_irq_changes++;
 
   return;
 

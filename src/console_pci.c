@@ -568,6 +568,12 @@ static void cmd_pci_msi_mode_status(void) {
   console_puts("  Last ERDP    : 0x");
   console_puthex64(info.last_rearm_erdp);
   console_putc('\n');
+  console_puts("\nPost-rearm event inspection:\n");
+  console_printf("  Inspections : %u\n", info.post_rearm_checks);
+  console_printf("  Ring idle   : %u\n", info.post_rearm_idle);
+  console_printf("  Found work  : %u\n", info.post_rearm_progress);
+  console_printf("  Failures    : %u\n", info.post_rearm_failures);
+  console_printf("  IRQ changes : %u\n", info.post_rearm_irq_changes);
 }
 
 void cmd_pci(const char *args) {

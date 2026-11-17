@@ -69,6 +69,11 @@ typedef struct {
   uint32_t rearm_state_failures;
   uint32_t last_rearm_iman;
   uint64_t last_rearm_erdp;
+  uint32_t post_rearm_checks;
+  uint32_t post_rearm_idle;
+  uint32_t post_rearm_progress;
+  uint32_t post_rearm_failures;
+  uint32_t post_rearm_irq_changes;
 } usb_msi_mode_info_t;
 
 bool usb_msi_mode_set(bool enabled);
