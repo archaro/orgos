@@ -1424,16 +1424,45 @@ static void usb_msi_mode_service(xhci_service_result_t result) {
     msi_mode.rearm_state_failures++;
   }
 
-  // The receiver may have accumulated another
-  // pending MSI while vector zero was masked.
+  // A new MSI may arrive between our earlier
+  // receiver inspection and the unmask operation.
   if (!pcie_msi_host_unmask_vector0()) {
     pcie_msi_host_info_t host = {0};
 
-    if (pcie_msi_host_probe(&host))
+    if (!pcie_msi_host_probe(&host)) {
+      msi_mode.fault_stage = 2U;
+      goto failed;
+    }
+
+    // Only vector zero belongs to this controller.
+    if (host.interrupt_status != 1U) {
       msi_mode.fault_host_pending = host.interrupt_status;
 
-    msi_mode.fault_stage = 2U;
-    goto failed;
+      if (host.interrupt_status != 0U) {
+        msi_mode.unexpected_pending++;
+        msi_mode.fault_stage = 3U;
+      } else {
+        msi_mode.fault_stage = 2U;
+      }
+
+      goto failed;
+    }
+
+    // The GIC route is still disabled and the
+    // receiver vector should still be masked.
+    //
+    // Acknowledge the accumulated MSI and defer
+    // rearming until another event-ring inspection.
+    uint32_t cleared = pcie_msi_host_irq_quiesce();
+
+    if (cleared != 1U) {
+      msi_mode.fault_stage = 4U;
+      goto failed;
+    }
+
+    msi_mode.pending_deferrals++;
+    msi_dispatch_catchup = true;
+    return;
   }
 
   gic_enable_irq(GIC_IRQ_PCIE_MSI);
