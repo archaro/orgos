@@ -1603,8 +1603,6 @@ void usb_service(void) {
   if (!usb_initialised || usb_service_failed)
     return;
 
-  // Observe notifications published by the IRQ
-  // handler. Event TRBs remain foreground-owned.
   uint32_t sequence = irq_pcie_msi_hardware_count();
 
   if (sequence != msi_last_observed) {
@@ -1618,32 +1616,61 @@ void usb_service(void) {
   xhci_service_result_t result = XHCI_SERVICE_IDLE;
 
   if (dispatch_due) {
-    // Capture the sequence before dispatching.
-    // An interrupt arriving during dispatch must
-    // still be visible to the next service pass.
     uint32_t dispatch_sequence = irq_pcie_msi_hardware_count();
+
+    // Identify why the scheduler selected this pass,
+    // using the same priority as usb_msi_dispatch_due().
+    bool irq_due = msi_mode.enabled &&
+        dispatch_sequence != msi_dispatch_sequence;
+
+    bool fallback_due = msi_mode.enabled && !irq_due && !msi_dispatch_catchup;
+
+    // Capture the dispatch start time before entering
+    // the xHCI event-ring consumer.
+    uint64_t dispatch_started = timer_now_us();
+
+    if (irq_due) {
+      uint64_t irq_time = irq_pcie_msi_last_time_us();
+
+      // Avoid attributing a newer interrupt timestamp
+      // to the sequence captured for this dispatch.
+      if (irq_pcie_msi_hardware_count() == dispatch_sequence &&
+          dispatch_started >= irq_time && irq_time != 0U) {
+        uint64_t latency = dispatch_started - irq_time;
+
+        msi_mode.response_samples++;
+        msi_mode.response_total_us += latency;
+
+        if (latency > msi_mode.response_max_us)
+          msi_mode.response_max_us = latency;
+      }
+    }
 
     if (!usb_service_events(&result))
       return;
 
+    // Classify fallback inspections only when no
+    // additional hardware IRQ arrived during dispatch.
+    if (fallback_due && irq_pcie_msi_hardware_count() == dispatch_sequence) {
+      if (result == XHCI_SERVICE_PROGRESS)
+        msi_mode.fallback_progress++;
+      else if (result == XHCI_SERVICE_IDLE)
+        msi_mode.fallback_idle++;
+    }
+
     msi_dispatch_sequence = dispatch_sequence;
     msi_last_dispatch_us = timer_now_us();
 
-    // PROGRESS is not proof that the ring is empty.
-    msi_dispatch_catchup = (result == XHCI_SERVICE_PROGRESS);
+    msi_dispatch_catchup = result == XHCI_SERVICE_PROGRESS;
   }
 
-  // Housekeeping is always serviced, including
-  // passes which skip event-ring inspection.
+  // USB and MIDI housekeeping retains its existing
+  // foreground cadence, whether or not we dispatched.
   if (!usb_service_housekeeping())
     return;
 
-  if (dispatch_due) {
-    // Do not rearm based on an idle observation
-    // made before a subsequently received MSI.
-    if (irq_pcie_msi_hardware_count() == msi_dispatch_sequence)
-      usb_msi_mode_service(result);
-  }
+  if (dispatch_due && irq_pcie_msi_hardware_count() == msi_dispatch_sequence)
+    usb_msi_mode_service(result);
 }
 
 bool usb_lifecycle_port_inspect_generation(

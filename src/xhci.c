@@ -5,6 +5,7 @@
 #include "timer.h"
 #include "mmio.h"
 #include "cache.h"
+#include "irq.h"
 #include "pcie.h"
 #include "xhci.h"
 #include "dma.h"
@@ -246,6 +247,15 @@ static uint32_t completed_commands;
 static bool command_outstanding;
 static bool command_ring_failed;
 static xhci_event_stats_t event_stats;
+
+typedef enum {
+  XHCI_DISPATCH_FOREGROUND,
+  XHCI_DISPATCH_SYNCHRONOUS,
+  XHCI_DISPATCH_PORT_WAIT
+} xhci_dispatch_origin_t;
+
+static xhci_event_latency_stats_t event_latency_stats;
+static uint32_t event_latency_last_irq;
 
 #define XHCI_PORT_EVENT_QUEUE_CAPACITY 16U
 static xhci_event_t port_event_queue[XHCI_PORT_EVENT_QUEUE_CAPACITY];
@@ -2071,7 +2081,73 @@ static xhci_route_result_t xhci_route_completion(const xhci_event_t *event,
   return XHCI_ROUTE_UNMATCHED;
 }
 
-static xhci_dispatch_result_t xhci_dispatch_one(void) {
+bool xhci_event_latency_get_stats(xhci_event_latency_stats_t *stats) {
+  if (!stats)
+    return false;
+
+  *stats = event_latency_stats;
+  return true;
+}
+
+static void xhci_event_latency_record(xhci_dispatch_origin_t origin) {
+  switch (origin) {
+    case XHCI_DISPATCH_FOREGROUND:
+      event_latency_stats.foreground_events++;
+      break;
+    case XHCI_DISPATCH_SYNCHRONOUS:
+      event_latency_stats.synchronous_events++;
+      break;
+    case XHCI_DISPATCH_PORT_WAIT:
+      event_latency_stats.port_wait_events++;
+      break;
+  }
+
+  // Only the first consumed event following a new
+  // hardware MSI sequence contributes a timing sample.
+  uint32_t sequence = irq_pcie_msi_hardware_count();
+
+  if (sequence == event_latency_last_irq) {
+    event_latency_stats.uncorrelated_events++;
+    return;
+  }
+
+  uint64_t irq_time = irq_pcie_msi_last_time_us();
+  uint64_t now = timer_now_us();
+
+  // A new IRQ might arrive between reading the
+  // sequence and timestamp. Discard that sample.
+  if (sequence != irq_pcie_msi_hardware_count() ||
+      irq_time == 0U || now < irq_time)
+    return;
+
+  event_latency_last_irq = sequence;
+
+  uint64_t elapsed = now - irq_time;
+
+  event_latency_stats.correlated_events++;
+  event_latency_stats.latency_total_us += elapsed;
+
+  if (elapsed > event_latency_stats.latency_max_us)
+    event_latency_stats.latency_max_us = elapsed;
+
+  switch (origin) {
+    case XHCI_DISPATCH_FOREGROUND:
+      event_latency_stats.foreground_samples++;
+      event_latency_stats.foreground_latency_us += elapsed;
+      break;
+    case XHCI_DISPATCH_SYNCHRONOUS:
+      event_latency_stats.synchronous_samples++;
+      event_latency_stats.synchronous_latency_us += elapsed;
+      break;
+    case XHCI_DISPATCH_PORT_WAIT:
+      event_latency_stats.port_wait_samples++;
+      event_latency_stats.port_wait_latency_us += elapsed;
+      break;
+  }
+}
+
+static xhci_dispatch_result_t xhci_dispatch_one(
+    xhci_dispatch_origin_t origin) {
   // Never consume further events after a fatal
   // dispatch error. Preserve the original fault.
   if (dispatch_fault != XHCI_DISPATCH_NONE)
@@ -2088,6 +2164,13 @@ static xhci_dispatch_result_t xhci_dispatch_one(void) {
     dispatch_fault = XHCI_DISPATCH_READ_ERROR;
     return dispatch_fault;
   }
+
+  // XHCI_EVENT_READY means the event TRB has been
+  // consumed and ERDP has been advanced.
+  //
+  // Record the consumption before routing the event
+  // to its registered owner.
+  xhci_event_latency_record(origin);
 
   // Port events are recorded independently of
   // whichever transfer is currently waiting.
@@ -2146,7 +2229,7 @@ static xhci_dispatch_result_t xhci_dispatch_one(void) {
 }
 
 static xhci_dispatch_result_t xhci_dispatch_wait_step(void) {
-  xhci_dispatch_result_t status = xhci_dispatch_one();
+  xhci_dispatch_result_t status = xhci_dispatch_one(XHCI_DISPATCH_SYNCHRONOUS);
   // A synchronous controller operation may also
   // dispatch a completion for an active Bulk IN
   // receiver on any managed device.
@@ -2177,7 +2260,7 @@ xhci_service_result_t xhci_service(unsigned int budget) {
   event_stats.service_calls++;
   bool progressed = false;
   for (unsigned int i = 0U; i < budget; i++) {
-    xhci_dispatch_result_t status = xhci_dispatch_one();
+    xhci_dispatch_result_t status = xhci_dispatch_one(XHCI_DISPATCH_FOREGROUND);
 
     if (status == XHCI_DISPATCH_READ_ERROR ||
         status == XHCI_DISPATCH_UNHANDLED) {
@@ -2224,7 +2307,7 @@ xhci_port_event_result_t xhci_port_event_wait(
     if (timer_now_us() - started >= timeout_us)
       return XHCI_PORT_EVENT_TIMEOUT;
 
-    xhci_dispatch_result_t status = xhci_dispatch_one();
+    xhci_dispatch_result_t status = xhci_dispatch_one(XHCI_DISPATCH_SYNCHRONOUS);
     if (status == XHCI_DISPATCH_READ_ERROR ||
         status == XHCI_DISPATCH_UNHANDLED)
       return XHCI_PORT_EVENT_FAILED;

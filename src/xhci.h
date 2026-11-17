@@ -146,6 +146,24 @@ typedef struct {
 
 bool xhci_event_get_stats(xhci_event_stats_t *stats);
 
+typedef struct {
+  uint32_t foreground_events;
+  uint32_t synchronous_events;
+  uint32_t port_wait_events;
+  uint32_t correlated_events;
+  uint32_t uncorrelated_events;
+  uint32_t foreground_samples;
+  uint32_t synchronous_samples;
+  uint32_t port_wait_samples;
+  uint64_t latency_total_us;
+  uint64_t latency_max_us;
+  uint64_t foreground_latency_us;
+  uint64_t synchronous_latency_us;
+  uint64_t port_wait_latency_us;
+} xhci_event_latency_stats_t;
+
+bool xhci_event_latency_get_stats(xhci_event_latency_stats_t *stats);
+
 // Read-only snapshot of software-owned xHCI
 // resources. Counts reflect current driver
 // bookkeeping, not a hardware register census.

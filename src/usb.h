@@ -58,6 +58,11 @@ typedef struct {
   uint32_t catchup_dispatches;
   uint32_t fallback_dispatches;
   uint32_t skipped_dispatches;
+  uint32_t response_samples;
+  uint64_t response_total_us;
+  uint64_t response_max_us;
+  uint32_t fallback_progress;
+  uint32_t fallback_idle;
 } usb_msi_mode_info_t;
 
 bool usb_msi_mode_set(bool enabled);

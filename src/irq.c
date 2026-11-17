@@ -1,15 +1,17 @@
 
 #include <stdint.h>
 
-#include "pcie.h"
+#include "timer.h"
+#include "uart.h"
 #include "gic.h"
 #include "irq.h"
-#include "uart.h"
+#include "pcie.h"
 
 static volatile uint64_t total_irqs;
 static volatile uint32_t pcie_msi_irqs;
 static volatile uint32_t pcie_msi_hardware_irqs;
 static volatile uint32_t pcie_msi_last_vector_status;
+static volatile uint64_t pcie_msi_last_time_us;
 
 uint32_t irq_pcie_msi_hardware_count(void) {
   return pcie_msi_hardware_irqs;
@@ -17,6 +19,10 @@ uint32_t irq_pcie_msi_hardware_count(void) {
 
 uint32_t irq_pcie_msi_last_status(void) {
   return pcie_msi_last_vector_status;
+}
+
+uint64_t irq_pcie_msi_last_time_us(void) {
+  return pcie_msi_last_time_us;
 }
 
 uint64_t irq_count(void) {
@@ -54,8 +60,11 @@ void irq_dispatch(void) {
       uint32_t pending = pcie_msi_host_irq_quiesce();
       pcie_msi_irqs++;
       if (pending != 0U) {
-        pcie_msi_hardware_irqs++;
+        // Timestamp this notification before publishing
+        // the new sequence number to the foreground.
+        pcie_msi_last_time_us = timer_now_us();
         pcie_msi_last_vector_status = pending;
+        pcie_msi_hardware_irqs++;
       }
       // Keep the route disabled until explicitly
       // prepared again by the foreground console.

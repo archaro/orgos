@@ -511,6 +511,54 @@ static void cmd_pci_msi_mode_status(void) {
       console_puts(" us\n");
     }
   }
+  console_puts("\nMSI response timing:\n");
+  console_printf("  Samples          : %u\n", info.response_samples);
+  console_puts("  Total latency    : ");
+  console_putu64(info.response_total_us);
+  console_puts(" us\n");
+  console_puts("  Maximum latency  : ");
+  console_putu64(info.response_max_us);
+  console_puts(" us\n");
+  if (info.response_samples != 0U) {
+    console_puts("  Mean latency     : ");
+    console_putu64(info.response_total_us / info.response_samples);
+    console_puts(" us\n");
+  }
+  console_puts("\nFallback effectiveness:\n");
+  console_printf("  Found work       : %u\n", info.fallback_progress);
+  console_printf("  Ring idle        : %u\n", info.fallback_idle);
+  xhci_event_latency_stats_t events = {0};
+  if (xhci_event_latency_get_stats(&events)) {
+    console_puts("\nxHCI event consumption:\n");
+    console_printf("  Foreground events : %u\n", events.foreground_events);
+    console_printf("  Synchronous events: %u\n", events.synchronous_events);
+    console_printf("  Port-wait events  : %u\n", events.port_wait_events);
+    console_puts("\nEvent/MSI correlation:\n");
+    console_printf("  Matched samples   : %u\n", events.correlated_events);
+    console_printf("  Other events      : %u\n", events.uncorrelated_events);
+    console_puts("  Maximum delay     : ");
+    console_putu64(events.latency_max_us);
+    console_puts(" us\n");
+    if (events.correlated_events != 0U) {
+      console_puts("  Mean delay        : ");
+      console_putu64(events.latency_total_us / events.correlated_events);
+      console_puts(" us\n");
+    }
+    console_printf("  Foreground samples: %u\n", events.foreground_samples);
+    console_printf("  Synchronous samples: %u\n", events.synchronous_samples);
+    console_printf("  Port-wait samples : %u\n", events.port_wait_samples);
+    if (events.foreground_samples != 0U) {
+      console_puts("  Foreground mean   : ");
+      console_putu64(events.foreground_latency_us /
+          events.foreground_samples);
+      console_puts(" us\n");
+    }
+    if (events.synchronous_samples != 0U) {
+      console_puts("  Synchronous mean  : ");
+      console_putu64(events.synchronous_latency_us / events.synchronous_samples);
+      console_puts(" us\n");
+    }
+  }
 }
 
 void cmd_pci(const char *args) {
