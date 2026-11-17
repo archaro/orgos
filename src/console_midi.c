@@ -240,12 +240,15 @@ static void cmd_midi_auto(const char *args) {
       console_puts("Automatic MIDI reception unavailable.\n");
       return;
     }
-    console_puts("Automatic MIDI reception:\n");
-    console_printf("  Enabled    : %s\n", info.enabled ? "Yes" : "No");
-    console_printf("  Attempts   : %u\n", (unsigned int)info.attempts);
-    console_printf("  Started    : %u\n", (unsigned int)info.started);
-    console_printf("  Skipped    : %u\n", (unsigned int)info.skipped);
-    console_printf("  Failed     : %u\n", (unsigned int)info.failed);
+    console_puts("Automatic MIDI attachment:\n");
+    console_printf("  Enabled     : %s\n", info.enabled ? "Yes" : "No");
+    console_printf("  Attempts    : %u\n", (unsigned int)info.attempts);
+    console_printf("  IN started  : %u\n", (unsigned int)info.started);
+    console_printf("  IN skipped  : %u\n", (unsigned int)info.skipped);
+    console_printf("  IN failed   : %u\n", (unsigned int)info.failed);
+    console_printf("  OUT started : %u\n", (unsigned int)info.output_started);
+    console_printf("  OUT skipped : %u\n", (unsigned int)info.output_skipped);
+    console_printf("  OUT failed  : %u\n", (unsigned int)info.output_failed);
     if (info.attempts != 0U)
       console_printf("  Last gen   : %u\n",
           (unsigned int)info.last_generation);

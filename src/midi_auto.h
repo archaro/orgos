@@ -10,6 +10,9 @@ typedef struct {
   uint32_t skipped;
   uint32_t failed;
   uint32_t last_generation;
+  uint32_t output_started;
+  uint32_t output_skipped;
+  uint32_t output_failed;
 } midi_auto_info_t;
 
 // Controls admission of new automatic MIDI

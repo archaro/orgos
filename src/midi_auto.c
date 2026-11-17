@@ -7,9 +7,10 @@
 #include "usb_midi_rx.h"
 #include "midi_auto.h"
 #include "midi_input.h"
+#include "midi_output.h"
 
-// Automatic MIDI reception is opt-in while
-// diagnostics still require direct stream access.
+// Automatic MIDI attachment remains opt-in while
+// diagnostics require exclusive endpoint access.
 static midi_auto_info_t auto_state;
 
 // A device generation is attempted at most once.
@@ -56,12 +57,40 @@ void midi_auto_service(void) {
     // reconsidered on every service pass.
     seen_generation[i] = device.generation;
 
-    if (!enumeration.midi.in_found || enumeration.midi.bulk_in_jacks == 0U ||
-        enumeration.midi.bulk_in_jacks > USB_MIDI_MAX_CABLES)
+    // Attach whichever MIDI directions this device
+    // actually supports. They are independent.
+    bool has_in = enumeration.midi.in_found &&
+        enumeration.midi.bulk_in_jacks != 0U &&
+        enumeration.midi.bulk_in_jacks <= USB_MIDI_MAX_CABLES;
+
+    bool has_out = enumeration.midi.out_found &&
+        enumeration.midi.bulk_out_jacks != 0U &&
+        enumeration.midi.bulk_out_jacks <= USB_MIDI_MAX_CABLES;
+
+    if (!has_in && !has_out)
       continue;
 
     auto_state.attempts++;
     auto_state.last_generation = device.generation;
+
+    if (has_out) {
+      midi_output_info_t output = {0};
+      // Respect an existing owner, including an
+      // explicitly stopped output service.
+      if (midi_output_get_info(device.generation, &output) &&
+          output.state != MIDI_OUTPUT_IDLE) {
+        auto_state.output_skipped++;
+      } else if (midi_output_start_generation(device.generation)) {
+        auto_state.output_started++;
+      } else {
+        auto_state.output_failed++;
+      }
+    }
+
+    // The existing input attachment logic follows.
+    // An output-only device is equally legitimate.
+    if (!has_in)
+      continue;
 
     // Never displace a manually started
     // persistent receiver.
