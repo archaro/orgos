@@ -63,6 +63,12 @@ typedef struct {
   uint64_t response_max_us;
   uint32_t fallback_progress;
   uint32_t fallback_idle;
+  uint32_t rearm_iman_pending;
+  uint32_t rearm_ehb_busy;
+  uint32_t rearm_both_clear;
+  uint32_t rearm_state_failures;
+  uint32_t last_rearm_iman;
+  uint64_t last_rearm_erdp;
 } usb_msi_mode_info_t;
 
 bool usb_msi_mode_set(bool enabled);

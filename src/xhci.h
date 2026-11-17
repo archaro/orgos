@@ -164,6 +164,15 @@ typedef struct {
 
 bool xhci_event_latency_get_stats(xhci_event_latency_stats_t *stats);
 
+typedef struct {
+  uint32_t command;
+  uint32_t status;
+  uint32_t iman;
+  uint64_t erdp;
+} xhci_msi_state_t;
+
+bool xhci_msi_get_state(xhci_msi_state_t *state);
+
 // Read-only snapshot of software-owned xHCI
 // resources. Counts reflect current driver
 // bookkeeping, not a hardware register census.

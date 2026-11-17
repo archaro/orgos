@@ -2089,6 +2089,27 @@ bool xhci_event_latency_get_stats(xhci_event_latency_stats_t *stats) {
   return true;
 }
 
+bool xhci_msi_get_state(xhci_msi_state_t *state) {
+  if (!state || !controller_running || !controller_verified)
+    return false;
+
+  xhci_info_t info;
+  if (!xhci_probe(&info))
+    return false;
+
+  uint32_t op = info.capability_length;
+  uint32_t intr = info.runtime_offset + XHCI_INTR0_OFFSET;
+
+  *state = (xhci_msi_state_t){
+    .command = xhci_read(op + XHCI_USBCMD),
+    .status = xhci_read(op + XHCI_USBSTS),
+    .iman = xhci_read(intr + XHCI_IMAN),
+    .erdp = xhci_read64(intr + XHCI_ERDP_LO)
+  };
+
+  return true;
+}
+
 static void xhci_event_latency_record(xhci_dispatch_origin_t origin) {
   switch (origin) {
     case XHCI_DISPATCH_FOREGROUND:

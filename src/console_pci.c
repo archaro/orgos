@@ -559,6 +559,15 @@ static void cmd_pci_msi_mode_status(void) {
       console_puts(" us\n");
     }
   }
+  console_puts("\nxHCI state at MSI rearm:\n");
+  console_printf("  IMAN pending : %u\n", info.rearm_iman_pending);
+  console_printf("  EHB busy     : %u\n", info.rearm_ehb_busy);
+  console_printf("  Both clear   : %u\n", info.rearm_both_clear);
+  console_printf("  Read failures: %u\n", info.rearm_state_failures);
+  console_printf("  Last IMAN    : 0x%08x\n", info.last_rearm_iman);
+  console_puts("  Last ERDP    : 0x");
+  console_puthex64(info.last_rearm_erdp);
+  console_putc('\n');
 }
 
 void cmd_pci(const char *args) {

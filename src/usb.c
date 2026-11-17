@@ -1398,6 +1398,31 @@ static void usb_msi_mode_service(xhci_service_result_t result) {
     return;
   }
 
+  // Inspect xHCI after foreground event processing
+  // and before reopening the BCM2711 MSI route.
+  //
+  // These are observations, not rearm conditions.
+  xhci_msi_state_t state = {0};
+
+  if (xhci_msi_get_state(&state)) {
+    msi_mode.last_rearm_iman = state.iman;
+    msi_mode.last_rearm_erdp = state.erdp;
+
+    bool pending = (state.iman & 1U) != 0U;
+    bool busy = (state.erdp & (1ULL << 3)) != 0U;
+
+    if (pending)
+      msi_mode.rearm_iman_pending++;
+
+    if (busy)
+      msi_mode.rearm_ehb_busy++;
+
+    if (!pending && !busy)
+      msi_mode.rearm_both_clear++;
+  } else {
+    msi_mode.rearm_state_failures++;
+  }
+
   // The receiver may have accumulated another
   // pending MSI while vector zero was masked.
   if (!pcie_msi_host_unmask_vector0()) {
