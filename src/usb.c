@@ -308,14 +308,110 @@ bool usb_msi_mode_set(bool enabled) {
   msi_last_dispatch_us = timer_now_us();
   msi_dispatch_catchup = false;
 
-  if (!pcie_xhci_msi_set_enabled(true))
-    goto failed;
+  // Establish the interrupt layers in their
+  // disabled state before enabling delivery.
+  msi_mode.fault_stage = 0U;
+  msi_mode.fault_host_pending = 0U;
 
-  if (!xhci_msi_test_set_enabled(true))
-    goto failed;
+  if (pcie_msi_host_prepare() != PCIE_MSI_PREPARE_OK) {
+    msi_mode.fault_stage = 10U;
+    return false;
+  }
 
-  if (!pcie_msi_host_unmask_vector0())
+  if (!gic_prepare_pcie_msi()) {
+    msi_mode.fault_stage = 11U;
+    return false;
+  }
+
+  if (!pcie_xhci_msi_program()) {
+    msi_mode.fault_stage = 12U;
+    return false;
+  }
+
+  msi_mode.last_rearmed = irq_pcie_msi_hardware_count();
+  msi_mode.faulted = false;
+  msi_dispatch_sequence = msi_mode.last_rearmed;
+  msi_last_dispatch_us = timer_now_us();
+  msi_dispatch_catchup = false;
+
+  if (!pcie_xhci_msi_set_enabled(true)) {
+    msi_mode.fault_stage = 13U;
     goto failed;
+  }
+
+  if (!xhci_msi_test_set_enabled(true)) {
+    msi_mode.fault_stage = 14U;
+    goto failed;
+  }
+
+  // xHCI may have generated an MSI immediately
+  // after interrupt generation was enabled.
+  //
+  // Before opening the receiver and GIC route,
+  // drain any events and acknowledge accumulated
+  // vector-zero notifications.
+  bool armed = false;
+
+  for (unsigned int attempt = 0U; attempt < 32U; attempt++) {
+    xhci_service_result_t result = xhci_service(8U);
+    if (result == XHCI_SERVICE_FAILED || result == XHCI_SERVICE_NOT_READY) {
+      msi_mode.fault_stage = 16U;
+      goto failed;
+    }
+
+    // An eight-event dispatch budget may leave
+    // more events in the ring. Continue draining.
+    if (result == XHCI_SERVICE_PROGRESS)
+      continue;
+
+    pcie_msi_host_info_t host = {0};
+    if (!pcie_msi_host_probe(&host)) {
+      msi_mode.fault_stage = 15U;
+      goto failed;
+    }
+
+    if (host.interrupt_status != 0U) {
+      if (host.interrupt_status != 1U) {
+        msi_mode.fault_stage = 17U;
+        msi_mode.fault_host_pending = host.interrupt_status;
+        goto failed;
+      }
+
+      // Only vector zero is expected. Keep the
+      // receiver masked while acknowledging it.
+      if (pcie_msi_host_irq_quiesce() != 1U) {
+        msi_mode.fault_stage = 18U;
+        goto failed;
+      }
+
+      // Another event-ring inspection is required
+      // after acknowledging the notification.
+      msi_mode.pending_deferrals++;
+      continue;
+    }
+
+    // If an MSI arrives during this final check,
+    // unmasking refuses it. Retry the handshake.
+    if (pcie_msi_host_unmask_vector0()) {
+      armed = true;
+      break;
+    }
+  }
+
+  if (!armed) {
+    pcie_msi_host_info_t host = {0};
+    if (pcie_msi_host_probe(&host))
+      msi_mode.fault_host_pending = host.interrupt_status;
+
+    msi_mode.fault_stage = 19U;
+    goto failed;
+  }
+
+  // All outstanding event-ring work was drained
+  // before interrupt delivery became live.
+  // Preserve the normal scheduler baseline.
+  msi_last_dispatch_us = timer_now_us();
+  msi_dispatch_catchup = false;
 
   // The GIC route becomes live last.
   msi_mode.enabled = true;
