@@ -6,7 +6,6 @@
 #include "usb_enumerate.h"
 #include "usb_midi_rx.h"
 #include "midi_auto.h"
-#include "midi_input.h"
 #include "midi_output.h"
 
 // Attach supported MIDI devices automatically.
@@ -115,17 +114,10 @@ void midi_auto_service(void) {
       continue;
     }
 
-    // The receiver verifies generation, slot,
-    // physical connection and MIDI configuration
-    // before starting its hardware stream.
-    if (!usb_midi_rx_start_generation(device.generation)) {
-      auto_state.failed++;
-      continue;
-    }
-
-    // Normal MIDI reception now delivers structured
-    // stream events to the application-facing queue.
-    if (!midi_input_start_generation(device.generation)) {
+    // The OS owns reception. An application or
+    // diagnostic monitor subscribes separately.
+    if (!usb_midi_rx_start_auto_generation(
+            device.generation)) {
       auto_state.failed++;
       continue;
     }

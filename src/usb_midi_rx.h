@@ -25,6 +25,8 @@ typedef struct {
   unsigned int queue_peak;
   uint8_t slot_id;
   uint8_t cables;
+  bool discard_unclaimed;
+  uint64_t unclaimed_dropped;
 } usb_midi_rx_info_t;
 
 // Start a persistent receiver for one active
@@ -32,6 +34,11 @@ typedef struct {
 //
 // An existing Bulk IN owner is never displaced.
 bool usb_midi_rx_start_generation(uint32_t generation);
+
+// Start the normal OS-owned receiver.
+// Without a subscriber, packets are discarded
+// rather than retained in the diagnostic FIFO.
+bool usb_midi_rx_start_auto_generation(uint32_t generation);
 
 // Determine whether this generation belongs to
 // the persistent receiver rather than a diagnostic.

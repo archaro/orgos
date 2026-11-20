@@ -139,6 +139,10 @@ static void cmd_midi_rx(const char *args) {
     console_printf("  Events     : %llu\n", (unsigned long long)info.events);
     console_printf("  Rejected   : %llu\n",
         (unsigned long long)info.rejected);
+    console_printf("  Idle policy: %s\n",
+        info.discard_unclaimed ? "Discard" : "Retain");
+    console_printf("  Idle drops : %llu\n",
+        (unsigned long long)info.unclaimed_dropped);
     console_printf("  Staged     : %u\n", info.staged);
     console_printf("  Queue      : %u / %u\n",
         info.queue_depth, USB_MIDI_RX_QUEUE_CAPACITY);

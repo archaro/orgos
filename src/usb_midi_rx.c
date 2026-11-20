@@ -82,7 +82,7 @@ static bool rx_owner_matches(unsigned int index,
   return true;
 }
 
-bool usb_midi_rx_start_generation(uint32_t generation) {
+static bool usb_midi_rx_start(uint32_t generation, bool discard_unclaimed) {
   if (!usb_service_available() || generation == 0U)
     return false;
 
@@ -144,6 +144,7 @@ bool usb_midi_rx_start_generation(uint32_t generation) {
     rx->info.generation = generation;
     rx->info.slot_id = device.slot_id;
     rx->info.cables = enumeration.midi.bulk_in_jacks;
+    rx->info.discard_unclaimed = discard_unclaimed;
     rx->root_port = device.root_port;
     rx->parent_slot = device.parent_slot;
     rx->parent_port = device.parent_port;
@@ -152,6 +153,14 @@ bool usb_midi_rx_start_generation(uint32_t generation) {
   }
 
   return false;
+}
+
+bool usb_midi_rx_start_generation(uint32_t generation) {
+  return usb_midi_rx_start(generation, false);
+}
+
+bool usb_midi_rx_start_auto_generation(uint32_t generation) {
+  return usb_midi_rx_start(generation, true);
 }
 
 bool usb_midi_rx_owns_generation(uint32_t generation) {
@@ -207,6 +216,17 @@ bool usb_midi_rx_subscribe(uint32_t generation,
       rx->consumer || !rx_owner_matches(index, rx))
     return false;
 
+  // A newly attached application must not inherit
+  // packets retained before it subscribed.
+  if (rx->info.discard_unclaimed) {
+    rx->info.unclaimed_dropped += rx->info.queue_depth +
+        rx->staged_count - rx->staged_index;
+
+    rx->info.queue_depth = 0U;
+    rx->head = 0U;
+    rx->staged_index = rx->staged_count;
+  }
+
   rx->consumer = consumer;
   rx->consumer_context = context;
 
@@ -251,10 +271,22 @@ void usb_midi_rx_service(void) {
       continue;
     }
 
+    // An OS-owned receiver must keep draining even
+    // when no application has subscribed.
+    bool idle_discard = rx->info.discard_unclaimed && rx->consumer == NULL;
+    if (idle_discard && rx->info.queue_depth != 0U) {
+      rx->info.unclaimed_dropped += rx->info.queue_depth;
+      rx->info.queue_depth = 0U;
+      rx->head = 0U;
+    }
+
+    unsigned int discarded = 0U;
+
     // Move staged events into the application FIFO.
     // Fetch another transfer only when the previous
     // transfer has been completely delivered.
-    while (rx->info.queue_depth < USB_MIDI_RX_QUEUE_CAPACITY) {
+    while (rx->info.queue_depth < USB_MIDI_RX_QUEUE_CAPACITY &&
+        (!idle_discard || discarded < USB_MIDI_RX_QUEUE_CAPACITY)) {
 
       if (rx->staged_index == rx->staged_count) {
         xhci_bulk_in_info_t transfer = {0};
@@ -298,6 +330,15 @@ void usb_midi_rx_service(void) {
         // does not occupy the staging buffer.
         if (rx->staged_count == 0U)
           continue;
+      }
+
+      // No subscriber owns these events. Consume
+      // them without filling the diagnostic FIFO.
+      if (idle_discard) {
+        rx->staged_index++;
+        rx->info.unclaimed_dropped++;
+        discarded++;
+        continue;
       }
 
       unsigned int tail =
