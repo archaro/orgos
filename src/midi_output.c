@@ -116,16 +116,21 @@ bool midi_output_start_generation(uint32_t generation) {
       return false;
 
     midi_output_record_t *output = &outputs[i];
-
-    if (output->info.in_flight != 0U ||
-        output->info.state == MIDI_OUTPUT_RUNNING ||
-        (output->info.generation == generation &&
-         output->info.state != MIDI_OUTPUT_IDLE &&
-         output->info.state != MIDI_OUTPUT_STOPPED))
+    // A live generation cannot discard its own
+    // outstanding output or restart a failed
+    // output service.
+    //
+    // An older generation may retain unconfirmed
+    // packets after disconnection. It must not
+    // prevent a new, fully enumerated incarnation
+    // from acquiring this managed-device record.
+    if (output->info.generation == generation &&
+        (output->info.in_flight != 0U ||
+         (output->info.state != MIDI_OUTPUT_IDLE &&
+          output->info.state != MIDI_OUTPUT_STOPPED)))
       return false;
 
     xhci_bulk_out_async_info_t hw = {0};
-
     if (!xhci_bulk_out_async_get(device.slot_id, &hw) ||
         hw.state != XHCI_BULK_OUT_ASYNC_IDLE)
       return false;
