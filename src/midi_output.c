@@ -29,6 +29,7 @@ typedef struct {
   uint8_t parent_slot;
   uint8_t parent_port;
   bool failure_recorded;
+  bool losses_accounted;
   uint64_t next_submit_us;
   // At most two bytes await a complete
   // USB-MIDI SysEx event packet.
@@ -36,6 +37,7 @@ typedef struct {
 } midi_output_record_t;
 
 static midi_output_record_t outputs[USB_MANAGED_DEVICE_CAPACITY];
+static midi_output_loss_info_t output_losses;
 
 static uint32_t next_sysex_claim = 1U;
 
@@ -66,6 +68,40 @@ static bool output_matches(unsigned int index,
   return true;
 }
 
+static void output_account_loss(midi_output_record_t *output) {
+
+  if (!output || output->losses_accounted || output->info.generation == 0U)
+    return;
+
+  // Account for this device incarnation once.
+  // A later disconnect or record replacement
+  // must never count the same packets again.
+  output->losses_accounted = true;
+
+  unsigned int queued = output->info.queue_depth;
+  unsigned int submitted = output->info.in_flight;
+  // Submitted packets are part of queue_depth.
+  // A violation means our accounting is already
+  // inconsistent; classify conservatively.
+  if (submitted > queued) {
+    output_losses.invariant_violations++;
+    submitted = queued;
+  }
+
+  if (queued == 0U)
+    return;
+
+  unsigned int unsent = queued - submitted;
+  output_losses.not_submitted += unsent;
+  output_losses.submitted_unconfirmed += submitted;
+  output_losses.loss_events++;
+  output_losses.last_generation = output->info.generation;
+  output_losses.last_state = output->info.state;
+  output_losses.last_error = output->info.last_error;
+  output_losses.last_not_submitted = unsent;
+  output_losses.last_submitted_unconfirmed = submitted;
+}
+
 static void output_fail(midi_output_record_t *output,
     xhci_bulk_out_result_t error) {
 
@@ -78,6 +114,13 @@ static void output_fail(midi_output_record_t *output,
 
   if (output->info.state == MIDI_OUTPUT_RUNNING)
     output->info.state = MIDI_OUTPUT_FAILED;
+
+  // A failed output service cannot safely
+  // resubmit its outstanding packets.
+  //
+  // Account before another path can clear
+  // the in-flight count.
+  output_account_loss(output);
 }
 
 bool midi_output_start_generation(uint32_t generation) {
@@ -134,6 +177,20 @@ bool midi_output_start_generation(uint32_t generation) {
     if (!xhci_bulk_out_async_get(device.slot_id, &hw) ||
         hw.state != XHCI_BULK_OUT_ASYNC_IDLE)
       return false;
+
+    // The replacement device has been verified
+    // and its Bulk OUT endpoint is idle.
+    //
+    // Preserve outstanding loss accounting
+    // before recycling the old software record.
+    if (output->info.generation != 0U &&
+        output->info.generation != generation) {
+
+      if (output->info.state == MIDI_OUTPUT_RUNNING)
+        output->info.state = MIDI_OUTPUT_DISCONNECTED;
+
+      output_account_loss(output);
+    }
 
     *output = (midi_output_record_t){0};
     output->info.state = MIDI_OUTPUT_RUNNING;
@@ -432,6 +489,15 @@ bool midi_output_get_info(uint32_t generation, midi_output_info_t *info) {
   return true;
 }
 
+bool midi_output_loss_get_info(midi_output_loss_info_t *info) {
+
+  if (!info)
+    return false;
+
+  *info = output_losses;
+  return true;
+}
+
 void midi_output_service(void) {
   for (unsigned int i = 0U; i < USB_MANAGED_DEVICE_CAPACITY; i++) {
     midi_output_record_t *output = &outputs[i];
@@ -494,6 +560,10 @@ void midi_output_service(void) {
       if (output->info.state == MIDI_OUTPUT_RUNNING)
         output->info.state = MIDI_OUTPUT_DISCONNECTED;
 
+      // Confirmed completions were reconciled
+      // above. Anything remaining in the queue
+      // has no confirmed delivery outcome.
+      output_account_loss(output);
       continue;
     }
 

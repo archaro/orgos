@@ -566,6 +566,34 @@ static void cmd_midi_output(const char *args) {
     console_printf("  Rejected : %u\n", count - accepted);
     return;
   }
+  p = args;
+  if (console_arg_word(&p, "losses") && console_arg_end(p)) {
+    midi_output_loss_info_t info = {0};
+    if (!midi_output_loss_get_info(&info)) {
+      console_puts("MIDI output loss statistics unavailable.\n");
+      return;
+    }
+
+    console_puts("MIDI output loss accounting:\n");
+    console_printf("  Loss events       : %u\n", info.loss_events);
+    console_printf("  Not submitted     : %llu\n",
+        (unsigned long long)info.not_submitted);
+    console_printf("  Unconfirmed       : %llu\n",
+        (unsigned long long)info.submitted_unconfirmed);
+    console_printf("  Invariant faults  : %u\n", info.invariant_violations);
+    if (info.loss_events != 0U) {
+      console_printf("  Last generation   : %u\n", info.last_generation);
+      console_printf("  Last state        : %s\n",
+          midi_output_state_name(info.last_state));
+      console_printf("  Last error        : %u\n", info.last_error);
+      console_printf("  Last not submitted: %u\n", info.last_not_submitted);
+      console_printf("  Last unconfirmed  : %u\n",
+          info.last_submitted_unconfirmed);
+    }
+
+    return;
+  }
+
   enum { OUTPUT_START, OUTPUT_STOP, OUTPUT_STATUS } action;
   if (console_arg_word(&args, "start")) {
     action = OUTPUT_START;
@@ -575,7 +603,7 @@ static void cmd_midi_output(const char *args) {
     action = OUTPUT_STATUS;
   } else {
     console_puts("Usage: midi output "
-        "[start | stop | status | send | test | sysex]\n");
+        "[start | stop | status  | losses | send | test | sysex]\n");
     return;
   }
   uint32_t generation = 0U;

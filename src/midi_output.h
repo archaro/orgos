@@ -41,6 +41,19 @@ typedef struct {
   uint64_t sysex_cancelled;
 } midi_output_info_t;
 
+typedef struct {
+  uint64_t not_submitted;
+  uint64_t submitted_unconfirmed;
+  uint32_t loss_events;
+  uint32_t invariant_violations;
+
+  uint32_t last_generation;
+  midi_output_state_t last_state;
+  uint32_t last_error;
+  unsigned int last_not_submitted;
+  unsigned int last_submitted_unconfirmed;
+} midi_output_loss_info_t;
+
 bool midi_output_start_generation(uint32_t generation);
 bool midi_output_stop_generation(uint32_t generation);
 bool midi_output_owns_generation(uint32_t generation);
@@ -82,5 +95,10 @@ bool midi_output_sysex_end_claim(uint32_t generation, uint32_t claim);
 bool midi_output_sysex_cancel_claim(uint32_t generation, uint32_t claim);
 
 bool midi_output_get_info(uint32_t generation, midi_output_info_t *info);
+
+// Boot-lifetime accounting for output abandoned
+// when a device disconnects or its service fails.
+// Statistics survive managed-device record reuse.
+bool midi_output_loss_get_info(midi_output_loss_info_t *info);
 
 void midi_output_service(void);
