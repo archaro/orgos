@@ -4,6 +4,7 @@
 #include "console.h"
 #include "console_args.h"
 #include "console_midi.h"
+#include "xhci.h"
 #include "usb_midi.h"
 #include "usb_midi_rx.h"
 #include "midi_monitor.h"
@@ -147,6 +148,15 @@ static void cmd_midi_rx(const char *args) {
     console_printf("  Queue      : %u / %u\n",
         info.queue_depth, USB_MIDI_RX_QUEUE_CAPACITY);
     console_printf("  Queue peak : %u\n", info.queue_peak);
+    xhci_bulk_in_stream_stats_t hw = {0};
+    if (xhci_bulk_in_stream_get_stats(info.slot_id, &hw)) {
+      console_printf("  HW queue   : %u / %u\n",
+          hw.queue_depth, XHCI_BULK_IN_QUEUE_CAPACITY);
+      console_printf("  HW peak    : %u\n", hw.queue_peak);
+      console_printf("  HW pauses  : %u\n", hw.pauses);
+      console_printf("  HW paused  : %s\n", hw.paused ? "Yes" : "No");
+      console_printf("  HW failed  : %s\n", hw.failed ? "Yes" : "No");
+    }
     return;
   }
   usb_midi_event_t event = {0};
@@ -815,9 +825,167 @@ usage:
       "<id> <hh> [hh ...]\n");
 }
 
+typedef struct {
+  bool active;
+  unsigned int port;
+  uint32_t generation;
+  unsigned int expected_count;
+  unsigned int observed;
+  unsigned int mismatches;
+} midi_port_verify_t;
+
+static midi_port_verify_t port_verify;
+
+static void cmd_midi_port_verify(const char *args) {
+  const char *p = args;
+
+  if (console_arg_word(&p, "start")) {
+    unsigned int id = 0U;
+    unsigned int count = 0U;
+
+    if (!console_arg_uint(&p, &id) ||
+        !console_arg_uint(&p, &count) ||
+        !console_arg_end(p) ||
+        id == 0U || id > MIDI_PORT_CAPACITY ||
+        count == 0U)
+      goto usage;
+
+    midi_port_info_t port = {0};
+    midi_port_lifecycle_info_t life = {0};
+
+    if (!midi_ports_get(id, &port) ||
+        !midi_port_lifecycle_get_info(id, &life) ||
+        port.state != MIDI_PORT_BOUND ||
+        port.key.direction != MIDI_PORT_IN ||
+        life.opened_generation != port.generation) {
+      console_puts("Open a bound MIDI IN port first.\n");
+      return;
+    }
+
+    midi_input_info_t input = {0};
+    usb_midi_rx_info_t rx = {0};
+
+    if (!midi_input_get_info(port.generation, &input) ||
+        !usb_midi_rx_get_info(port.generation, &rx) ||
+        !input.attached ||
+        input.queue_depth != 0U ||
+        input.pending_aborts != 0U ||
+        life.retired_depth != 0U ||
+        rx.queue_depth != 0U || rx.staged != 0U) {
+      console_puts("Input queues must be empty first.\n");
+      return;
+    }
+
+    port_verify = (midi_port_verify_t){
+      .active = true,
+      .port = id,
+      .generation = port.generation,
+      .expected_count = count
+    };
+
+    console_printf("MIDI receive verification: ARMED\n"
+        "  Port       : %u\n"
+        "  Generation : %u\n"
+        "  Expected   : %u\n",
+        id, port.generation, count);
+    return;
+  }
+
+  p = args;
+  if (console_arg_word(&p, "drain")) {
+    unsigned int limit = 64U;
+
+    if (!console_arg_end(p) && (!console_arg_uint(&p, &limit) ||
+         !console_arg_end(p) || limit == 0U || limit > 64U))
+      goto usage;
+
+    if (!port_verify.active) {
+      console_puts("No receive verification armed.\n");
+      return;
+    }
+
+    unsigned int drained = 0U;
+
+    while (drained < limit) {
+      midi_port_event_t received = {0};
+
+      if (!midi_port_read(port_verify.port, &received))
+        break;
+
+      // Test pattern: CC 102 on channel 16,
+      // with values cycling from 0 through 127.
+      unsigned int expected = port_verify.observed & 0x7fU;
+
+      if (received.generation != port_verify.generation ||
+          received.event.type != MIDI_STREAM_SHORT ||
+          received.event.message.length != 3U ||
+          received.event.message.status != 0xbfU ||
+          received.event.message.data[0] != 0x66U ||
+          received.event.message.data[1] != expected)
+        port_verify.mismatches++;
+
+      port_verify.observed++;
+      drained++;
+    }
+
+    console_printf("MIDI receive verification:\n"
+        "  Drained    : %u\n Observed   : %u / %u\n Mismatches : %u\n",
+        drained, port_verify.observed, port_verify.expected_count,
+        port_verify.mismatches);
+    return;
+  }
+
+  p = args;
+  if (console_arg_word(&p, "status") &&
+      console_arg_end(p)) {
+
+    if (!port_verify.active) {
+      console_puts("No receive verification armed.\n");
+      return;
+    }
+
+    midi_port_lifecycle_info_t life = {0};
+    bool current = midi_port_lifecycle_get_info(port_verify.port, &life) &&
+        life.opened_generation == port_verify.generation;
+
+    const char *result = "INCOMPLETE";
+
+    if (!current)
+      result = "DEVICE CHANGED";
+    else if (port_verify.mismatches != 0U ||
+        port_verify.observed > port_verify.expected_count)
+      result = "FAIL";
+    else if (port_verify.observed == port_verify.expected_count)
+      result = "PASS";
+
+    console_printf("MIDI receive verification:\n Result     : %s\n"
+        " Port       : %u\n Generation : %u\n"
+        " Observed   : %u / %u\n Mismatches : %u\n",
+        result, port_verify.port,
+        port_verify.generation, port_verify.observed,
+        port_verify.expected_count, port_verify.mismatches);
+    return;
+  }
+
+  p = args;
+  if (console_arg_word(&p, "reset") && console_arg_end(p)) {
+    port_verify = (midi_port_verify_t){0};
+    console_puts("MIDI receive verification: RESET\n");
+    return;
+  }
+
+usage:
+  console_puts("Usage: midi port verify "
+      "[start <id> <count> | drain [1..64] |\n status | reset]\n");
+}
+
 static void cmd_midi_port(const char *args) {
   const char *p = args;
 
+  if (console_arg_word(&p, "verify")) {
+    cmd_midi_port_verify(p);
+    return;
+  }
   if (console_arg_word(&p, "sysex")) {
     cmd_midi_port_sysex(p);
     return;
@@ -1016,7 +1184,7 @@ static void cmd_midi_port(const char *args) {
 
 usage:
   console_puts("Usage: midi port "
-      "[list | status <id> | clear <id> |\n"
+      "[list | status <id> | clear <id> | verify |\n"
       "  bind <id> in|out <generation> <cable> |\n"
       "  open <id> | read <id> | change <id> | close <id> |\n"
       "  send <id> <hh> [hh ...] | sysex ...]\n");
