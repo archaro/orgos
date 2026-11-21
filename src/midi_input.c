@@ -239,6 +239,67 @@ bool midi_input_start_generation(uint32_t generation) {
   return false;
 }
 
+bool midi_input_close_port_cable(uint32_t generation, unsigned int cable) {
+  midi_input_record_t *input = input_find(generation);
+
+  if (!input || !input->info.attached ||
+      !input->info.port_filtered || cable >= input->info.cables)
+    return false;
+
+  uint16_t bit = (uint16_t)(1U << cable);
+  if (!(input->info.open_cables & bit))
+    return false;
+
+  bool last = input->info.open_cables == bit;
+  // Releasing the final cable must also release
+  // the parser's exclusive receiver subscription.
+  // Do this before changing application state.
+  if (last && !usb_midi_rx_unsubscribe(generation, input_accept, input))
+    return false;
+
+  // Discard unread events for the closing cable.
+  // Preserve the relative order of all other cables.
+  unsigned int depth = input->info.queue_depth;
+  unsigned int kept = 0U;
+
+  for (unsigned int i = 0U; i < depth; i++) {
+    unsigned int src = (input->head + i) % MIDI_INPUT_QUEUE_CAPACITY;
+
+    midi_input_event_t event = input->queue[src];
+    if (event.cable == cable)
+      continue;
+
+    unsigned int dest = (input->head + kept) % MIDI_INPUT_QUEUE_CAPACITY;
+
+    input->queue[dest] = event;
+    kept++;
+  }
+
+  input->info.closed_events += depth - kept;
+  input->info.queue_depth = kept;
+
+  // Closing a cable abandons any unfinished MIDI
+  // message or SysEx stream belonging to it.
+  midi_stream_parser_reset(&input->bridge.parsers[cable]);
+
+  // A previously generated terminal abort is no
+  // longer deliverable to the closing application.
+  if (input->pending_abort_cables & bit) {
+    input->pending_abort_cables &= (uint16_t)~bit;
+    input->info.pending_aborts--;
+  }
+
+  input->info.open_cables &= (uint16_t)~bit;
+  input->stalled = false;
+
+  // The USB receiver stays running. With no
+  // subscriber it resumes its idle-discard policy.
+  if (last)
+    input->info.attached = false;
+
+  return true;
+}
+
 bool midi_input_stop_generation(uint32_t generation) {
   midi_input_record_t *input = input_find(generation);
 

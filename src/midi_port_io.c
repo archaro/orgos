@@ -210,6 +210,46 @@ bool midi_port_open(unsigned int id) {
   return opened;
 }
 
+bool midi_port_close(unsigned int id) {
+  midi_port_info_t current = {0};
+
+  if (!port_update(id, &current) || current.state != MIDI_PORT_BOUND)
+    return false;
+
+  port_runtime_t *runtime = &runtimes[id - 1U];
+
+  if (runtime->opened_generation != current.generation)
+    return false;
+
+  uint32_t generation = current.generation;
+  unsigned int cable = current.key.cable;
+
+  if (current.key.direction == MIDI_PORT_IN) {
+    midi_input_info_t input = {0};
+    if (midi_input_get_info(generation, &input) &&
+        input.attached && input.port_filtered &&
+        !midi_input_close_port_cable(generation, cable))
+      return false;
+  } else if (current.key.direction == MIDI_PORT_OUT) {
+    midi_output_info_t output = {0};
+    // Do not abandon an unfinished SysEx session.
+    // Another cable's session does not prevent
+    // this logical port from closing.
+    if (midi_output_get_info(generation, &output) &&
+        output.sysex_active && output.sysex_cable == cable)
+      return false;
+  } else {
+    return false;
+  }
+
+  // Revoke application access, not device ownership.
+  // Previously queued output remains eligible for
+  // transmission by the normal output service.
+  runtime->opened_generation = 0U;
+
+  return true;
+}
+
 bool midi_port_send_short(unsigned int id,
     const midi_short_message_t *message) {
   uint32_t generation = 0U;

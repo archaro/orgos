@@ -78,6 +78,16 @@ bool midi_port_lifecycle_get_info(unsigned int id,
 // Call from foreground context, not an interrupt.
 bool midi_port_open(unsigned int id);
 
+// Close one logical port without stopping the
+// underlying USB-MIDI device.
+//
+// Input closure releases its selected cable.
+// Output closure revokes permission to enqueue.
+//
+// An active output SysEx session must be finished
+// or cancelled before closing its port.
+bool midi_port_close(unsigned int id);
+
 // Nonblocking: success means accepted for sending,
 // not delivered to the external MIDI receiver.
 bool midi_port_send_short(unsigned int id,

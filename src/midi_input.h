@@ -21,6 +21,7 @@ typedef struct {
   bool port_filtered;
   uint16_t open_cables;
   uint64_t unclaimed_packets;
+  uint64_t closed_events;
   uint64_t packets;
   uint64_t malformed;
   uint64_t short_messages;
@@ -45,6 +46,12 @@ bool midi_input_start_generation(uint32_t generation);
 // accepting all cables; an input opened through
 // logical ports accepts only selected cables.
 bool midi_input_open_port_cable(uint32_t generation, unsigned int cable);
+
+// Release one cable opened through a logical port.
+// Other opened cables retain their parser and FIFO.
+// Closing the last cable releases the subscription.
+bool midi_input_close_port_cable(uint32_t generation, unsigned int cable);
+
 bool midi_input_stop_generation(uint32_t generation);
 
 bool midi_input_get_info(uint32_t generation, midi_input_info_t *info);

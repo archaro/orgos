@@ -395,7 +395,8 @@ static void cmd_midi_input(const char *args) {
   console_printf("  Queue peak  : %u\n", info.queue_peak);
   console_printf("  Pending end : %u aborts\n", info.pending_aborts);
   console_printf("  Stalls      : %llu\n", (unsigned long long)info.stalls);
-
+  console_printf("  Closed drop : %llu events\n",
+      (unsigned long long)info.closed_events);
   if (!info.have_last)
     return;
 
@@ -857,6 +858,13 @@ static void cmd_midi_port(const char *args) {
         return;
       }
     }
+    midi_port_lifecycle_info_t life = {0};
+
+    if (midi_port_lifecycle_get_info(id, &life) &&
+        life.opened_generation != 0U && !midi_port_close(id)) {
+      console_puts("Close the MIDI port before clearing its definition.\n");
+      return;
+    }
     bool cleared = midi_ports_clear(id);
     console_printf("MIDI port %u: %s\n", id,
         cleared ? "CLEARED" : "NOT DEFINED");
@@ -875,6 +883,24 @@ static void cmd_midi_port(const char *args) {
 
     console_printf("MIDI port %u: %s\n",
         id, opened ? "OPEN" : "NOT READY");
+    return;
+  }
+
+  p = args;
+  if (console_arg_word(&p, "close")) {
+    unsigned int id = 0U;
+
+    if (!console_arg_uint(&p, &id) || !console_arg_end(p) ||
+        id == 0U || id > MIDI_PORT_CAPACITY)
+      goto usage;
+
+    if (console_sysex[id - 1U].active) {
+      console_puts("End or cancel SysEx before closing this port.\n");
+      return;
+    }
+
+    bool closed = midi_port_close(id);
+    console_printf("MIDI port %u: %s\n", id, closed ? "CLOSED" : "NOT OPEN");
     return;
   }
 
@@ -952,7 +978,7 @@ usage:
   console_puts("Usage: midi port "
       "[list | status <id> | clear <id> |\n"
       "  bind <id> in|out <generation> <cable> |\n"
-      "  open <id> | read <id> | change <id> |\n"
+      "  open <id> | read <id> | change <id> | close <id> |\n"
       "  send <id> <hh> [hh ...] | sysex ...]\n");
 }
 
