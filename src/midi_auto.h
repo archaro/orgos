@@ -13,6 +13,12 @@ typedef struct {
   uint32_t output_started;
   uint32_t output_skipped;
   uint32_t output_failed;
+  uint32_t input_retries;
+  uint32_t output_retries;
+  uint32_t input_terminal;
+  uint32_t output_terminal;
+  uint32_t input_pending;
+  uint32_t output_pending;
 } midi_auto_info_t;
 
 // Controls admission of new automatic MIDI

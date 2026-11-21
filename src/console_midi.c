@@ -255,6 +255,13 @@ static void cmd_midi_auto(const char *args) {
     console_printf("  OUT started : %u\n", (unsigned int)info.output_started);
     console_printf("  OUT skipped : %u\n", (unsigned int)info.output_skipped);
     console_printf("  OUT failed  : %u\n", (unsigned int)info.output_failed);
+    console_printf("  IN retries  : %u\n", (unsigned int)info.input_retries);
+    console_printf("  OUT retries : %u\n", (unsigned int)info.output_retries);
+    console_printf("  IN terminal : %u\n", (unsigned int)info.input_terminal);
+    console_printf("  OUT terminal: %u\n",
+        (unsigned int)info.output_terminal);
+    console_printf("  IN pending  : %u\n", (unsigned int)info.input_pending);
+    console_printf("  OUT pending : %u\n", (unsigned int)info.output_pending);
     if (info.attempts != 0U)
       console_printf("  Last gen   : %u\n",
           (unsigned int)info.last_generation);
@@ -399,7 +406,6 @@ static void cmd_midi_input(const char *args) {
       (unsigned long long)info.closed_events);
   if (!info.have_last)
     return;
-
   console_printf("  Last cable  : %u\n", (unsigned int)info.last_cable);
   console_puts("  Last event:\n");
 
