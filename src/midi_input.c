@@ -138,6 +138,17 @@ static bool input_accept(uint32_t generation,
       input->info.generation != generation)
     return false;
 
+  // Logical MIDI ports subscribe independently
+  // to the virtual cables of one USB device.
+  //
+  // Do not let traffic on an unopened cable
+  // consume another port's application queue.
+  if (input->info.port_filtered && packet->cable < input->info.cables &&
+      !(input->info.open_cables & (uint16_t)(1U << packet->cable))) {
+    input->info.unclaimed_packets++;
+    return true;
+  }
+
   midi_stream_parser_t next = {0};
   midi_usb_batch_t batch = {0};
 
@@ -236,6 +247,41 @@ bool midi_input_stop_generation(uint32_t generation) {
     return false;
 
   input_detach(input, false);
+  return true;
+}
+
+bool midi_input_open_port_cable(uint32_t generation, unsigned int cable) {
+  midi_input_record_t *input = input_find(generation);
+
+  if (input && input->info.attached) {
+    if (cable >= input->info.cables)
+      return false;
+
+    // A parser explicitly started by the caller
+    // retains its original all-cable policy.
+    if (input->info.port_filtered)
+      input->info.open_cables |= (uint16_t)(1U << cable);
+
+    return true;
+  }
+
+  usb_midi_rx_info_t rx = {0};
+
+  if (!usb_midi_rx_get_info(generation, &rx) ||
+      rx.state != USB_MIDI_RX_RUNNING || cable >= rx.cables)
+    return false;
+
+  // Create one parser for this device generation.
+  // Additional logical ports share that parser.
+  if (!midi_input_start_generation(generation))
+    return false;
+
+  input = input_find(generation);
+
+  // Start with only the requested cable selected.
+  input->info.port_filtered = true;
+  input->info.open_cables = (uint16_t)(1U << cable);
+
   return true;
 }
 

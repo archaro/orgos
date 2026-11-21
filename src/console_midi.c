@@ -370,6 +370,12 @@ static void cmd_midi_input(const char *args) {
   console_printf("MIDI input (generation %u):\n", (unsigned int)generation);
   console_printf("  Attached    : %s\n", info.attached ? "Yes" : "No");
   console_printf("  Lost        : %s\n", info.lost ? "Yes" : "No");
+  console_printf("  Selection   : %s\n",
+      info.port_filtered ? "Opened ports" : "All cables");
+  if (info.port_filtered)
+    console_printf("  Open mask   : 0x%04x\n", (unsigned int)info.open_cables);
+  console_printf("  Unclaimed   : %llu packets\n",
+      (unsigned long long)info.unclaimed_packets);
   console_printf("  Cables      : %u\n", (unsigned int)info.cables);
   console_printf("  Packets     : %llu\n", (unsigned long long)info.packets);
   console_printf("  Malformed   : %llu\n",

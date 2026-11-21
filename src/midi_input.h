@@ -18,7 +18,9 @@ typedef struct {
   uint8_t cables;
   bool attached;
   bool lost;
-
+  bool port_filtered;
+  uint16_t open_cables;
+  uint64_t unclaimed_packets;
   uint64_t packets;
   uint64_t malformed;
   uint64_t short_messages;
@@ -38,6 +40,11 @@ typedef struct {
 } midi_input_info_t;
 
 bool midi_input_start_generation(uint32_t generation);
+// Attach input for one logical MIDI port.
+// An explicitly started input parser continues
+// accepting all cables; an input opened through
+// logical ports accepts only selected cables.
+bool midi_input_open_port_cable(uint32_t generation, unsigned int cable);
 bool midi_input_stop_generation(uint32_t generation);
 
 bool midi_input_get_info(uint32_t generation, midi_input_info_t *info);

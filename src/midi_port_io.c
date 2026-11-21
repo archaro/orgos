@@ -189,21 +189,19 @@ bool midi_port_open(unsigned int id) {
       opened = midi_output_start_generation(generation);
 
   } else if (current.key.direction == MIDI_PORT_IN) {
-    midi_input_info_t input = {0};
+    usb_midi_rx_info_t rx = {0};
 
-    if (midi_input_get_info(generation, &input) && input.attached) {
-      opened = cable < input.cables;
-    } else {
-      usb_midi_rx_info_t rx = {0};
-
-      if (!usb_midi_rx_get_info(generation, &rx) ||
-          rx.state != USB_MIDI_RX_RUNNING) {
-        if (!usb_midi_rx_start_generation(generation))
-          return false;
-      }
-
-      opened = midi_input_start_generation(generation);
+    // The USB receiver is normally already active.
+    // Retain manual startup for diagnostic operation.
+    if (!usb_midi_rx_get_info(generation, &rx) ||
+        rx.state != USB_MIDI_RX_RUNNING) {
+      if (!usb_midi_rx_start_generation(generation))
+        return false;
     }
+
+    // Claim only this logical port's virtual cable.
+    // Other opened ports can share the same parser.
+    opened = midi_input_open_port_cable(generation, cable);
   }
 
   if (opened)
