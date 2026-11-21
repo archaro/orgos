@@ -70,3 +70,8 @@ bool midi_input_read_cable(uint32_t generation,
     unsigned int cable, midi_input_event_t *event);
 
 void midi_input_service(void);
+
+// Exercise queue saturation, retry, message ordering
+// and atomic SysEx packet acceptance without USB
+// hardware or modification of live input records.
+bool midi_input_backpressure_selftest(void);

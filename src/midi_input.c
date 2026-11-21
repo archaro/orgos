@@ -480,3 +480,156 @@ void midi_input_service(void) {
     input_detach(input, true);
   }
 }
+
+bool midi_input_backpressure_selftest(void) {
+  // Static storage avoids placing the entire
+  // application queue on the kernel stack.
+  static midi_input_record_t test;
+
+  midi_input_event_t received = {0};
+
+  usb_midi_event_t cc = {
+    .cable = 0U,
+    .cin = 0x0bU,
+    .length = 3U,
+    .data = {0xbfU, 0x66U, 0U}
+  };
+
+  test = (midi_input_record_t){0};
+  test.info.generation = 1U;
+  test.info.attached = true;
+  test.info.cables = 1U;
+
+  if (!midi_usb_bridge_init(&test.bridge, 1U))
+    return false;
+
+  // Fill the application queue completely.
+  for (unsigned int i = 0U; i < MIDI_INPUT_QUEUE_CAPACITY; i++) {
+    cc.data[2] = (uint8_t)i;
+
+    if (!input_accept(1U, &cc, &test))
+      return false;
+  }
+
+  if (test.info.queue_depth != MIDI_INPUT_QUEUE_CAPACITY ||
+      test.info.packets != MIDI_INPUT_QUEUE_CAPACITY ||
+      test.info.stalls != 0U)
+    return false;
+
+  // The next packet must be refused without
+  // modifying the parser or application queue.
+  cc.data[2] = (uint8_t)MIDI_INPUT_QUEUE_CAPACITY;
+
+  if (input_accept(1U, &cc, &test) || input_accept(1U, &cc, &test) ||
+      test.info.stalls != 1U ||
+      test.info.packets != MIDI_INPUT_QUEUE_CAPACITY)
+    return false;
+
+  // Free exactly one event and retry the packet.
+  if (!input_read_matching(&test, -1, &received) ||
+      received.event.type != MIDI_STREAM_SHORT ||
+      received.event.message.data[1] != 0U)
+    return false;
+
+  if (!input_accept(1U, &cc, &test) ||
+      test.info.queue_depth != MIDI_INPUT_QUEUE_CAPACITY ||
+      test.info.stalls != 1U || test.stalled)
+    return false;
+
+  // All remaining events, including the retried
+  // packet, must appear exactly once and in order.
+  for (unsigned int i = 1U; i <= MIDI_INPUT_QUEUE_CAPACITY; i++) {
+    if (!input_read_matching(&test, -1, &received) ||
+        received.event.type != MIDI_STREAM_SHORT ||
+        received.event.message.status != 0xbfU ||
+        received.event.message.data[0] != 0x66U ||
+        received.event.message.data[1] != (uint8_t)i)
+      return false;
+  }
+
+  if (test.info.queue_depth != 0U ||
+      test.info.packets != MIDI_INPUT_QUEUE_CAPACITY + 1U)
+    return false;
+
+  // Repeat with a three-event SysEx packet.
+  // It must be accepted atomically, never partly.
+  test = (midi_input_record_t){0};
+  test.info.generation = 1U;
+  test.info.attached = true;
+  test.info.cables = 1U;
+
+  if (!midi_usb_bridge_init(&test.bridge, 1U))
+    return false;
+
+  for (unsigned int i = 0U; i < MIDI_INPUT_QUEUE_CAPACITY - 1U; i++) {
+    cc.data[2] = (uint8_t)i;
+    if (!input_accept(1U, &cc, &test))
+      return false;
+  }
+
+  usb_midi_event_t begin = {
+    .cable = 0U,
+    .cin = 0x04U,
+    .length = 3U,
+    .data = {0xf0U, 0x11U, 0x22U}
+  };
+
+  // One free entry is insufficient for the
+  // BEGIN event and two payload-byte events.
+  if (input_accept(1U, &begin, &test) || test.bridge.parsers[0].in_sysex ||
+      test.info.queue_depth != MIDI_INPUT_QUEUE_CAPACITY - 1U)
+    return false;
+
+  // Free enough space for the complete packet.
+  for (unsigned int i = 0U; i < 2U; i++) {
+    if (!input_read_matching(&test, -1, &received) ||
+        received.event.type != MIDI_STREAM_SHORT ||
+        received.event.message.data[1] != i)
+      return false;
+  }
+
+  if (!input_accept(1U, &begin, &test) || !test.bridge.parsers[0].in_sysex ||
+      test.info.queue_depth != MIDI_INPUT_QUEUE_CAPACITY)
+    return false;
+
+  // Verify all preceding short messages retain
+  // their order after the previously rejected SysEx.
+  for (unsigned int i = 2U; i < MIDI_INPUT_QUEUE_CAPACITY - 1U; i++) {
+
+    if (!input_read_matching(&test, -1, &received) ||
+        received.event.type != MIDI_STREAM_SHORT ||
+        received.event.message.data[1] != i)
+      return false;
+  }
+
+  if (!input_read_matching(&test, -1, &received) ||
+      received.event.type != MIDI_STREAM_SYSEX_BEGIN)
+    return false;
+
+  if (!input_read_matching(&test, -1, &received) ||
+      received.event.type != MIDI_STREAM_SYSEX_DATA ||
+      received.event.byte != 0x11U)
+    return false;
+
+  if (!input_read_matching(&test, -1, &received) ||
+      received.event.type != MIDI_STREAM_SYSEX_DATA ||
+      received.event.byte != 0x22U)
+    return false;
+
+  usb_midi_event_t end = {
+    .cable = 0U,
+    .cin = 0x05U,
+    .length = 1U,
+    .data = {0xf7U, 0U, 0U}
+  };
+
+  if (!input_accept(1U, &end, &test) ||
+      !input_read_matching(&test, -1, &received) ||
+      received.event.type != MIDI_STREAM_SYSEX_END ||
+      test.bridge.parsers[0].in_sysex ||
+      test.info.queue_depth != 0U)
+    return false;
+
+  return true;
+}
+

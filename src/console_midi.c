@@ -314,6 +314,12 @@ static void midi_console_emit(const midi_stream_output_t *output) {
 static void cmd_midi_input(const char *args) {
   enum { INPUT_START, INPUT_STOP, INPUT_STATUS, INPUT_READ } action;
 
+  const char *probe = args;
+  if (console_arg_word(&probe, "selftest") && console_arg_end(probe)) {
+    bool passed = midi_input_backpressure_selftest();
+    console_printf("MIDI input backpressure: %s\n", passed ? "PASS" : "FAIL");
+    return;
+  }
   if (console_arg_word(&args, "start")) {
     action = INPUT_START;
   } else if (console_arg_word(&args, "stop")) {
@@ -323,7 +329,7 @@ static void cmd_midi_input(const char *args) {
   } else if (console_arg_word(&args, "read")) {
     action = INPUT_READ;
   } else {
-    console_puts("Usage: midi input [start | stop | status | read] <generation>\n");
+    console_puts("Usage: midi input [[start | stop | status | read] <generation>] | selftest\n");
     return;
   }
 
