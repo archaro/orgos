@@ -222,6 +222,10 @@ static usb_enum_result_t discover_port(
   if (!state || admitted_port == 0U || admitted_port > state->hub_ports)
     return USB_ENUM_PORT_FAILED;
 
+  // Retain the admitted physical port before even the first status read:
+  // the device may have disappeared since admission inspected it.
+  state->hub_port = admitted_port;
+
   // Inspect the selected port, not the complete
   // hub topology. Other ports are outside the
   // scope of this operation.
@@ -241,9 +245,6 @@ static usb_enum_result_t discover_port(
   if (!(current.status & USB_PORT_CONNECTED))
     return USB_ENUM_DEVICE_NOT_FOUND;
 
-  // Retain the physical connection identity
-  // before any fallible debounce or reset.
-  state->hub_port = admitted_port;
   usb_hub_port_t stable = {0};
   result = usb_hub_port_debounce(admitted_port, &stable);
 
@@ -1038,23 +1039,28 @@ bool usb_enumeration_rearm_rejected(uint8_t port) {
 
   if (!record || !record->attempted ||
       record->device.state != USB_DEVICE_DETACHED ||
-      record->device.generation != 0U || record->device.slot_id != 0U)
+      record->device.generation != 0U || record->device.slot_id != 0U ||
+      record->device.address != 0U)
     return false;
 
   // Reclaim a failed discovery attempt only when
   // no downstream xHCI slot was ever requested.
   //
-  // Unsupported speed, debounce failure and reset
-  // failure all occur before Enable Slot. A failed
+  // Disappearance before discovery, unsupported speed, debounce failure
+  // and reset failure all occur before Enable Slot. A failed
   // or uncertain Enable Slot outcome must never
   // be discarded by this recovery path.
   usb_enum_result_t result = record->enumeration.result;
-  if ((result != USB_ENUM_UNSUPPORTED_SPEED &&
+  if ((result != USB_ENUM_DEVICE_NOT_FOUND &&
+       result != USB_ENUM_UNSUPPORTED_SPEED &&
        result != USB_ENUM_DEBOUNCE_FAILED &&
        result != USB_ENUM_RESET_FAILED) ||
       record->enumeration.hub_port != port ||
       record->enumeration.slot_attempted ||
       record->enumeration.slot_confirmed ||
+      record->enumeration.slot_id != 0U || record->enumeration.address != 0U ||
+      record->enumeration.prepare_attempted || record->enumeration.address_attempted ||
+      record->enumeration.ep0_operation_failed || record->enumeration.bulk_attempted ||
       record->enumeration.stage != USB_ENUM_STAGE_DISCOVER)
     return false;
 
