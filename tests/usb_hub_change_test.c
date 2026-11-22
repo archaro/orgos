@@ -27,6 +27,10 @@ static unsigned int quiesce_calls, disable_calls, recycle_calls;
 static bool disappear_on_discovery;
 static bool ownership_available = true;
 static unsigned int enable_slot_calls;
+static bool allow_control_in;
+static xhci_control_result_t control_result;
+static uint16_t control_length;
+static unsigned int control_calls;
 
 bool xhci_downstream_quiesce(uint8_t slot) {
   assert(slot == 2U);
@@ -208,10 +212,15 @@ xhci_control_result_t xhci_control_in(const xhci_setup_packet_t *setup UNUSED,
   return XHCI_CONTROL_NOT_READY;
 }
 
-xhci_control_result_t xhci_downstream_control_in(uint8_t slot UNUSED,
-    const xhci_setup_packet_t *setup UNUSED, xhci_control_info_t *info UNUSED) {
-  assert(false);
-  return XHCI_CONTROL_NOT_READY;
+xhci_control_result_t xhci_downstream_control_in(uint8_t slot,
+    const xhci_setup_packet_t *setup, xhci_control_info_t *info) {
+  assert(allow_control_in); // Discovery-disappearance tests must never reach EP0.
+  assert(slot == 2U && setup->request_type == 0x80U);
+  assert(setup->request == USB_REQ_GET_DESCRIPTOR && setup->value == 0x0100U);
+  assert(setup->index == 0U && setup->length == 8U);
+  control_calls++;
+  *info = (xhci_control_info_t){.slot_id = slot, .length = control_length};
+  return control_result;
 }
 
 xhci_control_result_t xhci_downstream_control_no_data(uint8_t slot UNUSED,
@@ -278,7 +287,8 @@ static void fixture(void) {
   ownership = XHCI_CONNECTION_OWNED;
   ownership_available = true;
   disappear_on_discovery = false;
-  enable_slot_calls = 0U;
+  enable_slot_calls = control_calls = 0U;
+  allow_control_in = false;
   disable_result = XHCI_DISABLE_OK;
   quiesce_calls = disable_calls = recycle_calls = 0U;
   // Initial attachment's connection epoch was consumed by enumeration.
@@ -582,6 +592,77 @@ static void test_discovery_rearm_history(void) {
   assert(enable_slot_calls == 0U);
 }
 
+static void test_managed_connection_selection(void) {
+  fixture();
+  usb_device_t device = {0};
+  assert(usb_get_device_by_connection(1U, 1U, 1U, &device));
+  assert(device.generation == 7U);
+  // A unique but latched connection cannot allocate a different free record.
+  assert(!usb_managed_record_available(1U, 1U, 1U));
+  managed_devices[1] = managed_devices[0];
+  usb_managed_device_t before[USB_MANAGED_DEVICE_CAPACITY];
+  memcpy(before, managed_devices, sizeof(before));
+  usb_device_t previous = device;
+  assert(!usb_get_device_by_connection(1U, 1U, 1U, &device));
+  assert(memcmp(&device, &previous, sizeof(device)) == 0);
+  usb_enum_info_t enumeration = {0};
+  assert(!usb_get_enumeration_by_connection(1U, 1U, 1U, &enumeration));
+  assert(!usb_managed_record_available(1U, 1U, 1U));
+  // Ambiguity on port 1 is not an empty port-1 connection, and does not
+  // prevent an unrelated empty connection from selecting an unused record.
+  assert(usb_managed_select_for_enumeration(1U, 1U, 2U) == &managed_devices[2]);
+  assert(memcmp(before, managed_devices, sizeof(before)) == 0);
+
+  managed_devices[1] = (usb_managed_device_t){0};
+  managed_devices[0].attempted = false;
+  managed_devices[0].device.state = USB_DEVICE_DETACHED;
+  managed_devices[0].device.slot_id = 0U;
+  // Retained history is reused only after ownership is positively unowned.
+  ownership = XHCI_CONNECTION_UNOWNED;
+  assert(usb_managed_select_for_enumeration(1U, 1U, 1U) == &managed_devices[0]);
+  ownership = XHCI_CONNECTION_OWNED;
+  assert(!usb_managed_record_available(1U, 1U, 1U));
+  ownership = XHCI_CONNECTION_UNCERTAIN;
+  assert(!usb_managed_record_available(1U, 1U, 1U));
+  ownership_available = false;
+  assert(!usb_managed_record_available(1U, 1U, 1U));
+  assert(!usb_managed_record_available(0U, 1U, 1U));
+  assert(!usb_managed_record_available(1U, 0U, 1U));
+  assert(!usb_managed_record_available(1U, 1U, 0U));
+  assert(enable_slot_calls == 0U && quiesce_calls == 0U && recycle_calls == 0U);
+}
+
+static void test_enumeration_control_results(void) {
+  fixture();
+  allow_control_in = true;
+  const struct {
+    xhci_control_result_t result;
+    uint16_t length;
+    bool accepted;
+    bool failed;
+    xhci_control_result_t retained;
+  } cases[] = {
+    {XHCI_CONTROL_OK, 8U, true, false, XHCI_CONTROL_RING_FAILED},
+    {XHCI_CONTROL_OK, 7U, false, true, XHCI_CONTROL_RING_FAILED},
+    {XHCI_CONTROL_TIMEOUT, 8U, false, true, XHCI_CONTROL_TIMEOUT},
+    {XHCI_CONTROL_TRANSFER_FAILED, 0U, false, true, XHCI_CONTROL_TRANSFER_FAILED}
+  };
+  for (unsigned int i = 0U; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    control_result = cases[i].result;
+    control_length = cases[i].length;
+    usb_enum_info_t state = {.slot_id = 2U, .ep0_result = XHCI_CONTROL_RING_FAILED};
+    xhci_control_info_t info = {0};
+    assert(control_in(&state, 0x80U, USB_REQ_GET_DESCRIPTOR,
+        0x0100U, 8U, &info) == cases[i].accepted);
+    assert(state.ep0_operation_failed == cases[i].failed);
+    assert(state.ep0_result == cases[i].retained);
+    assert(info.length == cases[i].length && info.slot_id == 2U);
+    assert(control_calls == i + 1U);
+  }
+  assert(enable_slot_calls == 0U && quiesce_calls == 0U && recycle_calls == 0U);
+  allow_control_in = false;
+}
+
 int main(void) {
   test_disconnect();
   test_disable();
@@ -592,6 +673,8 @@ int main(void) {
   test_discovery_disappearance();
   test_discovery_rearm_gates();
   test_discovery_rearm_history();
+  test_managed_connection_selection();
+  test_enumeration_control_results();
   puts("USB hub port-change lifecycle: PASS");
   return 0;
 }

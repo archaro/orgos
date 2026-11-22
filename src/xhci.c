@@ -1330,6 +1330,14 @@ xhci_configure_result_t xhci_configure(xhci_configure_info_t *result) {
   return XHCI_CONFIGURE_OK;
 }
 
+// Fetch once per operation, as before; callers retain their own failure status
+// and ordering relative to DMA handoff, publication and completion ownership.
+static bool xhci_cache_get_page_geometry(cache_info_t *cache) {
+  return cache_get_info(cache) && cache->data_line_size != 0U &&
+      cache->data_line_size <= PAGE_SIZE &&
+      (cache->data_line_size & (cache->data_line_size - 1U)) == 0U;
+}
+
 static bool xhci_command_link_cycle(unsigned int cycle) {
   xhci_trb_t *ring =
       (xhci_trb_t *)controller_dma.command_ring.virtual;
@@ -1343,6 +1351,8 @@ static bool xhci_command_link_cycle(unsigned int cycle) {
       (link->control & ~XHCI_TRB_CYCLE) |
       (cycle ? XHCI_TRB_CYCLE : 0U);
 
+  // Preserve this command-link path's existing nonzero/power-of-two check;
+  // page-bounded transfer/context checks use xhci_cache_get_page_geometry().
   cache_info_t cache;
   if (!cache_get_info(&cache) ||
       cache.data_line_size == 0 ||
@@ -1538,9 +1548,7 @@ static xhci_event_result_t xhci_event_poll(xhci_event_t *result) {
     return XHCI_EVENT_ERROR;
 
   cache_info_t cache;
-  if (!cache_get_info(&cache) || cache.data_line_size == 0 ||
-      cache.data_line_size > PAGE_SIZE ||
-      (cache.data_line_size & (cache.data_line_size - 1U)))
+  if (!xhci_cache_get_page_geometry(&cache))
     return XHCI_EVENT_ERROR;
 
   xhci_trb_t *ring = (xhci_trb_t *)controller_dma.event_ring.virtual;
@@ -2404,9 +2412,7 @@ xhci_command_result_t xhci_command_submit(const xhci_trb_t *command,
 
   // Validate the controller's cache-line geometry.
   cache_info_t cache;
-  if (!cache_get_info(&cache) || cache.data_line_size == 0 ||
-      cache.data_line_size > PAGE_SIZE ||
-      (cache.data_line_size & (cache.data_line_size - 1U)))
+  if (!xhci_cache_get_page_geometry(&cache))
     return XHCI_COMMAND_CACHE_ERROR;
 
   size_t line = cache.data_line_size;
@@ -2781,9 +2787,7 @@ xhci_device_result_t xhci_device_prepare(xhci_device_info_t *result) {
   dcbaa[internal_hub_slot] = internal_hub.output.bus;
 
   cache_info_t cache;
-  if (!cache_get_info(&cache) || cache.data_line_size == 0 ||
-      cache.data_line_size > PAGE_SIZE ||
-      (cache.data_line_size & (cache.data_line_size - 1U)))
+  if (!xhci_cache_get_page_geometry(&cache))
     goto published_failed;
 
   uintptr_t address = (uintptr_t)&dcbaa[internal_hub_slot];
@@ -2924,10 +2928,7 @@ xhci_device_result_t xhci_downstream_prepare(
   uint64_t *dcbaa = controller_dma.dcbaa.virtual;
   dcbaa[device->slot_id] = device->output.bus;
   cache_info_t cache;
-  if (!cache_get_info(&cache) ||
-      cache.data_line_size == 0U ||
-      cache.data_line_size > PAGE_SIZE ||
-      (cache.data_line_size & (cache.data_line_size - 1U)))
+  if (!xhci_cache_get_page_geometry(&cache))
     return XHCI_DEVICE_DMA_FAILED;
 
   uintptr_t address = (uintptr_t)&dcbaa[device->slot_id];
@@ -2996,10 +2997,7 @@ xhci_bulk_config_result_t xhci_downstream_bulk_configure(
     return XHCI_BULK_CONFIG_NOT_READY;
 
   cache_info_t cache;
-  if (!cache_get_info(&cache) ||
-      cache.data_line_size == 0U ||
-      cache.data_line_size > PAGE_SIZE ||
-      (cache.data_line_size & (cache.data_line_size - 1U)))
+  if (!xhci_cache_get_page_geometry(&cache))
     return XHCI_BULK_CONFIG_DMA_FAILED;
 
   device->lifecycle.bulk_attempted = true;
@@ -3199,9 +3197,7 @@ xhci_bulk_out_result_t xhci_bulk_out_async_start(
 
   cache_info_t cache = {0};
 
-  if (!cache_get_info(&cache) || cache.data_line_size == 0U ||
-      cache.data_line_size > PAGE_SIZE ||
-      (cache.data_line_size & (cache.data_line_size - 1U)))
+  if (!xhci_cache_get_page_geometry(&cache))
     return XHCI_BULK_OUT_NOT_READY;
 
   dma_buffer_t *buffer = &device->bulk_out_buffer;
@@ -3427,10 +3423,7 @@ void xhci_bulk_out_async_service(void) {
 
     cache_info_t cache = {0};
 
-    if (!cache_get_info(&cache) ||
-        cache.data_line_size == 0U ||
-        cache.data_line_size > PAGE_SIZE ||
-        (cache.data_line_size & (cache.data_line_size - 1U))) {
+    if (!xhci_cache_get_page_geometry(&cache)) {
       device->bulk_out_failed = true;
       async->state = XHCI_BULK_OUT_ASYNC_FAILED;
       async->result = XHCI_BULK_OUT_RING_FAILED;
@@ -3572,9 +3565,7 @@ static xhci_bulk_in_arm_result_t xhci_bulk_in_arm_one(
     return XHCI_BULK_IN_ARM_NOT_READY;
 
   cache_info_t cache;
-  if (!cache_get_info(&cache) || cache.data_line_size == 0U ||
-      cache.data_line_size > PAGE_SIZE ||
-      (cache.data_line_size & (cache.data_line_size - 1U)))
+  if (!xhci_cache_get_page_geometry(&cache))
     return XHCI_BULK_IN_ARM_NOT_READY;
 
   dma_buffer_t *buffer = &device->bulk_in_buffer;
@@ -3674,9 +3665,7 @@ static xhci_bulk_in_state_t xhci_downstream_bulk_in_status(
           // The completed TD has been consumed.
           // Advance the producer before another arm.
           cache_info_t cache;
-          if (!cache_get_info(&cache) || cache.data_line_size == 0U ||
-              cache.data_line_size > PAGE_SIZE ||
-              (cache.data_line_size & (cache.data_line_size - 1U)) ||
+          if (!xhci_cache_get_page_geometry(&cache) ||
               !xhci_bulk_in_advance(device, cache.data_line_size)) {
             receiver->state = XHCI_BULK_IN_FAILED;
           } else {
@@ -3980,9 +3969,7 @@ xhci_hub_result_t xhci_hub_configure(
     return XHCI_HUB_NOT_READY;
 
   cache_info_t cache;
-  if (!cache_get_info(&cache) || cache.data_line_size == 0U ||
-      cache.data_line_size > PAGE_SIZE ||
-      (cache.data_line_size & (cache.data_line_size - 1U)))
+  if (!xhci_cache_get_page_geometry(&cache))
     return XHCI_HUB_DMA_FAILED;
 
   uint32_t size = internal_hub.context_size;
@@ -4120,9 +4107,7 @@ xhci_address_result_t xhci_address_device( xhci_address_info_t *result) {
   // Invalidate only the relevant cache lines, while keeping
   // the allocation under device ownership.
   cache_info_t cache;
-  if (!cache_get_info(&cache) || cache.data_line_size == 0 ||
-      cache.data_line_size > PAGE_SIZE ||
-      (cache.data_line_size & (cache.data_line_size - 1U)))
+  if (!xhci_cache_get_page_geometry(&cache))
     return XHCI_ADDRESS_VERIFY_FAILED;
 
   uint32_t size = internal_hub.context_size;
@@ -4248,9 +4233,7 @@ xhci_address_result_t xhci_address_downstream(
   // Refresh the Output Slot and EP0 contexts.
   // DMA ownership remains with the controller.
   cache_info_t cache;
-  if (!cache_get_info(&cache) || cache.data_line_size == 0U ||
-      cache.data_line_size > PAGE_SIZE ||
-      (cache.data_line_size & (cache.data_line_size - 1U)))
+  if (!xhci_cache_get_page_geometry(&cache))
     return XHCI_ADDRESS_VERIFY_FAILED;
 
   uint8_t *output = device->output.virtual;
@@ -4304,9 +4287,7 @@ xhci_ep0_update_result_t xhci_downstream_ep0_update(uint8_t slot_id,
     return XHCI_EP0_UPDATE_NOT_READY;
 
   cache_info_t cache;
-  if (!cache_get_info(&cache) || cache.data_line_size == 0U ||
-      cache.data_line_size > PAGE_SIZE ||
-      (cache.data_line_size & (cache.data_line_size - 1U)))
+  if (!xhci_cache_get_page_geometry(&cache))
     return XHCI_EP0_UPDATE_DMA_FAILED;
 
   uint32_t size = device->context_size;
@@ -4512,9 +4493,7 @@ static xhci_control_result_t xhci_control_transfer( xhci_device_t *device,
     return XHCI_CONTROL_NOT_READY;
 
   cache_info_t cache;
-  if (!cache_get_info(&cache) || cache.data_line_size == 0U ||
-      cache.data_line_size > PAGE_SIZE ||
-      (cache.data_line_size & (cache.data_line_size - 1U)))
+  if (!xhci_cache_get_page_geometry(&cache))
     return XHCI_CONTROL_NOT_READY;
 
   // A new control-transfer attempt has passed the
@@ -4806,9 +4785,7 @@ xhci_interrupt_config_result_t xhci_hub_interrupt_configure(uint8_t address,
     return XHCI_INTERRUPT_CONFIG_NOT_READY;
 
   cache_info_t cache;
-  if (!cache_get_info(&cache) || cache.data_line_size == 0U ||
-      cache.data_line_size > PAGE_SIZE ||
-      (cache.data_line_size & (cache.data_line_size - 1U)))
+  if (!xhci_cache_get_page_geometry(&cache))
     return XHCI_INTERRUPT_CONFIG_DMA_FAILED;
 
   // Do not retry after a partially completed operation.
@@ -4962,9 +4939,7 @@ static xhci_hub_notify_result_t xhci_hub_notify_arm(void) {
     return XHCI_HUB_NOTIFY_NOT_READY;
 
   cache_info_t cache;
-  if (!cache_get_info(&cache) || cache.data_line_size == 0U ||
-      cache.data_line_size > PAGE_SIZE ||
-      (cache.data_line_size & (cache.data_line_size - 1U)))
+  if (!xhci_cache_get_page_geometry(&cache))
     return XHCI_HUB_NOTIFY_NOT_READY;
 
   // Verify controller access before submitting a transfer.
@@ -5072,9 +5047,7 @@ void xhci_hub_notify_service(void) {
   hub_notify_info.notifications++;
 
   cache_info_t cache;
-  if (!cache_get_info(&cache) || cache.data_line_size == 0U ||
-      cache.data_line_size > PAGE_SIZE ||
-      (cache.data_line_size & (cache.data_line_size - 1U)) ||
+  if (!xhci_cache_get_page_geometry(&cache) ||
       !xhci_hub_notify_advance(cache.data_line_size)) {
     hub_notify_info.state = XHCI_HUB_NOTIFY_FAILED;
     return;
@@ -6628,9 +6601,7 @@ xhci_recycle_result_t xhci_downstream_recycle(uint8_t slot_id) {
     return XHCI_RECYCLE_DMA_FAILED;
 
   cache_info_t cache;
-  if (!cache_get_info(&cache) || cache.data_line_size == 0U ||
-      cache.data_line_size > PAGE_SIZE ||
-      (cache.data_line_size & (cache.data_line_size - 1U)))
+  if (!xhci_cache_get_page_geometry(&cache))
     return XHCI_RECYCLE_DMA_FAILED;
 
   // Disable Slot has succeeded. Remove the

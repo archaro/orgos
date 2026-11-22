@@ -13,6 +13,7 @@
 #define USB_RT_HUB_PORT_OUT 0x23U
 
 #define USB_REQ_GET_STATUS         0x00U
+#define USB_REQ_CLEAR_FEATURE      0x01U
 #define USB_REQ_SET_FEATURE        0x03U
 #define USB_REQ_GET_CONFIGURATION  0x08U
 #define USB_REQ_SET_CONFIGURATION  0x09U
@@ -21,9 +22,6 @@
 #define USB_DESC_INTERFACE         0x04U
 #define USB_DESC_ENDPOINT          0x05U
 #define USB_DESC_HUB               0x29U
-#define USB_HUB_REQ_CLEAR_FEATURE  0x01U
-#define USB_HUB_REQ_SET_FEATURE    0x03U
-#define USB_HUB_PORT_REQUEST_OUT   0x23U
 
 #define USB_HUB_C_CONNECTION       (1U << 0)
 #define USB_HUB_C_ENABLE           (1U << 1)
@@ -327,8 +325,8 @@ usb_hub_result_t usb_hub_port_status(uint8_t port, usb_hub_port_t *result) {
     return USB_HUB_INVALID_RESPONSE;
 
   const uint8_t *d = transfer.data;
-  result->status = (uint16_t)d[0] | ((uint16_t)d[1] << 8);
-  result->change = (uint16_t)d[2] | ((uint16_t)d[3] << 8);
+  result->status = usb_hub_read_u16(d);
+  result->change = usb_hub_read_u16(&d[2]);
 
   return USB_HUB_OK;
 }
@@ -471,7 +469,7 @@ static usb_hub_result_t usb_hub_port_feature(
     xhci_control_info_t *result) {
 
   xhci_setup_packet_t setup = {
-    .request_type = USB_HUB_PORT_REQUEST_OUT,
+    .request_type = USB_RT_HUB_PORT_OUT,
     .request = request,
     .value = feature,
     .index = port,
@@ -514,7 +512,7 @@ usb_hub_result_t usb_hub_port_acknowledge(
 
     xhci_control_info_t transfer = {0};
     usb_hub_result_t result = usb_hub_port_feature(
-        port, USB_HUB_REQ_CLEAR_FEATURE, features[i].feature, &transfer);
+        port, USB_REQ_CLEAR_FEATURE, features[i].feature, &transfer);
 
     if (result != USB_HUB_OK)
       return result;
@@ -554,7 +552,7 @@ usb_hub_result_t usb_hub_port_debounce(uint8_t port, usb_hub_port_t *result) {
     // invalidates the current stability interval.
     if (changed) {
       xhci_control_info_t transfer = {0};
-      status = usb_hub_port_feature(port, USB_HUB_REQ_CLEAR_FEATURE,
+      status = usb_hub_port_feature(port, USB_REQ_CLEAR_FEATURE,
           USB_HUB_CHANGE_CONNECTION, &transfer);
 
       if (status != USB_HUB_OK) {
@@ -619,7 +617,7 @@ usb_hub_result_t usb_hub_port_reset(
   // This resets a downstream hub port, not an xHCI root port.
   xhci_control_info_t transfer;
   status = usb_hub_port_feature(
-      port, USB_HUB_REQ_SET_FEATURE,
+      port, USB_REQ_SET_FEATURE,
       USB_HUB_FEATURE_RESET, &transfer);
 
   result->transfer_result = status == USB_HUB_OK ?
@@ -670,7 +668,7 @@ usb_hub_result_t usb_hub_port_reset(
       result->speed = 1U;  // Full Speed
 
     // Acknowledge C_PORT_RESET.
-    status = usb_hub_port_feature(port, USB_HUB_REQ_CLEAR_FEATURE,
+    status = usb_hub_port_feature(port, USB_REQ_CLEAR_FEATURE,
         USB_HUB_CHANGE_RESET, &transfer);
     if (status != USB_HUB_OK)
       return status;
@@ -679,7 +677,7 @@ usb_hub_result_t usb_hub_port_reset(
     // during this reset sequence.
     if (current.change & USB_HUB_C_CONNECTION) {
       status = usb_hub_port_feature(
-          port, USB_HUB_REQ_CLEAR_FEATURE,
+          port, USB_REQ_CLEAR_FEATURE,
           USB_HUB_CHANGE_CONNECTION, &transfer);
       if (status != USB_HUB_OK)
         return status;
@@ -706,7 +704,7 @@ usb_hub_result_t usb_hub_port_reset(
     // We have verified that the port is enabled,
     // so this transition can now be acknowledged.
     if (current.change & USB_HUB_C_ENABLE) {
-      status = usb_hub_port_feature(port, USB_HUB_REQ_CLEAR_FEATURE,
+      status = usb_hub_port_feature(port, USB_REQ_CLEAR_FEATURE,
           USB_HUB_CHANGE_ENABLE, &transfer);
 
       if (status != USB_HUB_OK) {

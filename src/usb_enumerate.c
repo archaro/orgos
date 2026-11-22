@@ -36,13 +36,14 @@ static usb_managed_device_t managed_devices[USB_MANAGED_DEVICE_CAPACITY];
 // incarnations, regardless of physical port.
 static uint32_t device_generation;
 
-static usb_managed_device_t *usb_managed_by_connection(
-    uint8_t root_port, uint8_t parent_slot, uint8_t parent_port) {
-
+// Distinguish an empty connection from ambiguous ownership. Lookup callers
+// reject either; allocation may select a free record only for the empty case.
+static bool usb_managed_find_connection(uint8_t root_port,
+    uint8_t parent_slot, uint8_t parent_port, usb_managed_device_t **found) {
+  *found = NULL;
   if (root_port == 0U || parent_port == 0U)
-    return NULL;
+    return false;
 
-  usb_managed_device_t *found = NULL;
   for (unsigned int i = 0U; i < USB_MANAGED_DEVICE_CAPACITY; i++) {
     usb_managed_device_t *record = &managed_devices[i];
     if (!record->valid || record->device.root_port != root_port ||
@@ -50,15 +51,21 @@ static usb_managed_device_t *usb_managed_by_connection(
         record->device.parent_port != parent_port)
       continue;
 
-    // Never choose arbitrarily between two records
-    // claiming the same physical connection.
-    if (found)
-      return NULL;
-
-    found = record;
+    // Never choose arbitrarily between two records claiming one connection.
+    if (*found) {
+      *found = NULL;
+      return false;
+    }
+    *found = record;
   }
+  return true;
+}
 
-  return found;
+static usb_managed_device_t *usb_managed_by_connection(
+    uint8_t root_port, uint8_t parent_slot, uint8_t parent_port) {
+  usb_managed_device_t *found = NULL;
+  return usb_managed_find_connection(root_port, parent_slot, parent_port, &found) ?
+      found : NULL;
 }
 
 static bool usb_managed_record_reusable( const usb_managed_device_t *record) {
@@ -130,21 +137,8 @@ static usb_managed_device_t *usb_managed_select_for_enumeration(
 
   usb_managed_device_t *matching = NULL;
 
-  // An existing physical connection must have
-  // exactly one associated managed record.
-  for (unsigned int i = 0U; i < USB_MANAGED_DEVICE_CAPACITY; i++) {
-    usb_managed_device_t *record = &managed_devices[i];
-
-    if (!record->valid || record->device.root_port != root_port ||
-        record->device.parent_slot != parent_slot ||
-        record->device.parent_port != parent_port)
-      continue;
-
-    if (matching)
-      return NULL;
-
-    matching = record;
-  }
+  if (!usb_managed_find_connection(root_port, parent_slot, parent_port, &matching))
+    return NULL;
 
   // Reuse an existing connection record only
   // after complete detachment and rearm.
@@ -188,7 +182,7 @@ static uint16_t read_u16(const uint8_t *p) {
   return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
 }
 
-static bool control_in(usb_enum_info_t *state, bool downstream,
+static bool control_in(usb_enum_info_t *state,
     uint8_t request_type, uint8_t request, uint16_t value,
     uint16_t length, xhci_control_info_t *info) {
 
@@ -200,9 +194,8 @@ static bool control_in(usb_enum_info_t *state, bool downstream,
     .length = length
   };
 
-  xhci_control_result_t result = downstream ?
-    xhci_downstream_control_in(state->slot_id, &setup, info) :
-    xhci_control_in(&setup, info);
+  xhci_control_result_t result =
+    xhci_downstream_control_in(state->slot_id, &setup, info);
 
   if (result != XHCI_CONTROL_OK) {
     state->ep0_operation_failed = true;
@@ -324,7 +317,7 @@ static usb_enum_result_t read_device(usb_enum_info_t *state) {
   xhci_control_info_t info;
 
   // Full-Speed enumeration begins with eight bytes.
-  if (!control_in(state, true, 0x80U, USB_REQ_GET_DESCRIPTOR,
+  if (!control_in(state, 0x80U, USB_REQ_GET_DESCRIPTOR,
       (uint16_t)(USB_DESC_DEVICE << 8), 8U, &info) ||
       info.data[0] != 18U || info.data[1] != USB_DESC_DEVICE) {
     state->detail = info.completion_code;
@@ -347,7 +340,7 @@ static usb_enum_result_t read_device(usb_enum_info_t *state) {
     return USB_ENUM_MPS_FAILED;
   }
 
-  if (!control_in(state, true, 0x80U, USB_REQ_GET_DESCRIPTOR,
+  if (!control_in(state, 0x80U, USB_REQ_GET_DESCRIPTOR,
       (uint16_t)(USB_DESC_DEVICE << 8), 18U, &info) ||
       info.data[0] != 18U || info.data[1] != USB_DESC_DEVICE ||
       info.data[7] != 64U || info.data[17] == 0U) {
@@ -364,7 +357,7 @@ static usb_enum_result_t read_device(usb_enum_info_t *state) {
 static usb_enum_result_t read_configuration( usb_enum_info_t *state) {
   xhci_control_info_t info;
 
-  if (!control_in(state, true, 0x80U, USB_REQ_GET_DESCRIPTOR,
+  if (!control_in(state, 0x80U, USB_REQ_GET_DESCRIPTOR,
       (uint16_t)(USB_DESC_CONFIGURATION << 8), 9U, &info) ||
       info.data[0] != 9U || info.data[1] != USB_DESC_CONFIGURATION) {
     state->detail = info.completion_code;
@@ -379,7 +372,7 @@ static usb_enum_result_t read_configuration( usb_enum_info_t *state) {
 
   state->configuration_length = length;
 
-  if (!control_in(state, true, 0x80U, USB_REQ_GET_DESCRIPTOR,
+  if (!control_in(state, 0x80U, USB_REQ_GET_DESCRIPTOR,
       (uint16_t)(USB_DESC_CONFIGURATION << 8), length, &info)) {
     state->detail = info.completion_code;
     return USB_ENUM_CONFIG_FAILED;
@@ -418,7 +411,7 @@ static usb_enum_result_t select_configuration(usb_enum_info_t *state) {
     return USB_ENUM_SET_CONFIG_FAILED;
   }
 
-  if (!control_in(state, true, 0x80U, USB_REQ_GET_CONFIGURATION,
+  if (!control_in(state, 0x80U, USB_REQ_GET_CONFIGURATION,
         0U, 1U, &info)) {
     state->detail = info.completion_code;
     return USB_ENUM_VERIFY_CONFIG_FAILED;
