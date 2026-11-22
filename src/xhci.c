@@ -3280,6 +3280,42 @@ static bool xhci_bulk_out_owner_pending(const xhci_device_t *device) {
       !device->bulk_out_async_waiter->completed;
 }
 
+// Retire a definitive completion owner before considering DMA reclamation.
+// Only a complete transfer of the original TD may proceed to that stage.
+static bool xhci_bulk_out_completion_begin(xhci_device_t *device,
+    const xhci_event_t *event) {
+  xhci_bulk_out_async_info_t *async = &device->bulk_out_async;
+
+  xhci_waiter_release(device->bulk_out_async_waiter);
+  device->bulk_out_async_waiter = NULL;
+  device->bulk_out_active = false;
+
+  if (event->completion_code != XHCI_COMPLETION_SUCCESS ||
+      event->parameter != async->transfer.transfer_trb ||
+      (event->status & 0x00ffffffU) != 0U) {
+    device->bulk_out_failed = true;
+    async->state = XHCI_BULK_OUT_ASYNC_FAILED;
+    async->result = XHCI_BULK_OUT_TRANSFER_FAILED;
+    return false;
+  }
+
+  return true;
+}
+
+// Called only after the accepted completion's DMA and ring work succeeds.
+static void xhci_bulk_out_completion_finish(xhci_device_t *device) {
+  xhci_bulk_out_async_info_t *async = &device->bulk_out_async;
+  if (async->state == XHCI_BULK_OUT_ASYNC_UNCERTAIN) {
+    // A late completion resolves DMA ownership, but does not authorise
+    // an automatic retry or replace the caller's earlier failure result.
+    device->bulk_out_failed = true;
+    async->state = XHCI_BULK_OUT_ASYNC_FAILED;
+    return;
+  }
+  async->state = XHCI_BULK_OUT_ASYNC_COMPLETE;
+  async->result = XHCI_BULK_OUT_OK;
+}
+
 void xhci_bulk_out_async_service(void) {
   for (unsigned int i = 1U; i < XHCI_MAX_DEVICES; i++) {
     xhci_device_t *device = &devices[i];
@@ -3340,8 +3376,6 @@ void xhci_bulk_out_async_service(void) {
     }
 
     xhci_event_t event = waiter->event;
-    bool was_uncertain =
-        async->state == XHCI_BULK_OUT_ASYNC_UNCERTAIN;
 
     async->transfer.completion_code = event.completion_code;
     async->transfer.event_parameter = event.parameter;
@@ -3355,22 +3389,10 @@ void xhci_bulk_out_async_service(void) {
           xhci_read(controller.capability_length + XHCI_USBSTS);
     }
 
-    // The matching completion establishes a
-    // definitive end to this hardware transfer.
-    xhci_waiter_release(waiter);
-    device->bulk_out_async_waiter = NULL;
-
-    // A definitive completion ends the active
-    // transfer, regardless of its success.
-    device->bulk_out_active = false;
-
-    if (event.completion_code != XHCI_COMPLETION_SUCCESS ||
-        event.parameter != async->transfer.transfer_trb) {
-      device->bulk_out_failed = true;
-      async->state = XHCI_BULK_OUT_ASYNC_FAILED;
-      async->result = XHCI_BULK_OUT_TRANSFER_FAILED;
+    // A nonzero residual is a definitive failure, even with Success.
+    // Keep failed transfers on the existing fail-closed ownership path.
+    if (!xhci_bulk_out_completion_begin(device, &event))
       continue;
-    }
 
     if (!dma_end_device(&device->bulk_out_buffer)) {
       device->bulk_out_failed = true;
@@ -3421,16 +3443,7 @@ void xhci_bulk_out_async_service(void) {
       device->bulk_out_wrap_pending = true;
     }
 
-    if (was_uncertain) {
-      // A late completion resolves DMA ownership,
-      // but does not authorise an automatic retry.
-      device->bulk_out_failed = true;
-      async->state = XHCI_BULK_OUT_ASYNC_FAILED;
-      continue;
-    }
-
-    async->state = XHCI_BULK_OUT_ASYNC_COMPLETE;
-    async->result = XHCI_BULK_OUT_OK;
+    xhci_bulk_out_completion_finish(device);
   }
 }
 
@@ -5631,7 +5644,85 @@ static bool xhci_bulk_out_stop_reconcile(xhci_device_t *device,
   return true;
 }
 
+static bool xhci_bulk_out_completion_selftest(void) {
+  // Share the async service's validation and terminal-state decisions.
+  // Neither helper performs hardware access, DMA work or ring scheduling.
+  static xhci_device_t sample;
+  const struct {
+    xhci_bulk_out_async_state_t initial;
+    uint64_t trb;
+    uint8_t code;
+    uint32_t residual;
+    bool accepted;
+  } cases[] = {
+    {XHCI_BULK_OUT_ASYNC_PENDING, 0x1000ULL, XHCI_COMPLETION_SUCCESS, 0U, true},
+    {XHCI_BULK_OUT_ASYNC_PENDING, 0x1000ULL, XHCI_COMPLETION_SUCCESS, 1U, false},
+    {XHCI_BULK_OUT_ASYNC_PENDING, 0x1000ULL, XHCI_COMPLETION_SUCCESS, 0x00800000U, false},
+    {XHCI_BULK_OUT_ASYNC_PENDING, 0x1000ULL, XHCI_COMPLETION_SUCCESS, 0x00ffffffU, false},
+    {XHCI_BULK_OUT_ASYNC_PENDING, 0x1010ULL, XHCI_COMPLETION_SUCCESS, 0U, false},
+    {XHCI_BULK_OUT_ASYNC_PENDING, 0x1000ULL, 6U, 0U, false},
+    {XHCI_BULK_OUT_ASYNC_PENDING, 0x1000ULL, 13U, 0U, false},
+    {XHCI_BULK_OUT_ASYNC_UNCERTAIN, 0x1000ULL, XHCI_COMPLETION_SUCCESS, 0U, true},
+    {XHCI_BULK_OUT_ASYNC_UNCERTAIN, 0x1000ULL, XHCI_COMPLETION_SUCCESS, 1U, false}
+  };
+
+  for (unsigned int i = 0U; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    xhci_event_waiter_t waiter = {
+      .active = true, .completed = true,
+      .type = XHCI_TRB_TRANSFER_EVENT,
+      .slot_id = 2U, .endpoint_id = XHCI_BULK_OUT_DCI,
+      .trb_address = 0x1000ULL
+    };
+    bool uncertain = cases[i].initial == XHCI_BULK_OUT_ASYNC_UNCERTAIN;
+    sample = (xhci_device_t){0};
+    sample.slot_id = 2U;
+    sample.bulk_out_active = true;
+    sample.bulk_out_failed = uncertain;
+    sample.bulk_out_async_waiter = &waiter;
+    sample.bulk_out_buffer.owner = DMA_OWNER_DEVICE;
+    sample.bulk_out_index = 4U;
+    sample.bulk_out_async = (xhci_bulk_out_async_info_t){
+      .state = cases[i].initial,
+      .result = uncertain ? XHCI_BULK_OUT_TIMEOUT : XHCI_BULK_OUT_OK,
+      .transfer = {.transfer_trb = 0x1000ULL, .length = 4U}
+    };
+    xhci_event_t event = {
+      .type = XHCI_TRB_TRANSFER_EVENT, .slot_id = 2U,
+      .parameter = cases[i].trb, .completion_code = cases[i].code,
+      // The completion code occupies the high byte, outside the residual.
+      .status = ((uint32_t)cases[i].code << 24U) | cases[i].residual
+    };
+    bool accepted = xhci_bulk_out_completion_begin(&sample, &event);
+    if (accepted != cases[i].accepted || waiter.active || waiter.completed ||
+        sample.bulk_out_async_waiter || sample.bulk_out_active ||
+        sample.bulk_out_buffer.owner != DMA_OWNER_DEVICE ||
+        sample.bulk_out_index != 4U)
+      return false;
+
+    if (accepted) {
+      // In the live service, DMA reclamation and ring updates must succeed
+      // between these two phases. This test performs neither operation.
+      if (sample.bulk_out_async.state != cases[i].initial)
+        return false;
+      xhci_bulk_out_completion_finish(&sample);
+    }
+    xhci_bulk_out_async_state_t expected = accepted && !uncertain ?
+        XHCI_BULK_OUT_ASYNC_COMPLETE : XHCI_BULK_OUT_ASYNC_FAILED;
+    xhci_bulk_out_result_t result = !accepted ? XHCI_BULK_OUT_TRANSFER_FAILED :
+        (uncertain ? XHCI_BULK_OUT_TIMEOUT : XHCI_BULK_OUT_OK);
+    if (sample.bulk_out_async.state != expected ||
+        sample.bulk_out_async.result != result ||
+        sample.bulk_out_failed != (expected == XHCI_BULK_OUT_ASYNC_FAILED) ||
+        sample.bulk_out_buffer.owner != DMA_OWNER_DEVICE)
+      return false;
+  }
+  return true;
+}
+
 bool xhci_bulk_out_stop_selftest(void) {
+  if (!xhci_bulk_out_completion_selftest())
+    return false;
+
   // Keep the synthetic device off the kernel stack.
   // No real DMA operations are performed.
   static xhci_device_t sample;
