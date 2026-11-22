@@ -572,17 +572,140 @@ usage:
       "<id> <hh> [hh ...]\n");
 }
 
+typedef enum {
+  VERIFY_NO_FAILURE,
+  VERIFY_DISCONNECTED,
+  VERIFY_STALE_HANDLE,
+  VERIFY_READ_FAILED
+} midi_verify_failure_t;
+
 typedef struct {
   bool active;
+  bool automatic;
+  bool running;
   unsigned int port;
   uint32_t generation;
   midi_port_handle_t handle;
   unsigned int expected_count;
-  unsigned int observed;
-  unsigned int mismatches;
+  uint64_t observed;
+  uint64_t mismatches;
+  uint64_t first_position; // One-based event position; zero means none.
+  uint8_t first_expected;
+  midi_port_event_t first_actual;
+  midi_verify_failure_t failure;
+  midi_status_t terminal_status;
 } midi_port_verify_t;
 
 static midi_port_verify_t port_verify;
+
+static void midi_verify_fail(midi_status_t status) {
+  port_verify.running = false;
+  port_verify.terminal_status = status;
+  port_verify.failure = VERIFY_READ_FAILED;
+  if (status == MIDI_STATUS_DISCONNECTED) {
+    midi_port_info_t current = {0};
+    midi_status_t found = midi_port_get_info(port_verify.port, &current);
+    if (found == MIDI_STATUS_OK && current.state != MIDI_PORT_BOUND)
+      port_verify.failure = VERIFY_DISCONNECTED;
+    else if (found == MIDI_STATUS_OK || found == MIDI_STATUS_NOT_DEFINED)
+      port_verify.failure = VERIFY_STALE_HANDLE;
+  }
+}
+
+static bool midi_verify_check_handle(void) {
+  midi_port_handle_info_t info = {0};
+  midi_status_t status = midi_port_get_handle_info(&port_verify.handle, &info);
+  if (status == MIDI_STATUS_OK)
+    status = info.status;
+  if (status == MIDI_STATUS_OK)
+    return true;
+  midi_verify_fail(status);
+  return false;
+}
+
+// Consume only through the original application's capability. EMPTY is
+// ordinary idle input; any other read failure freezes this run permanently.
+static unsigned int midi_verify_drain(unsigned int limit) {
+  if (!port_verify.running || !midi_verify_check_handle())
+    return 0U;
+  unsigned int drained = 0U;
+  while (drained < limit) {
+    midi_port_event_t received = {0};
+    midi_status_t status = midi_port_read(&port_verify.handle, &received);
+    if (status == MIDI_STATUS_EMPTY)
+      break;
+    if (status != MIDI_STATUS_OK) {
+      midi_verify_fail(status);
+      break;
+    }
+    // Test pattern: CC 102 on channel 16; values cycle 0 through 127.
+    uint8_t expected = (uint8_t)(port_verify.observed & 0x7fU);
+    if (received.generation != port_verify.generation ||
+        received.event.type != MIDI_STREAM_SHORT ||
+        received.event.message.length != 3U ||
+        received.event.message.status != 0xbfU ||
+        received.event.message.data[0] != 0x66U ||
+        received.event.message.data[1] != expected) {
+      if (port_verify.mismatches == 0U) {
+        port_verify.first_position = port_verify.observed + 1U;
+        port_verify.first_expected = expected;
+        port_verify.first_actual = received;
+      }
+      port_verify.mismatches++;
+    }
+    port_verify.observed++;
+    drained++;
+  }
+  return drained;
+}
+
+void console_midi_service(void) {
+  if (port_verify.active && port_verify.automatic && port_verify.running)
+    (void)midi_verify_drain(32U);
+}
+
+static const char *midi_verify_result(void) {
+  switch (port_verify.failure) {
+    case VERIFY_DISCONNECTED: return "DISCONNECTED";
+    case VERIFY_STALE_HANDLE: return "STALE HANDLE";
+    case VERIFY_READ_FAILED: return "READ FAILED";
+    default: break;
+  }
+  if (port_verify.mismatches != 0U || port_verify.observed > port_verify.expected_count)
+    return "FAIL";
+  // An automatic run must continue looking for extras until explicitly
+  // stopped. Manual status retains its existing exact-count PASS behaviour.
+  if (port_verify.automatic && port_verify.running)
+    return "RUNNING";
+  return port_verify.observed == port_verify.expected_count ? "PASS" : "INCOMPLETE";
+}
+
+static void midi_verify_print_status(void) {
+  console_printf("MIDI receive verification:\n Result     : %s\n"
+      " Port       : %u\n Generation : %u\n"
+      " Observed   : %llu / %u\n Mismatches : %llu\n"
+      " Mode       : %s\n State      : %s\n",
+      midi_verify_result(), port_verify.port, port_verify.generation,
+      (unsigned long long)port_verify.observed, port_verify.expected_count,
+      (unsigned long long)port_verify.mismatches,
+      port_verify.automatic ? "AUTO" : "MANUAL",
+      port_verify.running ? "RUNNING" :
+          (port_verify.failure == VERIFY_NO_FAILURE ? "STOPPED" : "TERMINATED"));
+  if (port_verify.failure != VERIFY_NO_FAILURE)
+    console_printf(" Read status: %s\n", midi_status_name(port_verify.terminal_status));
+  if (port_verify.first_position != 0U) {
+    const midi_port_event_t *actual = &port_verify.first_actual;
+    console_printf(" First mismatch: event %llu (1-based), expected CC 102 value %u\n"
+        " Actual     : port %u, generation %u, type %u, length %u, "
+        "message %02x %02x %02x, event byte %02x\n",
+        (unsigned long long)port_verify.first_position,
+        (unsigned int)port_verify.first_expected, actual->port, actual->generation,
+        (unsigned int)actual->event.type, (unsigned int)actual->event.message.length,
+        (unsigned int)actual->event.message.status,
+        (unsigned int)actual->event.message.data[0],
+        (unsigned int)actual->event.message.data[1], (unsigned int)actual->event.byte);
+  }
+}
 
 static void cmd_midi_port_verify(const char *args) {
   const char *p = args;
@@ -590,131 +713,98 @@ static void cmd_midi_port_verify(const char *args) {
   if (console_arg_word(&p, "start")) {
     unsigned int id = 0U;
     unsigned int count = 0U;
-
-    if (!console_arg_uint(&p, &id) ||
-        !console_arg_uint(&p, &count) ||
-        !console_arg_end(p) ||
-        id == 0U || id > MIDI_PORT_CAPACITY ||
-        count == 0U)
+    if (!console_arg_uint(&p, &id) || !console_arg_uint(&p, &count) ||
+        id == 0U || id > MIDI_PORT_CAPACITY || count == 0U)
+      goto usage;
+    bool automatic = console_arg_word(&p, "auto");
+    if (!console_arg_end(p))
       goto usage;
 
     midi_port_info_t port = {0};
     midi_port_lifecycle_info_t life = {0};
-
-    if ((midi_port_get_info(id, &port) != MIDI_STATUS_OK) ||
-        (midi_port_lifecycle_get_info(id, &life) != MIDI_STATUS_OK) ||
-        port.state != MIDI_PORT_BOUND ||
-        port.key.direction != MIDI_PORT_IN ||
-        life.opened_generation != port.generation) {
+    midi_port_handle_info_t opened = {0};
+    const midi_port_handle_t *handle = console_port_handle(id);
+    if (midi_port_get_info(id, &port) != MIDI_STATUS_OK ||
+        midi_port_lifecycle_get_info(id, &life) != MIDI_STATUS_OK ||
+        port.state != MIDI_PORT_BOUND || port.key.direction != MIDI_PORT_IN ||
+        life.opened_generation != port.generation ||
+        midi_port_get_handle_info(handle, &opened) != MIDI_STATUS_OK ||
+        opened.status != MIDI_STATUS_OK) {
       console_puts("Open a bound MIDI IN port first.\n");
       return;
     }
 
     midi_input_info_t input = {0};
     usb_midi_rx_info_t rx = {0};
-
     if (!midi_input_get_info(port.generation, &input) ||
-        !usb_midi_rx_get_info(port.generation, &rx) ||
-        !input.attached ||
-        input.queue_depth != 0U ||
-        input.pending_aborts != 0U ||
-        life.retired_depth != 0U ||
-        rx.queue_depth != 0U || rx.staged != 0U) {
+        !usb_midi_rx_get_info(port.generation, &rx) || !input.attached ||
+        input.queue_depth != 0U || input.pending_aborts != 0U ||
+        life.retired_depth != 0U || rx.queue_depth != 0U || rx.staged != 0U) {
       console_puts("Input queues must be empty first.\n");
       return;
     }
-
     port_verify = (midi_port_verify_t){
-      .active = true,
-      .port = id,
-      .generation = port.generation,
-      .handle = *console_port_handle(id),
+      .active = true, .automatic = automatic, .running = true,
+      .port = id, .generation = port.generation, .handle = *handle,
       .expected_count = count
     };
-
     console_printf("MIDI receive verification: ARMED\n"
-        "  Port       : %u\n"
-        "  Generation : %u\n"
-        "  Expected   : %u\n",
+        "  Port       : %u\n  Generation : %u\n  Expected   : %u\n",
         id, port.generation, count);
+    if (automatic)
+      console_puts("Automatic draining enabled. Stop only after the sender has finished.\n");
     return;
   }
 
   p = args;
   if (console_arg_word(&p, "drain")) {
     unsigned int limit = 64U;
-
     if (!console_arg_end(p) && (!console_arg_uint(&p, &limit) ||
-         !console_arg_end(p) || limit == 0U || limit > 64U))
+        !console_arg_end(p) || limit == 0U || limit > 64U))
       goto usage;
-
     if (!port_verify.active) {
       console_puts("No receive verification armed.\n");
       return;
     }
-
-    unsigned int drained = 0U;
-
-    while (drained < limit) {
-      midi_port_event_t received = {0};
-
-      if (midi_port_read(&port_verify.handle, &received) != MIDI_STATUS_OK)
-        break;
-
-      // Test pattern: CC 102 on channel 16,
-      // with values cycling from 0 through 127.
-      unsigned int expected = port_verify.observed & 0x7fU;
-
-      if (received.generation != port_verify.generation ||
-          received.event.type != MIDI_STREAM_SHORT ||
-          received.event.message.length != 3U ||
-          received.event.message.status != 0xbfU ||
-          received.event.message.data[0] != 0x66U ||
-          received.event.message.data[1] != expected)
-        port_verify.mismatches++;
-
-      port_verify.observed++;
-      drained++;
+    if (port_verify.automatic && port_verify.running) {
+      console_puts("Manual drain unavailable while automatic verification is running.\n");
+      return;
     }
-
+    if (!port_verify.running) {
+      console_puts("Verification is stopped; start a new run or reset.\n");
+      return;
+    }
+    unsigned int drained = midi_verify_drain(limit);
     console_printf("MIDI receive verification:\n"
-        "  Drained    : %u\n Observed   : %u / %u\n Mismatches : %u\n",
-        drained, port_verify.observed, port_verify.expected_count,
-        port_verify.mismatches);
+        "  Drained    : %u\n Observed   : %llu / %u\n Mismatches : %llu\n",
+        drained, (unsigned long long)port_verify.observed, port_verify.expected_count,
+        (unsigned long long)port_verify.mismatches);
     return;
   }
 
   p = args;
-  if (console_arg_word(&p, "status") &&
-      console_arg_end(p)) {
-
+  if (console_arg_word(&p, "stop") && console_arg_end(p)) {
     if (!port_verify.active) {
       console_puts("No receive verification armed.\n");
       return;
     }
+    if (port_verify.running) {
+      (void)midi_verify_check_handle();
+      port_verify.running = false;
+    }
+    midi_verify_print_status();
+    return;
+  }
 
-    midi_port_lifecycle_info_t life = {0};
-    bool current = (midi_port_lifecycle_get_info(port_verify.port, &life) == MIDI_STATUS_OK) &&
-        life.opened_generation == port_verify.generation &&
-        console_port_handle(port_verify.port)->open_token ==
-            port_verify.handle.open_token;
-
-    const char *result = "INCOMPLETE";
-
-    if (!current)
-      result = "DEVICE CHANGED";
-    else if (port_verify.mismatches != 0U ||
-        port_verify.observed > port_verify.expected_count)
-      result = "FAIL";
-    else if (port_verify.observed == port_verify.expected_count)
-      result = "PASS";
-
-    console_printf("MIDI receive verification:\n Result     : %s\n"
-        " Port       : %u\n Generation : %u\n"
-        " Observed   : %u / %u\n Mismatches : %u\n",
-        result, port_verify.port,
-        port_verify.generation, port_verify.observed,
-        port_verify.expected_count, port_verify.mismatches);
+  p = args;
+  if (console_arg_word(&p, "status") && console_arg_end(p)) {
+    if (!port_verify.active) {
+      console_puts("No receive verification armed.\n");
+      return;
+    }
+    if (port_verify.running)
+      (void)midi_verify_check_handle();
+    midi_verify_print_status();
     return;
   }
 
@@ -727,7 +817,7 @@ static void cmd_midi_port_verify(const char *args) {
 
 usage:
   console_puts("Usage: midi port verify "
-      "[start <id> <count> | drain [1..64] |\n status | reset]\n");
+      "[start <id> <count> [auto] | drain [1..64] |\n status | stop | reset]\n");
 }
 
 static void cmd_midi_port(const char *args) {

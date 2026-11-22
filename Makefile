@@ -104,6 +104,9 @@ check: | $(OBJ_DIR)
 		tests/usb_hub_change_test.c -Wl,--gc-sections \
 		-o $(OBJ_DIR)/usb_hub_change_test
 	$(OBJ_DIR)/usb_hub_change_test
+	$(HOSTCC) $(HOSTCFLAGS) -ffunction-sections -fdata-sections -iquote $(SRC_DIR) \
+		tests/midi_verify_test.c -Wl,--gc-sections -o $(OBJ_DIR)/midi_verify_test
+	$(OBJ_DIR)/midi_verify_test
 
 -include $(DEPS)
 

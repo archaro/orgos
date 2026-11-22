@@ -16,6 +16,7 @@
 #include "usb_hub.h"
 #include "uart.h"
 #include "console.h"
+#include "console_midi.h"
 
 #define UART_BAUD 115200U
 
@@ -440,6 +441,8 @@ void main(void) {
   for (;;) {
     // Service USB events and active transfers.
     usb_service();
+    // Run bounded MIDI verification before processing the next command.
+    console_midi_service();
     // Process at most one available console character.
     bool console_work = console_poll();
     // Limit idle polling when the console has no input.
