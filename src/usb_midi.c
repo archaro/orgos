@@ -177,6 +177,10 @@ bool usb_midi_parse_config(const uint8_t *data,
     uint8_t type = d[1];
     if (size < 2U || size > length - offset)
       return false;
+    // Every selected Bulk endpoint needs its own immediately following
+    // class-specific association; a later endpoint/interface cannot supply it.
+    if (pending_bulk_endpoint && type != 0x25U)
+      return false;
     if (type == 0x04U) {
       // Standard Interface Descriptor.
       if (size < 9U)
@@ -236,20 +240,20 @@ bool usb_midi_parse_config(const uint8_t *data,
       }
     } else if (type == 0x25U && in_midi_interface) {
       // Class-specific endpoint jack associations.
-      if (size < 4U || d[2] != 0x01U || size < 4U + (unsigned int)d[3])
+      if (size < 4U || d[2] != 0x01U || !pending_bulk_endpoint ||
+          d[3] == 0U || d[3] > USB_MIDI_MAX_CABLES ||
+          size != 4U + (unsigned int)d[3])
         return false;
-      if (pending_bulk_endpoint) {
-        if (pending_in)
-          result->bulk_in_jacks = d[3];
-        else
-          result->bulk_out_jacks = d[3];
-        pending_bulk_endpoint = false;
-      }
+      if (pending_in)
+        result->bulk_in_jacks = d[3];
+      else
+        result->bulk_out_jacks = d[3];
+      pending_bulk_endpoint = false;
     }
     offset += size;
   }
 
-  return result->midi_found && result->in_found &&
-      result->out_found;
+  return result->midi_found && result->in_found && result->out_found &&
+      result->bulk_in_jacks != 0U && result->bulk_out_jacks != 0U;
 }
 

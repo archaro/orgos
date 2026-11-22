@@ -72,6 +72,9 @@ bool usb_midi_sysex_packet(const usb_midi_config_t *config,
     unsigned int cable, const uint8_t *bytes, unsigned int length,
     bool ending, uint8_t packet[4]);
 
+// Both Bulk endpoints must have a correctly framed class-specific jack
+// association with 1..USB_MIDI_MAX_CABLES virtual cables. Enumeration's
+// existing endpoint/packet-size/alternate-setting restrictions still apply.
 bool usb_midi_parse_config(const uint8_t *data,
     unsigned int length, usb_midi_config_t *result);
 

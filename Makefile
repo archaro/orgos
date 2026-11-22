@@ -96,6 +96,10 @@ check: | $(OBJ_DIR)
 		tests/usb_midi_rx_test.c $(SRC_DIR)/usb_midi_rx.c \
 		$(SRC_DIR)/usb_midi.c -o $(OBJ_DIR)/usb_midi_rx_test
 	$(OBJ_DIR)/usb_midi_rx_test
+	$(HOSTCC) $(HOSTCFLAGS) -I$(SRC_DIR) \
+		tests/usb_midi_config_test.c $(SRC_DIR)/usb_midi.c \
+		-o $(OBJ_DIR)/usb_midi_config_test
+	$(OBJ_DIR)/usb_midi_config_test
 	$(HOSTCC) $(HOSTCFLAGS) -ffunction-sections -fdata-sections -I$(SRC_DIR) \
 		tests/usb_hub_change_test.c -Wl,--gc-sections \
 		-o $(OBJ_DIR)/usb_hub_change_test
