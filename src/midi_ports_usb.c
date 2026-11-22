@@ -5,7 +5,7 @@
 #include "usb_enumerate.h"
 #include "usb_midi.h"
 #include "midi_ports_usb.h"
-#include "midi_port_io.h"
+#include "midi_ports_internal.h"
 
 _Static_assert(MIDI_PORT_MAX_CABLES == USB_MIDI_MAX_CABLES,
     "Logical and USB MIDI cable limits differ");

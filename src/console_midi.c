@@ -13,7 +13,7 @@
 #include "midi_stream.h"
 #include "midi_ports.h"
 #include "midi_ports_usb.h"
-#include "midi_port_io.h"
+#include "midi.h"
 
 static int midi_hex_digit(char c) {
   if (c >= '0' && c <= '9')

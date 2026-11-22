@@ -2,7 +2,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "midi_port_io.h"
+#include "midi.h"
 #include "midi_ports.h"
 #include "midi_ports_internal.h"
 #include "midi_input.h"

@@ -1,35 +1,8 @@
 #pragma once
 
-#include <stdbool.h>
-#include <stdint.h>
+#include "midi.h"
 
-// A complete MIDI message of one to three bytes.
-typedef struct {
-  uint8_t status;
-  uint8_t data[2];
-  uint8_t length;
-} midi_short_message_t;
-
-typedef enum {
-  MIDI_STREAM_SHORT,
-  MIDI_STREAM_SYSEX_BEGIN,
-  MIDI_STREAM_SYSEX_DATA,
-  MIDI_STREAM_SYSEX_END,
-  MIDI_STREAM_SYSEX_ABORT
-} midi_stream_event_type_t;
-
-// For SHORT, message contains the complete message.
-// For SYSEX_DATA, byte contains one payload byte.
-// For SYSEX_ABORT, byte contains the interrupting
-// status, or zero for explicit cancellation.
-//
-// F0 and F7 are represented by BEGIN and END.
-typedef struct {
-  midi_stream_event_type_t type;
-  midi_short_message_t message;
-  uint8_t byte;
-} midi_stream_event_t;
-
+// Internal byte-stream parser; applications use midi.h.
 // One input byte can abort an unfinished SysEx
 // and also start another message.
 #define MIDI_STREAM_EVENTS_PER_BYTE 2U

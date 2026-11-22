@@ -1,33 +1,11 @@
 #pragma once
 
-#include <stdbool.h>
 #include <stddef.h>
-#include <stdint.h>
 
-#define MIDI_PORT_CAPACITY 32U
-#define MIDI_PORT_MAX_CABLES 16U
+#include "midi.h"
 
-typedef enum {
-  MIDI_PORT_IN,
-  MIDI_PORT_OUT
-} midi_port_direction_t;
-
-typedef enum {
-  MIDI_PORT_UNBOUND,
-  MIDI_PORT_BOUND,
-  MIDI_PORT_AMBIGUOUS
-} midi_port_state_t;
-
-// Physical socket identity within the current
-// single-internal-hub USB topology.
-typedef struct {
-  uint8_t root_port;
-  uint8_t hub_port;
-  uint16_t vendor_id;
-  uint16_t product_id;
-  uint8_t cable;
-  midi_port_direction_t direction;
-} midi_port_key_t;
+// Internal provisioning and binding registry. Applications discover existing
+// definitions through midi.h; they do not supply topology snapshots.
 
 // One active, successfully enumerated USB-MIDI device.
 // Supplied by the transport adapter; no USB types leak
@@ -43,16 +21,6 @@ typedef struct {
   uint8_t out_cables;
 } midi_port_device_t;
 
-typedef struct {
-  unsigned int id;
-  midi_port_key_t key;
-  midi_port_state_t state;
-  uint32_t generation;
-  uint8_t slot_id;
-  // Changes whenever this port ID is redefined.
-  uint32_t definition_serial;
-} midi_port_info_t;
-
 // Identities are explicit and stable within a boot.
 // Redefining an occupied ID or aliasing an endpoint
 // in the same direction is rejected.
@@ -67,3 +35,9 @@ bool midi_ports_reconcile(const midi_port_device_t *devices, size_t count);
 // This does not claim or start the input/output service.
 bool midi_ports_resolve(unsigned int id, uint32_t *generation,
     uint8_t *cable, midi_port_direction_t *direction);
+
+// Close and remove a logical-port definition.
+//
+// Refuses removal if an active output SysEx
+// session cannot be released safely.
+midi_status_t midi_port_undefine(unsigned int id);

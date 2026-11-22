@@ -72,6 +72,8 @@ clean:
 	rm -rf $(OBJ_DIR) $(TARGET)
 
 check: | $(OBJ_DIR)
+	$(HOSTCC) $(HOSTCFLAGS) -I$(SRC_DIR) -c \
+		tests/midi_api_compile_test.c -o $(OBJ_DIR)/midi_api_compile_test.o
 	$(HOSTCC) $(HOSTCFLAGS) -I$(SRC_DIR) \
 		tests/midi_output_test.c $(SRC_DIR)/midi_output.c \
 		$(SRC_DIR)/usb_midi.c -o $(OBJ_DIR)/midi_output_test

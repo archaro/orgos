@@ -3,7 +3,8 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#include "midi_port_io.h"
+#include "midi.h"
+#include "midi_ports_internal.h" // Foreground reconciliation for the fixture.
 #include "midi_ports.h"
 #include "midi_input.h"
 #include "midi_auto.h"
