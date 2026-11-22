@@ -714,6 +714,12 @@ static void midi_port_print(const midi_port_info_t *info) {
       (unsigned long long)lifecycle.changes_dropped);
 }
 
+static midi_port_handle_t console_handles[MIDI_PORT_CAPACITY];
+
+static midi_port_handle_t *console_port_handle(unsigned int id) {
+  return id >= 1U && id <= MIDI_PORT_CAPACITY ? &console_handles[id - 1U] : NULL;
+}
+
 static midi_port_sysex_t console_sysex[MIDI_PORT_CAPACITY];
 
 static bool midi_sysex_port_id(const char **args, unsigned int *id) {
@@ -731,7 +737,7 @@ static void cmd_midi_port_sysex(const char *args) {
 
     midi_port_sysex_t *session = &console_sysex[id - 1U];
 
-    midi_status_t started = midi_port_sysex_begin(id, session);
+    midi_status_t started = midi_port_sysex_begin(console_port_handle(id), session);
 
     console_printf("MIDI port %u SysEx: %s\n",
         id, midi_status_name(started));
@@ -834,6 +840,7 @@ typedef struct {
   bool active;
   unsigned int port;
   uint32_t generation;
+  midi_port_handle_t handle;
   unsigned int expected_count;
   unsigned int observed;
   unsigned int mismatches;
@@ -885,6 +892,7 @@ static void cmd_midi_port_verify(const char *args) {
       .active = true,
       .port = id,
       .generation = port.generation,
+      .handle = *console_port_handle(id),
       .expected_count = count
     };
 
@@ -914,7 +922,7 @@ static void cmd_midi_port_verify(const char *args) {
     while (drained < limit) {
       midi_port_event_t received = {0};
 
-      if (midi_port_read(port_verify.port, &received) != MIDI_STATUS_OK)
+      if (midi_port_read(&port_verify.handle, &received) != MIDI_STATUS_OK)
         break;
 
       // Test pattern: CC 102 on channel 16,
@@ -951,7 +959,9 @@ static void cmd_midi_port_verify(const char *args) {
 
     midi_port_lifecycle_info_t life = {0};
     bool current = (midi_port_lifecycle_get_info(port_verify.port, &life) == MIDI_STATUS_OK) &&
-        life.opened_generation == port_verify.generation;
+        life.opened_generation == port_verify.generation &&
+        console_port_handle(port_verify.port)->open_token ==
+            port_verify.handle.open_token;
 
     const char *result = "INCOMPLETE";
 
@@ -1088,7 +1098,7 @@ static void cmd_midi_port(const char *args) {
         !console_arg_end(p))
       goto usage;
 
-    midi_status_t opened = midi_port_open(id);
+    midi_status_t opened = midi_port_open(id, console_port_handle(id));
 
     console_printf("MIDI port %u: %s\n",
         id, midi_status_name(opened));
@@ -1108,7 +1118,7 @@ static void cmd_midi_port(const char *args) {
       return;
     }
 
-    midi_status_t closed = midi_port_close(id);
+    midi_status_t closed = midi_port_close(console_port_handle(id));
     console_printf("MIDI port %u: %s\n", id, midi_status_name(closed));
     return;
   }
@@ -1123,7 +1133,7 @@ static void cmd_midi_port(const char *args) {
 
     midi_port_event_t received = {0};
 
-    midi_status_t status = midi_port_read(id, &received);
+    midi_status_t status = midi_port_read(console_port_handle(id), &received);
     if (status != MIDI_STATUS_OK) {
       console_printf("MIDI port %u read: %s\n", id, midi_status_name(status));
       return;
@@ -1152,7 +1162,7 @@ static void cmd_midi_port(const char *args) {
     if (!midi_console_short_message(p, &message))
       goto usage;
 
-    midi_status_t queued = midi_port_send_short(id, &message);
+    midi_status_t queued = midi_port_send_short(console_port_handle(id), &message);
     console_printf("MIDI port %u: %s\n",
         id, midi_status_name(queued));
     return;
