@@ -350,18 +350,15 @@ void main(void) {
   if (!clock_ok)
     console_puts("UART: firmware clock query failed; using fallback.\n");
 
-  // Inspect the firmware-supplied Device Tree
-  // before enabling address translation.
-  // This is diagnostic only. An absent or invalid
-  // FDT must not prevent OrgOS from booting.
+  // Validate and relocate the firmware-supplied Device Tree before
+  // enabling address translation. Both steps are required by the
+  // physical-memory inventory built from our kernel-owned FDT copy.
   console_puts("\nFirmware Device Tree... ");
-  if (!fdt_init()) {
-    console_puts("Unavailable or invalid.\n");
-  } else if (!fdt_relocate()) {
-    console_puts("FAILED (relocation).\n");
-  } else {
-    console_puts("OK (relocated).\n");
-  }
+  if (!fdt_init())
+    boot_halt("FDT validation");
+  if (!fdt_relocate())
+    boot_halt("FDT relocation");
+  console_puts("OK (relocated).\n");
 
   // Discover the firmware-reported ARM memory region
   // before constructing the EL1 translation tables.
