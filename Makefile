@@ -84,7 +84,7 @@ check: | $(OBJ_DIR)
 		tests/midi_port_io_test.c $(SRC_DIR)/midi_port_io.c \
 		$(SRC_DIR)/midi_ports.c $(SRC_DIR)/midi_input.c \
 		$(SRC_DIR)/midi_usb_bridge.c $(SRC_DIR)/midi_stream.c \
-		$(SRC_DIR)/usb_midi.c \
+		$(SRC_DIR)/usb_midi.c $(SRC_DIR)/midi_auto.c \
 		-o $(OBJ_DIR)/midi_port_io_test
 	$(OBJ_DIR)/midi_port_io_test
 	$(HOSTCC) $(HOSTCFLAGS) -I$(SRC_DIR) \
@@ -92,6 +92,10 @@ check: | $(OBJ_DIR)
 		$(SRC_DIR)/midi_usb_bridge.c \
 		-o $(OBJ_DIR)/midi_stream_bridge_test
 	$(OBJ_DIR)/midi_stream_bridge_test
+	$(HOSTCC) $(HOSTCFLAGS) -I$(SRC_DIR) \
+		tests/usb_midi_rx_test.c $(SRC_DIR)/usb_midi_rx.c \
+		$(SRC_DIR)/usb_midi.c -o $(OBJ_DIR)/usb_midi_rx_test
+	$(OBJ_DIR)/usb_midi_rx_test
 
 -include $(DEPS)
 

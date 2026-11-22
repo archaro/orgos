@@ -6,6 +6,8 @@
 #include "midi_port_io.h"
 #include "midi_ports.h"
 #include "midi_input.h"
+#include "midi_auto.h"
+#include "usb.h"
 #include "midi_output.h"
 #include "usb_enumerate.h"
 #include "usb_midi_rx.h"
@@ -20,6 +22,9 @@ static usb_device_t live = {
 };
 
 static bool rx_running;
+static bool rx_discard_unclaimed;
+static unsigned int rx_application_starts;
+static unsigned int rx_diagnostic_starts;
 static usb_midi_rx_consumer_t subscriber;
 static void *subscriber_context;
 static uint32_t output_generation;
@@ -54,6 +59,7 @@ bool usb_midi_rx_get_info(uint32_t generation,
     .generation = generation,
     .slot_id = live.slot_id,
     .cables = 2U,
+    .discard_unclaimed = rx_discard_unclaimed,
     .state = rx_running ?
         USB_MIDI_RX_RUNNING : USB_MIDI_RX_IDLE
   };
@@ -61,12 +67,58 @@ bool usb_midi_rx_get_info(uint32_t generation,
   return true;
 }
 
-bool usb_midi_rx_start_generation(uint32_t generation) {
+static bool start_receiver(uint32_t generation, bool discard_unclaimed) {
   if (generation != live.generation || rx_running ||
       live.state != USB_DEVICE_ACTIVE)
     return false;
 
   rx_running = true;
+  rx_discard_unclaimed = discard_unclaimed;
+  return true;
+}
+
+bool usb_midi_rx_start_generation(uint32_t generation) {
+  rx_diagnostic_starts++;
+  return start_receiver(generation, false);
+}
+
+bool usb_midi_rx_start_auto_generation(uint32_t generation) {
+  rx_application_starts++;
+  return start_receiver(generation, true);
+}
+
+// Exercise the real automatic-admission switch independently of the
+// receiver's start policy. Explicit application opens must work when off.
+uint64_t timer_now_us(void) {
+  return 0U;
+}
+
+bool usb_service_available(void) {
+  return true;
+}
+
+bool usb_get_enumeration_generation(uint32_t generation, usb_enum_info_t *info) {
+  if (generation != live.generation)
+    return false;
+  *info = (usb_enum_info_t){
+    .result = USB_ENUM_OK, .slot_id = live.slot_id, .hub_port = live.parent_port,
+    .midi = {.in_found = true, .bulk_in_jacks = 2U,
+        .out_found = true, .bulk_out_jacks = 1U}
+  };
+  return true;
+}
+
+bool xhci_bulk_in_stream_get_stats(uint8_t slot, xhci_bulk_in_stream_stats_t *info) {
+  if (slot != live.slot_id)
+    return false;
+  *info = (xhci_bulk_in_stream_stats_t){.started = rx_running};
+  return true;
+}
+
+bool xhci_bulk_out_async_get(uint8_t slot, xhci_bulk_out_async_info_t *info) {
+  if (slot != live.slot_id)
+    return false;
+  *info = (xhci_bulk_out_async_info_t){.state = XHCI_BULK_OUT_ASYNC_IDLE};
   return true;
 }
 
@@ -703,6 +755,70 @@ static void check_single_direction_devices(midi_port_device_t device) {
   assert(midi_port_undefine(3U) == MIDI_STATUS_OK);
 }
 
+static bool diagnostic_consumer(uint32_t generation,
+    const usb_midi_event_t *event, void *context) {
+  (void)generation;
+  (void)event;
+  (void)context;
+  return false;
+}
+
+static void check_receiver_policy(midi_port_device_t device) {
+  midi_auto_info_t automatic = {0};
+  midi_port_handle_t first = {0}, second = {0};
+  usb_midi_rx_info_t rx = {0};
+  device.in_cables = 2U;
+  input_reconnect(&device, 30U);
+  midi_auto_set_enabled(false);
+  unsigned int app_starts = rx_application_starts;
+  unsigned int diag_starts = rx_diagnostic_starts;
+  midi_auto_service();
+  assert(midi_auto_get_info(&automatic) && !automatic.enabled);
+  assert(!rx_running && rx_application_starts == app_starts);
+
+  assert(midi_port_open(1U, &first) == MIDI_STATUS_OK);
+  assert(rx_application_starts == app_starts + 1U);
+  assert(rx_diagnostic_starts == diag_starts);
+  assert(usb_midi_rx_get_info(device.generation, &rx));
+  assert(rx.state == USB_MIDI_RX_RUNNING && rx.discard_unclaimed);
+  usb_midi_rx_consumer_t shared = subscriber;
+  void *shared_context = subscriber_context;
+  assert(midi_port_open(2U, &second) == MIDI_STATUS_OK);
+  assert(midi_port_open(1U, &first) == MIDI_STATUS_OK);
+  assert(subscriber == shared && subscriber_context == shared_context);
+  assert(rx_application_starts == app_starts + 1U);
+  assert(rx_diagnostic_starts == diag_starts);
+  assert(midi_port_close(&first) == MIDI_STATUS_OK);
+  assert(subscriber == shared);
+  assert(midi_port_close(&second) == MIDI_STATUS_OK);
+  assert(!subscriber && rx_running && rx_discard_unclaimed);
+  // Reopen by reusing the same running receiver, including its policy.
+  assert(midi_port_open(1U, &first) == MIDI_STATUS_OK);
+  assert(rx_application_starts == app_starts + 1U);
+  assert(midi_port_close(&first) == MIDI_STATUS_OK);
+
+  input_reconnect(&device, 31U);
+  assert(usb_midi_rx_start_generation(device.generation));
+  assert(usb_midi_rx_subscribe(device.generation, diagnostic_consumer, &rx));
+  // An explicit diagnostic owner cannot be displaced by an application.
+  assert(midi_port_open(1U, &first) == MIDI_STATUS_FAILED);
+  assert(subscriber == diagnostic_consumer && subscriber_context == &rx);
+  assert(rx_application_starts == app_starts + 1U);
+  assert(rx_diagnostic_starts == diag_starts + 1U);
+  assert(!first.active && rx_running && !rx_discard_unclaimed);
+  assert(usb_midi_rx_unsubscribe(device.generation, diagnostic_consumer, &rx));
+  // Sharing a running diagnostic receiver must not restart it or silently
+  // convert its explicit retain-unclaimed policy to application admission.
+  assert(midi_port_open(1U, &first) == MIDI_STATUS_OK);
+  assert(usb_midi_rx_get_info(device.generation, &rx));
+  assert(!rx.discard_unclaimed);
+  assert(rx_application_starts == app_starts + 1U);
+  assert(rx_diagnostic_starts == diag_starts + 1U);
+  assert(midi_port_close(&first) == MIDI_STATUS_OK);
+  assert(rx_running && !rx_discard_unclaimed);
+  midi_auto_set_enabled(true);
+}
+
 int main(void) {
   unsigned int cursor = 0U;
   midi_port_info_t discovered = {.id = 99U};
@@ -742,7 +858,10 @@ int main(void) {
 
   // Opening a second cable reuses the receiver.
   assert((midi_port_open(1U, &handles[1U]) == MIDI_STATUS_OK));
+  assert(rx_discard_unclaimed && rx_application_starts == 1U);
+  assert(rx_diagnostic_starts == 0U);
   assert((midi_port_open(2U, &handles[2U]) == MIDI_STATUS_OK));
+  assert(rx_application_starts == 1U && rx_diagnostic_starts == 0U);
   assert((midi_port_open(3U, &handles[3U]) == MIDI_STATUS_OK));
 
   midi_short_message_t message = {
@@ -1063,6 +1182,7 @@ int main(void) {
   check_input_handle_lifetimes(device);
   check_application_io(device);
   check_single_direction_devices(device);
+  check_receiver_policy(device);
 
   puts("MIDI logical I/O: PASS");
   return 0;

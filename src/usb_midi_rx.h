@@ -37,7 +37,8 @@ bool usb_midi_rx_start_generation(uint32_t generation);
 
 // Start the normal OS-owned receiver.
 // Without a subscriber, packets are discarded
-// rather than retained in the diagnostic FIFO.
+// rather than retained in the diagnostic FIFO. This selects the receive
+// policy; it does not depend on the automatic MIDI admission switch.
 bool usb_midi_rx_start_auto_generation(uint32_t generation);
 
 // Determine whether this generation belongs to

@@ -408,11 +408,12 @@ midi_status_t midi_port_open(unsigned int id, midi_port_handle_t *handle) {
   } else if (current.key.direction == MIDI_PORT_IN) {
     usb_midi_rx_info_t rx = {0};
 
-    // The USB receiver is normally already active.
-    // Retain manual startup for diagnostic operation.
+    // Reuse a running shared receiver without changing its ownership or
+    // policy. On-demand application startup uses the normal idle-discard
+    // policy even when automatic MIDI admission is disabled.
     if (!usb_midi_rx_get_info(generation, &rx) ||
         rx.state != USB_MIDI_RX_RUNNING) {
-      if (!usb_midi_rx_start_generation(generation))
+      if (!usb_midi_rx_start_auto_generation(generation))
         return MIDI_STATUS_FAILED;
     }
 
