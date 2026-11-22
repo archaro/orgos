@@ -29,7 +29,6 @@ typedef struct {
   midi_usb_bridge_t bridge;
   midi_input_fifo_t fifo[MIDI_INPUT_MAX_CABLES];
   uint64_t next_order;
-  uint16_t pending_abort_cables;
 } midi_input_record_t;
 
 static midi_input_record_t inputs[USB_MANAGED_DEVICE_CAPACITY];
@@ -101,11 +100,10 @@ static void input_cancel_cable(midi_input_record_t *input, unsigned int cable) {
   midi_usb_batch_t batch = {0};
   if (!midi_usb_bridge_cancel(&input->bridge, cable, &batch) || batch.count == 0U)
     return;
-  uint16_t bit = (uint16_t)(1U << cable);
-  if (!(input->pending_abort_cables & bit)) {
-    input->pending_abort_cables |= bit;
+  midi_input_cable_info_t *info = &input->info.cable[cable];
+  if (!info->pending_abort) {
+    info->pending_abort = true;
     input->info.pending_aborts++;
-    input->info.cable[cable].pending_abort = true;
     input->fifo[cable].abort_order = input->next_order++;
     input_count(input, &batch);
   }
@@ -277,11 +275,10 @@ bool midi_input_close_port_cable(uint32_t generation, unsigned int cable) {
   info->data_lost = false;
   input->fifo[cable] = (midi_input_fifo_t){0};
   midi_stream_parser_reset(&input->bridge.parsers[cable]);
-  if (input->pending_abort_cables & bit) {
-    input->pending_abort_cables &= (uint16_t)~bit;
+  if (info->pending_abort) {
+    info->pending_abort = false;
     input->info.pending_aborts--;
   }
-  info->pending_abort = false;
   input->info.open_cables &= (uint16_t)~bit;
 
   // The USB receiver stays running. With no
@@ -369,7 +366,6 @@ static bool input_read_matching(midi_input_record_t *input,
   } else {
     event->event.type = MIDI_STREAM_SYSEX_ABORT;
     info->pending_abort = false;
-    input->pending_abort_cables &= (uint16_t)~(1U << cable);
     input->info.pending_aborts--;
   }
   return true;

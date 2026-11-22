@@ -510,6 +510,125 @@ static void check_input_handle_lifetimes(midi_port_device_t device) {
   assert(midi_port_close(&reopened) == MIDI_STATUS_OK);
 }
 
+static void expect_retired(const midi_port_handle_t *handle,
+    uint32_t generation, unsigned int note) {
+  midi_port_event_t event = {0};
+  assert(midi_port_read(handle, &event) == MIDI_STATUS_OK);
+  assert(event.port == 1U && event.generation == generation);
+  assert(event.event.type == MIDI_STREAM_SHORT);
+  assert(event.event.message.status == 0x90U && event.event.message.length == 3U);
+  assert(event.event.message.data[0] == note && event.event.message.data[1] == 0x40U);
+}
+
+static void check_retirement_ordering(midi_port_device_t device) {
+  midi_port_handle_t old[3] = {{0}};
+  midi_port_lifecycle_info_t before = {0}, after = {0};
+  assert(midi_port_lifecycle_get_info(1U, &before) == MIDI_STATUS_OK);
+  assert(before.retired_depth == 0U);
+  input_disconnect();
+  input_reconnect(&device, 24U);
+  assert(midi_port_open(1U, &old[0]) == MIDI_STATUS_OK);
+  for (unsigned int i = 0U; i < 64U; i++)
+    inject(0U, 0x90U, (uint8_t)i);
+  input_disconnect();
+  for (unsigned int i = 0U; i < 60U; i++)
+    expect_retired(&old[0], 24U, i);
+
+  // Retire two more opens while the first retains its final four events.
+  // Appending crosses the ring boundary; its finite storage must keep older
+  // accepted events rather than taking the last three from generation 26.
+  for (unsigned int open = 1U; open < 3U; open++) {
+    input_reconnect(&device, 24U + open);
+    assert(midi_port_open(1U, &old[open]) == MIDI_STATUS_OK);
+    for (unsigned int i = 0U; i < 32U; i++)
+      inject(0U, 0x90U, (uint8_t)(32U + open * 32U + i));
+    input_disconnect();
+  }
+  const unsigned int retained[] = {4U, 32U, 29U};
+  for (unsigned int i = 0U; i < 3U; i++) {
+    midi_port_handle_info_t info = {0};
+    assert(midi_port_get_handle_info(&old[i], &info) == MIDI_STATUS_OK);
+    assert(info.status == MIDI_STATUS_DISCONNECTED && info.retired_depth == retained[i]);
+  }
+  assert(midi_port_lifecycle_get_info(1U, &after) == MIDI_STATUS_OK);
+  assert(after.retired_depth == 65U && after.retired_dropped == before.retired_dropped + 3U);
+  assert(after.retirement_missed == before.retirement_missed);
+  // Reading the middle open compacts entries belonging to the newest open.
+  for (unsigned int i = 0U; i < 10U; i++)
+    expect_retired(&old[1], 25U, 64U + i);
+  assert(midi_port_close(&old[0]) == MIDI_STATUS_OK);
+  assert(midi_port_close(&old[1]) == MIDI_STATUS_OK);
+  for (unsigned int i = 0U; i < 29U; i++)
+    expect_retired(&old[2], 26U, 96U + i);
+  midi_port_event_t event = {0};
+  assert(midi_port_read(&old[2], &event) == MIDI_STATUS_DISCONNECTED);
+  assert(midi_port_close(&old[2]) == MIDI_STATUS_OK);
+  assert(midi_port_lifecycle_get_info(1U, &after) == MIDI_STATUS_OK);
+  assert(after.retired_depth == 0U && after.retired_dropped == before.retired_dropped + 3U);
+  input_reconnect(&device, 27U);
+}
+
+static void check_sysex_bulk_boundaries(const midi_port_handle_t *output) {
+  const uint8_t payload[] = {0U, 1U, 2U, 126U, 127U, 3U, 4U};
+  // Compare byte-by-byte and bulk acceptance at every staging position,
+  // including a full queue where only the staged prefix can be consumed.
+  for (unsigned int staged = 0U; staged < 3U; staged++) {
+    for (unsigned int full = 0U; full < 2U; full++) {
+      midi_status_t expected_status = MIDI_STATUS_OK;
+      size_t expected_accepted = 0U;
+      unsigned int expected_staged = 0U, expected_fragments = 0U;
+      for (unsigned int bulk = 0U; bulk < 2U; bulk++) {
+        midi_port_sysex_t session = {0};
+        assert(midi_port_sysex_begin(output, &session) == MIDI_STATUS_OK);
+        for (unsigned int i = 0U; i < (staged + 2U) % 3U; i++)
+          assert(midi_port_sysex_write(&session, 0x7dU) == MIDI_STATUS_OK);
+        assert(sysex_staged == staged);
+        output_depth = full ? MIDI_OUTPUT_QUEUE_CAPACITY : 0U;
+        unsigned int before = claimed_bytes;
+        size_t accepted = 0U;
+        midi_status_t status = MIDI_STATUS_OK;
+        if (bulk) {
+          status = midi_port_sysex_write_bytes(&session, payload, sizeof(payload), &accepted);
+        } else {
+          while (accepted < sizeof(payload)) {
+            status = midi_port_sysex_write(&session, payload[accepted]);
+            if (status != MIDI_STATUS_OK)
+              break;
+            accepted++;
+          }
+          expected_status = status;
+          expected_accepted = accepted;
+          expected_staged = sysex_staged;
+          expected_fragments = sysex_fragments;
+        }
+        assert(status == (full ? MIDI_STATUS_QUEUE_FULL : MIDI_STATUS_OK));
+        assert(accepted == (full ? 2U - staged : sizeof(payload)));
+        assert(status == expected_status && accepted == expected_accepted);
+        assert(sysex_staged == expected_staged && sysex_fragments == expected_fragments);
+        assert(claimed_bytes == before + accepted && session.active);
+        output_depth = 0U;
+        assert(midi_port_sysex_cancel(&session) == MIDI_STATUS_OK);
+      }
+    }
+  }
+
+  // accepted may alias the payload. Its updates can make a later byte invalid
+  // after the initial whole-payload validation; preserve INVALID_ARGUMENT and
+  // the exact consumed prefix rather than returning a generic output failure.
+  struct { uint8_t prefix[128]; size_t accepted; } aliased = {0};
+  size_t value = 128U;
+  const uint8_t *representation = (const uint8_t *)&value;
+  size_t offset = 0U;
+  while (representation[offset] != 0x80U)
+    offset++;
+  midi_port_sysex_t session = {0};
+  assert(midi_port_sysex_begin(output, &session) == MIDI_STATUS_OK);
+  assert(midi_port_sysex_write_bytes(&session, (const uint8_t *)&aliased,
+      sizeof(aliased), &aliased.accepted) == MIDI_STATUS_INVALID_ARGUMENT);
+  assert(aliased.accepted == offsetof(typeof(aliased), accepted) + offset);
+  assert(midi_port_sysex_cancel(&session) == MIDI_STATUS_OK);
+}
+
 // Exercise the application surface with simultaneous IN/OUT handles. Raw
 // registry/transport calls below set up topology and inject device traffic.
 static void check_application_io(midi_port_device_t device) {
@@ -647,6 +766,7 @@ static void check_application_io(midi_port_device_t device) {
   assert(sysex_info.status == MIDI_STATUS_NOT_OPEN && !sysex_info.claim_present);
   assert(midi_port_sysex_write_bytes(&session, NULL, 0U, &accepted) == MIDI_STATUS_NOT_OPEN);
   assert(accepted == 0U);
+  check_sysex_bulk_boundaries(&output);
 
   // Closing output leaves input usable; output failures also stay local.
   assert(midi_port_open(1U, &input) == MIDI_STATUS_OK);
@@ -1322,6 +1442,7 @@ int main(void) {
   check_statuses(&device);
   check_handle_lifetimes(&device, &key);
   check_input_handle_lifetimes(device);
+  check_retirement_ordering(device);
   check_application_io(device);
   check_single_direction_devices(device);
   check_receiver_policy(device);

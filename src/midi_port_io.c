@@ -13,6 +13,13 @@
 #define PORT_RETIRED_CAPACITY (MIDI_INPUT_QUEUE_CAPACITY + 1U)
 #define PORT_CHANGE_CAPACITY 8U
 
+// Keep an accepted event inseparable from the open that owns it, including
+// when removing another open's events compacts the retirement queue.
+typedef struct {
+  uint32_t open_token;
+  midi_port_event_t event;
+} port_retired_event_t;
+
 typedef struct {
   uint32_t serial;
   midi_port_info_t previous;
@@ -21,8 +28,7 @@ typedef struct {
   uint64_t cable_overflow_base;
   uint64_t cable_dropped_base;
 
-  midi_port_event_t retired[PORT_RETIRED_CAPACITY];
-  uint32_t retired_tokens[PORT_RETIRED_CAPACITY];
+  port_retired_event_t retired[PORT_RETIRED_CAPACITY];
   unsigned int retired_head;
   unsigned int retired_depth;
   uint64_t retired_dropped;
@@ -88,11 +94,13 @@ static void port_retire(port_runtime_t *runtime,
     unsigned int tail = (runtime->retired_head +
         runtime->retired_depth) % PORT_RETIRED_CAPACITY;
 
-    runtime->retired_tokens[tail] = runtime->open_token;
-    runtime->retired[tail] = (midi_port_event_t){
-      .port = id,
-      .generation = received.generation,
-      .event = received.event
+    runtime->retired[tail] = (port_retired_event_t){
+      .open_token = runtime->open_token,
+      .event = {
+        .port = id,
+        .generation = received.generation,
+        .event = received.event
+      }
     };
     runtime->retired_depth++;
   }
@@ -274,7 +282,6 @@ static void retired_remove(port_runtime_t *runtime, unsigned int offset) {
     unsigned int dst = (runtime->retired_head + i) % PORT_RETIRED_CAPACITY;
     unsigned int src = (dst + 1U) % PORT_RETIRED_CAPACITY;
     runtime->retired[dst] = runtime->retired[src];
-    runtime->retired_tokens[dst] = runtime->retired_tokens[src];
   }
   runtime->retired_depth--;
 }
@@ -333,7 +340,7 @@ midi_status_t midi_port_get_handle_info(const midi_port_handle_t *handle,
     if (runtime->serial == handle->definition_serial) {
       for (unsigned int i = 0U; i < runtime->retired_depth; i++) {
         unsigned int index = (runtime->retired_head + i) % PORT_RETIRED_CAPACITY;
-        if (runtime->retired_tokens[index] == handle->open_token)
+        if (runtime->retired[index].open_token == handle->open_token)
           info->retired_depth++;
       }
     }
@@ -524,7 +531,7 @@ midi_status_t midi_port_close(midi_port_handle_t *handle) {
   if (runtime->serial == handle->definition_serial) {
     for (unsigned int i = 0U; i < runtime->retired_depth;) {
       unsigned int index = (runtime->retired_head + i) % PORT_RETIRED_CAPACITY;
-      if (runtime->retired_tokens[index] == handle->open_token)
+      if (runtime->retired[index].open_token == handle->open_token)
         retired_remove(runtime, i);
       else
         i++;
@@ -611,9 +618,9 @@ midi_status_t midi_port_read(const midi_port_handle_t *handle,
   // Retired events belong to an open token, not to whoever next opens ID.
   for (unsigned int i = 0U; i < runtime->retired_depth; i++) {
     unsigned int index = (runtime->retired_head + i) % PORT_RETIRED_CAPACITY;
-    if (runtime->retired_tokens[index] != handle->open_token)
+    if (runtime->retired[index].open_token != handle->open_token)
       continue;
-    *event = runtime->retired[index];
+    *event = runtime->retired[index].event;
     retired_remove(runtime, i);
     return MIDI_STATUS_OK;
   }
@@ -783,6 +790,19 @@ midi_status_t midi_port_sysex_get_info(const midi_port_sysex_t *session,
   return MIDI_STATUS_OK;
 }
 
+// The caller has validated the payload and the pinned session. Foreground
+// calls cannot interleave with binding/service updates, so a bulk write can
+// retain that validation while accepting its prefix. Queue rejection still
+// uses the current output state to preserve the exact error classification.
+static midi_status_t sysex_write_ready(const midi_port_sysex_t *session,
+    uint8_t byte) {
+  // Preserve single-byte validation even if *accepted updates payload storage.
+  if (byte >= 0x80U)
+    return MIDI_STATUS_INVALID_ARGUMENT;
+  return midi_output_sysex_write_claim(session->generation, session->claim, byte) ?
+      MIDI_STATUS_OK : output_rejected(session->generation);
+}
+
 midi_status_t midi_port_sysex_write_bytes(midi_port_sysex_t *session,
     const uint8_t *bytes, size_t count, size_t *accepted) {
   if (!accepted)
@@ -798,7 +818,7 @@ midi_status_t midi_port_sysex_write_bytes(midi_port_sysex_t *session,
   if (status != MIDI_STATUS_OK)
     return status;
   while (*accepted < count) {
-    status = midi_port_sysex_write(session, bytes[*accepted]);
+    status = sysex_write_ready(session, bytes[*accepted]);
     if (status != MIDI_STATUS_OK)
       return status;
     (*accepted)++;
@@ -812,8 +832,7 @@ midi_status_t midi_port_sysex_write(midi_port_sysex_t *session, uint8_t byte) {
   midi_status_t status = sysex_target_current(session);
   if (status != MIDI_STATUS_OK)
     return status;
-  return midi_output_sysex_write_claim(session->generation, session->claim, byte) ?
-      MIDI_STATUS_OK : output_rejected(session->generation);
+  return sysex_write_ready(session, byte);
 }
 
 midi_status_t midi_port_sysex_end(midi_port_sysex_t *session) {
