@@ -1,12 +1,18 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "midi_stream.h"
 #include "midi_status.h"
 #include "midi_ports.h"
 
+// Application I/O entry point. Define logical IN and OUT ports through
+// configuration, then discover their IDs with midi_port_next/get_info.
+// Each definition has one direction; an application can open both an IN
+// and an OUT definition for the same physical endpoint independently.
+//
 // Foreground-only application boundary. Registry and transport APIs retain
 // their existing Boolean interfaces during this incremental migration.
 // INVALID_ARGUMENT: null argument, invalid ID, direction or MIDI payload.
@@ -70,17 +76,76 @@ typedef struct {
   uint32_t open_token;
 } midi_port_sysex_t;
 
+// A successful inspection returns OK; status describes permission/service
+// validity. Writes can still return BUSY or QUEUE_FULL. Identity always describes the supplied handle, never a replacement.
+// Stale handles may still have retired input events to drain.
+// Service counters are shared across cables, not per logical port. They
+// are reported only for a current handle, so a stale open cannot inspect
+// a replacement open even when it uses the same device generation.
+typedef struct {
+  midi_port_handle_t handle;
+  midi_status_t status;
+  unsigned int retired_depth;
+  bool service_present;
+  unsigned int service_queue_depth;
+  unsigned int service_queue_capacity;
+  unsigned int service_pending_aborts;
+  unsigned int service_in_flight;
+  bool sysex_active;
+  uint8_t sysex_cable;
+} midi_port_handle_info_t;
+
+// Session identity remains pinned after end, cancellation or disconnect.
+// status describes permission/service validity for write/end; a write may
+// still return QUEUE_FULL. claim_present means the original transport claim
+// still exists for cancellation (which may itself need a queue-space retry),
+// even when status is DISCONNECTED. It never describes a replacement claim.
+typedef struct {
+  midi_port_sysex_t session;
+  midi_status_t status;
+  bool claim_present;
+  unsigned int staged;
+  unsigned int fragments;
+} midi_port_sysex_info_t;
+
+// Inspect a definition without acquiring permission or starting a service.
+// OK includes unbound/ambiguous definitions; inspect info.state.
+midi_status_t midi_port_get_info(unsigned int id, midi_port_info_t *info);
+
+// Enumerate defined IDs in ascending order, including unbound/ambiguous
+// ports. Initialise *cursor to zero. OK advances it to info.id; EMPTY sets
+// it to MIDI_PORT_CAPACITY. Other errors leave it unchanged. Reset to zero
+// to restart. This is a live view, not a frozen topology snapshot.
+midi_status_t midi_port_next(unsigned int *cursor, midi_port_info_t *info);
+
+// Inspection never starts services or consumes events. Both return OK for
+// a successfully inspected closed/stale handle/session; check info.status.
+midi_status_t midi_port_get_handle_info(const midi_port_handle_t *handle,
+    midi_port_handle_info_t *info);
+midi_status_t midi_port_sysex_get_info(const midi_port_sysex_t *session,
+    midi_port_sysex_info_t *info);
+
 // The caller owns this handle and must initialise
 // it to zero before its first use.
 //
 // A successful begin pins the current generation,
-// cable and logical-port definition.
+// cable, logical-port definition and open permission.
+// Only an OUT handle can begin a session. Subsequent calls use the pinned
+// session capability and return the same statuses as ordinary handle I/O.
 midi_status_t midi_port_sysex_begin(const midi_port_handle_t *handle,
     midi_port_sysex_t *session);
 
 // Only seven-bit SysEx payload bytes are accepted.
 // Non-OK leaves the supplied byte unconsumed.
 midi_status_t midi_port_sysex_write(midi_port_sysex_t *session, uint8_t byte);
+
+// Accept a prefix of a seven-bit payload without appending F7. *accepted
+// is always set (when non-null), including on errors. QUEUE_FULL leaves
+// the suffix unconsumed; retry at bytes + *accepted. Validate the entire
+// payload first: INVALID_ARGUMENT never consumes a prefix. A zero-length
+// payload permits NULL bytes but still checks the session's availability.
+midi_status_t midi_port_sysex_write_bytes(midi_port_sysex_t *session,
+    const uint8_t *bytes, size_t count, size_t *accepted);
 
 // Enqueue the final fragment, including F7.
 // Backpressure leaves the handle active.
@@ -131,8 +196,14 @@ midi_status_t midi_port_close(midi_port_handle_t *handle);
 // session cannot be released safely.
 midi_status_t midi_port_undefine(unsigned int id);
 
-// Nonblocking: success means accepted for sending,
-// not delivered to the external MIDI receiver.
+// Write one complete short message through an OUT handle. Nonblocking:
+// OK means accepted for sending, not delivered to the external receiver.
+// Use the SysEx session operations for streamed payloads; input SysEx is
+// returned as BEGIN/DATA/END/ABORT events by midi_port_read.
+midi_status_t midi_port_write(const midi_port_handle_t *handle,
+    const midi_short_message_t *message);
+
+// Compatibility spelling for midi_port_write; identical status semantics.
 midi_status_t midi_port_send_short(const midi_port_handle_t *handle,
     const midi_short_message_t *message);
 
