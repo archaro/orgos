@@ -115,12 +115,18 @@ static void output_fail(midi_output_record_t *output,
   if (output->info.state == MIDI_OUTPUT_RUNNING)
     output->info.state = MIDI_OUTPUT_FAILED;
 
-  // A failed output service cannot safely
-  // resubmit its outstanding packets.
-  //
-  // Account before another path can clear
-  // the in-flight count.
+  // Failure prevents further submissions, but an outstanding transfer may
+  // still produce a definitive completion. Finalise only after that outcome
+  // is reconciled or the original hardware record is no longer accessible.
+  if (output->info.in_flight == 0U)
+    output_account_loss(output);
+}
+
+static void output_abandon_transfer(midi_output_record_t *output) {
+  // Preserve the submitted/unsent distinction before retiring ownership.
+  // No later completion may confirm packets already counted as lost.
   output_account_loss(output);
+  output->info.in_flight = 0U;
 }
 
 bool midi_output_start_generation(uint32_t generation) {
@@ -518,6 +524,7 @@ void midi_output_service(void) {
 
       if (!xhci_bulk_out_async_get(slot, &hw)) {
         output_fail(output, XHCI_BULK_OUT_EVENT_FAILED);
+        output_abandon_transfer(output);
 
       } else if (hw.state == XHCI_BULK_OUT_ASYNC_UNCERTAIN) {
         output_fail(output, hw.result);
@@ -532,7 +539,7 @@ void midi_output_service(void) {
 
         } else if (done.state == XHCI_BULK_OUT_ASYNC_COMPLETE &&
             done.transfer.length == 4U * output->info.in_flight &&
-            done.result == XHCI_BULK_OUT_OK && !output->failure_recorded) {
+            done.result == XHCI_BULK_OUT_OK && !output->losses_accounted) {
 
           // Remove the original batch only after
           // its complete successful transfer.
@@ -548,11 +555,12 @@ void midi_output_service(void) {
           output_fail(output, done.result == XHCI_BULK_OUT_OK ?
               XHCI_BULK_OUT_TRANSFER_FAILED : done.result);
 
-          output->info.in_flight = 0U;
+          output_abandon_transfer(output);
         }
 
       } else if (hw.state != XHCI_BULK_OUT_ASYNC_PENDING) {
         output_fail(output, XHCI_BULK_OUT_EVENT_FAILED);
+        output_abandon_transfer(output);
       }
     }
 
@@ -560,12 +568,21 @@ void midi_output_service(void) {
       if (output->info.state == MIDI_OUTPUT_RUNNING)
         output->info.state = MIDI_OUTPUT_DISCONNECTED;
 
-      // Confirmed completions were reconciled
-      // above. Anything remaining in the queue
-      // has no confirmed delivery outcome.
-      output_account_loss(output);
+      // A matching old generation can still deliver a terminal result.
+      // Defer final accounting while its transfer remains unresolved.
+      // If the identity is gone, never inspect a reused slot for evidence.
+      if (!same)
+        output_abandon_transfer(output);
+      else if (output->info.in_flight == 0U)
+        output_account_loss(output);
       continue;
     }
+
+    // A late success may resolve a failed service's in-flight batch. The
+    // queued tail still cannot be transmitted; account only that remainder.
+    if (output->info.state != MIDI_OUTPUT_RUNNING &&
+        output->info.in_flight == 0U)
+      output_account_loss(output);
 
     if (output->info.state != MIDI_OUTPUT_RUNNING ||
         output->info.in_flight != 0U || output->info.queue_depth == 0U)

@@ -20,9 +20,11 @@ static usb_device_t live = {
 };
 
 static xhci_bulk_out_async_info_t hw;
+static bool hw_available = true;
+static bool fail_reap_once;
 static uint64_t fake_now;
 static unsigned int transfers_started;
-static uint8_t transmitted[256U * 4U];
+static uint8_t transmitted[512U * 4U];
 static unsigned int transmitted_length;
 
 uint64_t timer_now_us(void) {
@@ -82,7 +84,7 @@ bool usb_get_enumeration_generation(uint32_t generation,
 bool xhci_bulk_out_async_get(uint8_t slot,
     xhci_bulk_out_async_info_t *info) {
 
-  if (slot != live.slot_id)
+  if (slot != live.slot_id || !hw_available)
     return false;
 
   *info = hw;
@@ -91,6 +93,11 @@ bool xhci_bulk_out_async_get(uint8_t slot,
 
 bool xhci_bulk_out_async_reap(uint8_t slot,
     xhci_bulk_out_async_info_t *info) {
+
+  if (fail_reap_once) {
+    fail_reap_once = false;
+    return false;
+  }
 
   if (slot != live.slot_id ||
       (hw.state != XHCI_BULK_OUT_ASYNC_COMPLETE &&
@@ -457,6 +464,203 @@ static void test_usb_midi_decode(void) {
   assert(!usb_midi_decode_packet(reserved, &event));
 }
 
+static void check_losses(uint64_t unsent, uint64_t unconfirmed,
+    uint32_t events) {
+  midi_output_loss_info_t losses = {0};
+  assert(midi_output_loss_get_info(&losses));
+  assert(losses.not_submitted == unsent);
+  assert(losses.submitted_unconfirmed == unconfirmed);
+  assert(losses.loss_events == events);
+  assert(losses.invariant_violations == 0U);
+}
+
+static void replace_generation(uint32_t generation) {
+  live.generation = generation;
+  live.state = USB_DEVICE_ACTIVE;
+  // The USB lifecycle has retired the old endpoint. Reusing this same
+  // slot ID must not let MIDI reap the new generation as an old transfer.
+  hw = (xhci_bulk_out_async_info_t){0};
+  assert(midi_output_start_generation(generation));
+}
+
+static void queue_messages(uint32_t generation, unsigned int count) {
+  midi_short_message_t message = {
+    .status = 0x90U, .data = {60U, 100U}, .length = 3U
+  };
+  for (unsigned int i = 0U; i < count; i++)
+    assert(midi_output_enqueue_short(generation, 0U, &message));
+}
+
+static void test_disconnect_losses(void) {
+  midi_output_info_t info = {0};
+  midi_output_loss_info_t losses = {0};
+  // Generation 1's disconnect succeeded; generation 2's uncertain
+  // transfer ended in failure. These are boot-lifetime cumulative counts.
+  check_losses(0U, 1U, 1U);
+
+  replace_generation(3U);
+  queue_messages(3U, MIDI_OUTPUT_BATCH_PACKETS + 3U);
+  midi_output_service();
+  unsigned int started = transfers_started;
+  assert(midi_output_get_info(3U, &info));
+  assert(info.in_flight == MIDI_OUTPUT_BATCH_PACKETS);
+  live.state = USB_DEVICE_DISCONNECTING;
+  for (unsigned int i = 0U; i < 3U; i++)
+    midi_output_service();
+  assert(transfers_started == started);
+  check_losses(0U, 1U, 1U); // No final classification while pending.
+  complete();
+  assert(midi_output_get_info(3U, &info));
+  assert(info.state == MIDI_OUTPUT_DISCONNECTED);
+  assert(info.confirmed == MIDI_OUTPUT_BATCH_PACKETS);
+  assert(info.in_flight == 0U && info.queue_depth == 3U);
+  assert(info.accepted == info.confirmed + info.queue_depth);
+  check_losses(3U, 1U, 2U); // Only the never-submitted tail was lost.
+  assert(midi_output_loss_get_info(&losses));
+  assert(losses.last_generation == 3U);
+  assert(losses.last_not_submitted == 3U);
+  assert(losses.last_submitted_unconfirmed == 0U);
+  midi_output_service();
+  assert(transfers_started == started);
+  check_losses(3U, 1U, 2U);
+  // Merely observing ACTIVE again cannot authorise the disconnected output.
+  live.state = USB_DEVICE_ACTIVE;
+  midi_output_service();
+  assert(transfers_started == started);
+  assert(!midi_output_start_generation(3U));
+  check_losses(3U, 1U, 2U);
+
+  replace_generation(4U);
+  check_losses(3U, 1U, 2U); // Recycling must not count that tail twice.
+  queue_messages(4U, MIDI_OUTPUT_BATCH_PACKETS + 2U);
+  midi_output_service();
+  started = transfers_started;
+  live.state = USB_DEVICE_DISCONNECTING;
+  midi_output_service();
+  check_losses(3U, 1U, 2U);
+  hw.state = XHCI_BULK_OUT_ASYNC_FAILED;
+  hw.result = XHCI_BULK_OUT_TRANSFER_FAILED;
+  midi_output_service();
+  assert(midi_output_get_info(4U, &info));
+  assert(info.state == MIDI_OUTPUT_DISCONNECTED);
+  assert(info.confirmed == 0U && info.in_flight == 0U);
+  assert(info.failures == 1U);
+  check_losses(5U, 17U, 3U);
+  assert(midi_output_loss_get_info(&losses));
+  assert(losses.last_generation == 4U);
+  assert(losses.last_error == XHCI_BULK_OUT_TRANSFER_FAILED);
+  assert(losses.last_not_submitted == 2U);
+  assert(losses.last_submitted_unconfirmed == MIDI_OUTPUT_BATCH_PACKETS);
+  midi_output_service();
+  assert(transfers_started == started);
+  check_losses(5U, 17U, 3U);
+
+  replace_generation(5U);
+  check_losses(5U, 17U, 3U);
+  queue_messages(5U, MIDI_OUTPUT_BATCH_PACKETS + 4U);
+  midi_output_service();
+  started = transfers_started;
+  live.state = USB_DEVICE_DISCONNECTING;
+  midi_output_service();
+  // UNCERTAIN is still an unresolved transfer, not a terminal result.
+  hw.state = XHCI_BULK_OUT_ASYNC_UNCERTAIN;
+  hw.result = XHCI_BULK_OUT_TIMEOUT;
+  for (unsigned int i = 0U; i < 3U; i++)
+    midi_output_service();
+  assert(midi_output_get_info(5U, &info));
+  assert(info.confirmed == 0U && info.in_flight == MIDI_OUTPUT_BATCH_PACKETS);
+  assert(transfers_started == started);
+  check_losses(5U, 17U, 3U);
+  // Recycle without another service pass: losing the old record must
+  // account for both the unresolved batch and its unsent tail exactly once.
+  replace_generation(6U);
+  assert(!midi_output_get_info(5U, &info));
+  check_losses(9U, 33U, 4U);
+  assert(midi_output_loss_get_info(&losses));
+  assert(losses.last_generation == 5U);
+  assert(losses.last_not_submitted == 4U);
+  assert(losses.last_submitted_unconfirmed == MIDI_OUTPUT_BATCH_PACKETS);
+  midi_output_service();
+  assert(transfers_started == started);
+  check_losses(9U, 33U, 4U);
+
+  // No service call before disconnect: all packets are never submitted.
+  queue_messages(6U, 5U);
+  live.state = USB_DEVICE_DISCONNECTING;
+  midi_output_service();
+  assert(midi_output_get_info(6U, &info));
+  assert(info.confirmed == 0U && info.in_flight == 0U);
+  assert(info.queue_depth == 5U && transfers_started == started);
+  check_losses(14U, 33U, 5U);
+  midi_output_service();
+  replace_generation(7U);
+  check_losses(14U, 33U, 5U);
+  assert(midi_output_loss_get_info(&losses));
+  assert(losses.last_generation == 6U);
+  assert(losses.last_not_submitted == 5U);
+  assert(losses.last_submitted_unconfirmed == 0U);
+
+  // The managed generation can disappear before the output record is
+  // replaced. Never inspect/reap the reused slot as if it were still old.
+  queue_messages(7U, 2U);
+  midi_output_service();
+  started = transfers_started;
+  live.generation = 8U;
+  hw.state = XHCI_BULK_OUT_ASYNC_COMPLETE;
+  midi_output_service();
+  assert(midi_output_get_info(7U, &info));
+  assert(info.state == MIDI_OUTPUT_DISCONNECTED && info.confirmed == 0U);
+  assert(hw.state == XHCI_BULK_OUT_ASYNC_COMPLETE); // Was not reaped.
+  assert(transfers_started == started);
+  check_losses(14U, 35U, 6U);
+  replace_generation(8U);
+  midi_output_service();
+  check_losses(14U, 35U, 6U);
+
+  // A failed reap need not destroy the terminal evidence. Preserve the
+  // batch until a subsequent reap succeeds, without restarting the service.
+  replace_generation(9U);
+  queue_messages(9U, MIDI_OUTPUT_BATCH_PACKETS + 1U);
+  midi_output_service();
+  started = transfers_started;
+  fail_reap_once = true;
+  complete();
+  assert(midi_output_get_info(9U, &info));
+  assert(info.state == MIDI_OUTPUT_FAILED);
+  assert(info.confirmed == 0U && info.in_flight == MIDI_OUTPUT_BATCH_PACKETS);
+  check_losses(14U, 35U, 6U);
+  midi_output_service();
+  assert(midi_output_get_info(9U, &info));
+  assert(info.state == MIDI_OUTPUT_FAILED);
+  assert(info.confirmed == MIDI_OUTPUT_BATCH_PACKETS && info.in_flight == 0U);
+  assert(info.queue_depth == 1U && info.failures == 1U);
+  assert(transfers_started == started);
+  check_losses(15U, 35U, 7U);
+  midi_output_service();
+  replace_generation(10U);
+  check_losses(15U, 35U, 7U);
+
+  // If the old hardware record has disappeared, no result can be reaped.
+  // Account before clearing in_flight, then ignore any later slot contents.
+  queue_messages(10U, 3U);
+  midi_output_service();
+  started = transfers_started;
+  live.state = USB_DEVICE_DISCONNECTING;
+  hw_available = false;
+  midi_output_service();
+  assert(midi_output_get_info(10U, &info));
+  assert(info.confirmed == 0U && info.in_flight == 0U);
+  check_losses(15U, 38U, 8U);
+  hw_available = true;
+  hw.state = XHCI_BULK_OUT_ASYNC_COMPLETE;
+  midi_output_service();
+  assert(midi_output_get_info(10U, &info));
+  assert(info.confirmed == 0U && transfers_started == started);
+  check_losses(15U, 38U, 8U);
+  replace_generation(11U);
+  check_losses(15U, 38U, 8U);
+}
+
 int main(void) {
   test_usb_midi_decode();
 
@@ -532,6 +736,8 @@ int main(void) {
   midi_output_service();
   assert(hw.state == XHCI_BULK_OUT_ASYNC_PENDING);
 
+  check_losses(0U, 0U, 0U);
+
   // Disconnect while a batch remains outstanding.
   live.state = USB_DEVICE_DISCONNECTING;
   midi_output_service();
@@ -540,6 +746,7 @@ int main(void) {
   assert(info.state == MIDI_OUTPUT_DISCONNECTED);
   assert(info.queue_depth == 1U);
   assert(info.in_flight == 1U);
+  check_losses(0U, 0U, 0U);
 
   // Its eventual definitive completion can still
   // be reconciled against the original generation.
@@ -548,6 +755,7 @@ int main(void) {
   assert(midi_output_get_info(1U, &info));
   assert(info.confirmed == 1U);
   assert(info.queue_depth == 0U);
+  check_losses(0U, 0U, 0U);
 
   // A new incarnation begins with fresh state.
   live.generation = 2U;
@@ -575,6 +783,7 @@ int main(void) {
   assert(info.in_flight == 1U);
   assert(!midi_output_enqueue_short(2U, 0U, &message));
   assert(!midi_output_stop_generation(2U));
+  check_losses(0U, 0U, 0U);
 
   // Even a late terminal failure must not be
   // mistaken for successful delivery.
@@ -586,6 +795,9 @@ int main(void) {
   assert(info.confirmed == 0U);
   assert(info.in_flight == 0U);
   assert(info.failures == 1U);
+
+  check_losses(0U, 1U, 1U);
+  test_disconnect_losses();
 
   puts("MIDI output queue: PASS");
   return 0;
