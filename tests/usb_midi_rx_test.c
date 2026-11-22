@@ -13,6 +13,7 @@ static usb_device_t live = {
   .root_port = 1U, .parent_slot = 1U, .parent_port = 1U,
   .slot_id = 2U, .generation = 1U, .state = USB_DEVICE_ACTIVE
 };
+static unsigned int input_cables = 2U;
 static bool stream_started;
 static bool stream_failed;
 static unsigned int stream_starts;
@@ -60,7 +61,7 @@ bool usb_get_enumeration_generation(uint32_t generation, usb_enum_info_t *info) 
     return false;
   *info = (usb_enum_info_t){
     .result = USB_ENUM_OK, .slot_id = live.slot_id, .hub_port = live.parent_port,
-    .midi = {.in_found = true, .bulk_in_jacks = 2U}
+    .midi = {.in_found = true, .bulk_in_jacks = input_cables}
   };
   return true;
 }
@@ -225,21 +226,26 @@ static void check_diagnostic_policy(void) {
 
 static uint32_t input_generation;
 
-static void start_input(uint32_t generation, bool filtered) {
+static void start_input_cables(uint32_t generation, bool filtered, unsigned int cables) {
   live.state = USB_DEVICE_DISCONNECTING;
   usb_midi_rx_service();
   midi_input_service();
+  input_cables = cables;
   live.generation = input_generation = generation;
   live.state = USB_DEVICE_ACTIVE;
   stream_started = stream_failed = false;
   pending_head = pending_depth = 0U;
   assert(usb_midi_rx_start_auto_generation(generation));
   if (filtered) {
-    assert(midi_input_open_port_cable(generation, 0U));
-    assert(midi_input_open_port_cable(generation, 1U));
+    for (unsigned int cable = 0U; cable < cables; cable++)
+      assert(midi_input_open_port_cable(generation, cable));
   } else {
     assert(midi_input_start_generation(generation));
   }
+}
+
+static void start_input(uint32_t generation, bool filtered) {
+  start_input_cables(generation, filtered, 2U);
 }
 
 static void packet(unsigned int cable, unsigned int cin,
@@ -460,6 +466,184 @@ static void check_diagnostic_loss_and_recycling(void) {
   assert(midi_input_backpressure_selftest());
 }
 
+// Each six-packet completion carries two messages per cable in a deliberately
+// uneven order. Two successive completions are queued before each service pass.
+static const unsigned int interleaved_cables[] = {0U, 1U, 2U, 1U, 0U, 2U};
+
+static void receive_interleaved(unsigned int rounds, unsigned int next[3]) {
+  assert(rounds > 0U);
+  for (unsigned int round = 0U; round < rounds; round++) {
+    receive(6U, 0U);
+    unsigned int tail = (pending_head + pending_depth - 1U) % 8U;
+    for (unsigned int i = 0U; i < 6U; i++) {
+      unsigned int cable = interleaved_cables[i];
+      assert(next[cable] < 128U);
+      pending[tail].data[i * 4U] = (uint8_t)((cable << 4U) | 0xbU);
+      pending[tail].data[i * 4U + 1U] = (uint8_t)(0xb0U + cable);
+      pending[tail].data[i * 4U + 2U] = (uint8_t)(0x60U + cable);
+      pending[tail].data[i * 4U + 3U] = (uint8_t)next[cable]++;
+    }
+    if (round % 2U == 1U || round + 1U == rounds)
+      usb_midi_rx_service();
+  }
+}
+
+static void expect_cc(const midi_input_event_t *event,
+    unsigned int cable, unsigned int sequence) {
+  assert(event->generation == input_generation && event->cable == cable);
+  assert(event->event.type == MIDI_STREAM_SHORT);
+  assert(event->event.message.length == 3U);
+  assert(event->event.message.status == 0xb0U + cable);
+  assert(event->event.message.data[0] == 0x60U + cable);
+  assert(event->event.message.data[1] == sequence);
+}
+
+static void drain_cc(unsigned int cable, unsigned int first, unsigned int count) {
+  midi_input_event_t event = {0};
+  for (unsigned int i = 0U; i < count; i++) {
+    assert(midi_input_read_cable(input_generation, cable, &event));
+    expect_cc(&event, cable, first + i);
+  }
+}
+
+static void expect_three_depths(unsigned int a, unsigned int b, unsigned int c) {
+  midi_input_info_t info = input_info();
+  assert(info.cables == 3U && info.attached && !info.lost);
+  assert(info.open_cables == 7U && info.port_filtered);
+  assert(info.malformed == 0U && info.pending_aborts == 0U);
+  assert(info.cable[0].queue_depth == a && info.cable[1].queue_depth == b &&
+      info.cable[2].queue_depth == c);
+  assert(info.queue_depth == a + b + c);
+}
+
+static void expect_three_receiver(unsigned int starts, unsigned int packets,
+    unsigned int drops, unsigned int transfers, bool faulted) {
+  usb_midi_rx_info_t rx = {0};
+  midi_input_info_t info = input_info();
+  assert(usb_midi_rx_get_info(input_generation, &rx));
+  assert(rx.cables == 3U && rx.state == USB_MIDI_RX_RUNNING && rx.discard_unclaimed);
+  assert(rx.queue_depth == 0U && rx.staged == 0U && pending_depth == 0U);
+  assert(rx.rejected == 0U && rx.unclaimed_dropped == 0U);
+  assert(rx.events == packets && rx.transfers == transfers);
+  assert(info.packets == packets - drops && info.short_messages == packets - drops);
+  assert(stream_started && !stream_failed && stream_starts == starts);
+  for (unsigned int cable = 0U; cable < 3U; cable++) {
+    assert(info.cable[cable].data_lost == (cable == 0U && faulted));
+    assert(info.cable[cable].overflow_packets == (cable == 0U && drops != 0U ? 1U : 0U));
+    assert(info.cable[cable].dropped_packets == (cable == 0U ? drops : 0U));
+  }
+}
+
+static void check_three_cable_interleaved_input(void) {
+  start_input_cables(20U, true, 3U);
+  unsigned int started = stream_starts;
+  unsigned int next[3] = {0};
+  midi_input_event_t event = {0};
+  receive_interleaved(20U, next); // Queue 40 on every cable before any reads.
+  expect_three_depths(40U, 40U, 40U);
+  drain_cc(1U, 0U, 40U);
+  assert(!midi_input_read_cable(input_generation, 1U, &event));
+  expect_three_depths(40U, 0U, 40U);
+  drain_cc(2U, 0U, 24U);
+  expect_three_depths(40U, 0U, 16U);
+  receive_interleaved(10U, next);
+  expect_three_depths(60U, 20U, 36U);
+  drain_cc(0U, 0U, 60U);
+  expect_three_depths(0U, 20U, 36U);
+  // All three tails now wrap while cables 1 and 2 retain older events.
+  receive_interleaved(10U, next);
+  expect_three_depths(20U, 40U, 56U);
+  drain_cc(0U, 60U, 20U);
+  drain_cc(1U, 40U, 40U);
+  drain_cc(2U, 24U, 56U);
+  expect_three_depths(0U, 0U, 0U);
+  assert(!midi_input_read(input_generation, &event));
+  expect_three_receiver(started, 240U, 0U, 40U, false);
+
+  // Fresh generation: merge heads in actual arrival order, first with no
+  // cable-specific reads, then skipping exactly the events already consumed.
+  start_input_cables(21U, true, 3U);
+  started = stream_starts;
+  for (unsigned int mixed = 0U; mixed < 2U; mixed++) {
+    unsigned int base = mixed * 40U;
+    next[0] = next[1] = next[2] = base;
+    receive_interleaved(20U, next);
+    expect_three_depths(40U, 40U, 40U);
+    if (mixed) {
+      drain_cc(1U, base, 17U);
+      drain_cc(2U, base, 9U);
+      expect_three_depths(40U, 23U, 31U);
+    }
+    unsigned int seen[3] = {base, base, base};
+    unsigned int read = 0U;
+    for (unsigned int i = 0U; i < 120U; i++) {
+      unsigned int cable = interleaved_cables[i % 6U];
+      unsigned int sequence = seen[cable]++;
+      if (mixed && ((cable == 1U && sequence < base + 17U) ||
+          (cable == 2U && sequence < base + 9U)))
+        continue;
+      assert(midi_input_read(input_generation, &event));
+      expect_cc(&event, cable, sequence);
+      read++;
+    }
+    assert(read == (mixed ? 94U : 120U));
+    expect_three_depths(0U, 0U, 0U);
+    assert(!midi_input_read(input_generation, &event));
+  }
+  expect_three_receiver(started, 240U, 0U, 40U, false);
+}
+
+static void check_three_cable_overflow_isolation(void) {
+  start_input_cables(22U, true, 3U);
+  unsigned int started = stream_starts;
+  unsigned int next[3] = {0};
+  midi_input_event_t event = {0};
+  // Fill with the same cable-distinguishable CC pattern used below.
+  for (; next[0] < MIDI_INPUT_QUEUE_CAPACITY; next[0]++) {
+    packet(0U, 0xbU, 0xb0U, 0x60U, (uint8_t)next[0]);
+    usb_midi_rx_service();
+  }
+  expect_three_depths(64U, 0U, 0U);
+  receive_interleaved(4U, next);
+  expect_three_depths(64U, 8U, 8U);
+  expect_three_receiver(started, 88U, 8U, 68U, true);
+  drain_cc(1U, 0U, 8U); // Leave cable 2 untouched across repeated cable-1 drains.
+  expect_three_depths(64U, 0U, 8U);
+  receive_interleaved(4U, next);
+  drain_cc(1U, 8U, 8U);
+  expect_three_depths(64U, 0U, 16U);
+  receive_interleaved(4U, next);
+  drain_cc(2U, 0U, 24U); // Reverse: leave cable 1 unread now.
+  expect_three_depths(64U, 8U, 0U);
+  receive_interleaved(4U, next);
+  drain_cc(2U, 24U, 8U);
+  expect_three_depths(64U, 16U, 0U);
+  receive_interleaved(2U, next);
+  expect_three_depths(64U, 20U, 4U);
+  drain_cc(0U, 0U, 64U); // Overflow never destroyed its accepted prefix.
+  assert(!midi_input_read_cable(input_generation, 0U, &event));
+  receive_interleaved(2U, next); // Free space alone must not recover cable 0.
+  expect_three_depths(0U, 24U, 8U);
+  expect_three_receiver(started, 184U, 40U, 84U, true);
+  assert(input_info().stalls == 1U);
+  assert(midi_input_close_port_cable(input_generation, 0U));
+  assert(midi_input_open_port_cable(input_generation, 0U));
+  expect_three_depths(0U, 24U, 8U);
+  midi_input_info_t info = input_info();
+  assert(!info.cable[0].data_lost && info.cable[0].overflow_packets == 1U);
+  assert(info.cable[0].dropped_packets == 40U && info.closed_events == 0U);
+  receive_interleaved(4U, next);
+  expect_three_depths(8U, 32U, 16U);
+  drain_cc(0U, 104U, 8U);
+  drain_cc(1U, 16U, 32U);
+  drain_cc(2U, 32U, 16U);
+  expect_three_depths(0U, 0U, 0U);
+  assert(!midi_input_read(input_generation, &event));
+  // Active loss cleared, but historical loss counters and receiver survive.
+  expect_three_receiver(started, 208U, 40U, 88U, false);
+  assert(input_info().stalls == 1U);
+}
+
 int main(void) {
   check_application_policy();
   check_diagnostic_policy();
@@ -469,5 +653,8 @@ int main(void) {
   check_independent_capacity_and_wrap();
   check_diagnostic_loss_and_recycling();
   puts("USB MIDI receiver policies: PASS");
+  check_three_cable_interleaved_input();
+  check_three_cable_overflow_isolation();
+  puts("USB MIDI three-cable integration: PASS");
   return 0;
 }
