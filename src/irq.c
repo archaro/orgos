@@ -6,6 +6,7 @@
 #include "gic.h"
 #include "irq.h"
 #include "pcie.h"
+#include "console.h"
 
 static volatile uint64_t total_irqs;
 static volatile uint32_t pcie_msi_irqs;
@@ -72,9 +73,15 @@ void irq_dispatch(void) {
       break;
     }
     default:
-      // We have no handler for this interrupt.
-      // Do not silently treat an unexpected interrupt
-      // as successfully handled.
+      // No handler owns this source. Mask exceptions before the polled
+      // UART diagnostic, then halt without clearing the source or EOI.
+      __asm__ volatile("msr daifset, #0xf" ::: "memory");
+      console_puts("\nUnexpected IRQ ");
+      console_putu32(id);
+      console_puts(" (IAR token 0x");
+      console_puthex(token, 8U);
+      console_puts("). System halted.\n");
+      __asm__ volatile("dsb sy" ::: "memory");
       for (;;) {
         __asm__ volatile("wfe");
       }
