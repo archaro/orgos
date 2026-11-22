@@ -938,7 +938,14 @@ void usb_device_port_changed(uint8_t port, uint16_t status, uint16_t change) {
   // has already connected on the same port.
   bool connection_changed = (change & 0x0001U) != 0U;
   bool connected = (status & 0x0001U) != 0U;
-  if (!connection_changed && connected)
+  // An active USB 2.0 device has lost its operational binding when the
+  // hub reports C_PORT_ENABLE with PortEnabled clear, even if the cable
+  // remains connected. Reset's normal enable-change acknowledgement is
+  // harmless when the resulting port is enabled. Do not interpret reset
+  // progress for a not-yet-active incarnation as an unexpected disable.
+  bool active_disabled = record->device.state == USB_DEVICE_ACTIVE &&
+      (change & 0x0002U) != 0U && (status & 0x0002U) == 0U;
+  if (!connection_changed && connected && !active_disabled)
     return;
 
   // Quiesce only the hardware slot owned by this

@@ -575,6 +575,34 @@ static void usb_auto_enum_request(void) {
   auto_enum_scheduler.next_check_us = 0ULL;
 }
 
+static void usb_auto_enum_reconsider_retired(uint32_t generation) {
+  usb_device_t device = {0};
+  if (!usb_get_device_by_generation(generation, &device) ||
+      device.state != USB_DEVICE_DETACHED || device.slot_id != 0U ||
+      device.parent_port == 0U || device.parent_port > 4U)
+    return;
+
+  uint8_t port = device.parent_port;
+  const usb_change_event_t *last = &last_port_change[port];
+  if (last->sequence == 0U || (last->status & 0x0001U) == 0U)
+    return;
+
+  // Called only after successful lifecycle rearm: the old generation has
+  // relinquished its slot and its latched enumeration attempt. A disable
+  // can leave a device physically connected without a new C_CONNECTION.
+  // Restore one admission request for that same connection epoch. A newer
+  // reconnect request is already pending and must not be replaced.
+  uint16_t bit = (uint16_t)(1U << port);
+  if (auto_enum_scheduler.pending_ports & bit)
+    return;
+  if (auto_enum_scheduler.port_epoch[port] == UINT32_MAX)
+    return; // Preserve epoch exhaustion's fail-closed behaviour.
+  if (auto_enum_scheduler.port_epoch[port] == 0U)
+    usb_auto_enum_port_observe(port, true);
+  else
+    auto_enum_scheduler.pending_ports |= bit;
+}
+
 void usb_auto_enum_set_enabled(bool enabled) {
   auto_enum_scheduler.status.enabled = enabled;
 
@@ -1293,7 +1321,10 @@ static void usb_lifecycle_service_run(usb_lifecycle_run_info_t *run) {
 
     // The previous generation no longer owns
     // the downstream controller resources.
-    // Check for a device already reconnected.
+    // Check for a device already reconnected or still physically present
+    // after an unexpected disable. Final admission rechecks live hub state
+    // and unique, unowned controller resources before touching hardware.
+    usb_auto_enum_reconsider_retired(run->generation);
     usb_auto_enum_request();
   }
 }
