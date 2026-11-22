@@ -1066,14 +1066,10 @@ static void cmd_midi_port(const char *args) {
         return;
       }
     }
-    midi_port_lifecycle_info_t life = {0};
-
-    if (midi_port_lifecycle_get_info(id, &life) &&
-        life.opened_generation != 0U && !midi_port_close(id)) {
-      console_puts("Close the MIDI port before clearing its definition.\n");
-      return;
-    }
-    bool cleared = midi_ports_clear(id);
+    bool cleared = midi_port_undefine(id);
+    console_printf("MIDI port %u: %s\n",
+        id, cleared ? "CLEARED" : "NOT CLEARED");
+    return;
     console_printf("MIDI port %u: %s\n", id,
         cleared ? "CLEARED" : "NOT DEFINED");
     return;

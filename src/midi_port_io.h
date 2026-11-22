@@ -88,6 +88,12 @@ bool midi_port_open(unsigned int id);
 // or cancelled before closing its port.
 bool midi_port_close(unsigned int id);
 
+// Close and remove a logical-port definition.
+//
+// Refuses removal if an active output SysEx
+// session cannot be released safely.
+bool midi_port_undefine(unsigned int id);
+
 // Nonblocking: success means accepted for sending,
 // not delivered to the external MIDI receiver.
 bool midi_port_send_short(unsigned int id,

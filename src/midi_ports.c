@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 #include "midi_ports.h"
+#include "midi_ports_internal.h"
 
 static midi_port_info_t ports[MIDI_PORT_CAPACITY];
 static uint32_t next_definition_serial = 1U;
@@ -41,7 +42,7 @@ bool midi_ports_define(unsigned int id, const midi_port_key_t *key) {
   return true;
 }
 
-bool midi_ports_clear(unsigned int id) {
+bool midi_ports_clear_registry(unsigned int id) {
   if (!valid_id(id) || ports[id - 1U].id == 0U)
     return false;
 

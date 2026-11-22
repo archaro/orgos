@@ -57,7 +57,6 @@ typedef struct {
 // Redefining an occupied ID or aliasing an endpoint
 // in the same direction is rejected.
 bool midi_ports_define(unsigned int id, const midi_port_key_t *key);
-bool midi_ports_clear(unsigned int id);
 bool midi_ports_get(unsigned int id, midi_port_info_t *info);
 
 // Reconcile all defined ports against the *complete*

@@ -4,6 +4,7 @@
 
 #include "midi_port_io.h"
 #include "midi_ports.h"
+#include "midi_ports_internal.h"
 #include "midi_input.h"
 #include "midi_output.h"
 #include "usb_midi_rx.h"
@@ -127,12 +128,25 @@ static bool port_update(unsigned int id, midi_port_info_t *info) {
         runtime->previous.key.direction == MIDI_PORT_IN &&
         runtime->opened_generation == runtime->previous.generation) {
 
-      port_retire(runtime, id, runtime->previous.generation,
-          runtime->previous.key.cable);
+      uint32_t old_generation = runtime->previous.generation;
+      unsigned int old_cable = runtime->previous.key.cable;
+      // Preserve accepted events before releasing
+      // the former logical input subscription.
+      port_retire(runtime, id, old_generation, old_cable);
+
+      midi_input_info_t input = {0};
+
+      if (midi_input_get_info(old_generation, &input) &&
+          input.attached && input.port_filtered) {
+
+        // A binding change must not leave an
+        // unowned cable consuming queue capacity.
+        if (!midi_input_close_port_cable(old_generation, old_cable))
+          return false;
+      }
     }
 
     port_save_change(runtime, id, &current);
-
     // A previous open never authorises a different
     // binding, even on the same physical socket.
     runtime->opened_generation = 0U;
@@ -246,6 +260,29 @@ bool midi_port_close(unsigned int id) {
   // Previously queued output remains eligible for
   // transmission by the normal output service.
   runtime->opened_generation = 0U;
+
+  return true;
+}
+
+bool midi_port_undefine(unsigned int id) {
+  midi_port_info_t current = {0};
+
+  if (!port_update(id, &current))
+    return false;
+
+  port_runtime_t *runtime = &runtimes[id - 1U];
+
+  // Release any application ownership before
+  // removing the registry definition.
+  if (runtime->opened_generation != 0U && !midi_port_close(id))
+    return false;
+
+  if (!midi_ports_clear_registry(id))
+    return false;
+
+  // No old events, changes or permissions may
+  // survive reuse of this numeric port ID.
+  *runtime = (port_runtime_t){0};
 
   return true;
 }
