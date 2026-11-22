@@ -589,7 +589,7 @@ static void check_application_io(midi_port_device_t device) {
   assert(midi_port_write(&output, &message) == MIDI_STATUS_BUSY);
   assert(midi_port_get_handle_info(&input, &input_info) == MIDI_STATUS_OK);
   assert(input_info.status == MIDI_STATUS_OK && input_info.service_present);
-  assert(input_info.service_queue_capacity == MIDI_INPUT_QUEUE_CAPACITY);
+  assert(input_info.service_queue_capacity == 2U * MIDI_INPUT_QUEUE_CAPACITY);
 
   // SysEx input remains usable during output SysEx, on the same endpoint.
   usb_midi_event_t packet = {
@@ -817,6 +817,147 @@ static void check_receiver_policy(midi_port_device_t device) {
   assert(midi_port_close(&first) == MIDI_STATUS_OK);
   assert(rx_running && !rx_discard_unclaimed);
   midi_auto_set_enabled(true);
+}
+
+static void check_application_cable_loss(midi_port_device_t device) {
+  input_disconnect();
+  device.in_cables = 2U;
+  input_reconnect(&device, 40U);
+  midi_port_handle_t failed = {0}, healthy = {0};
+  assert(midi_port_open(1U, &failed) == MIDI_STATUS_OK);
+  assert(midi_port_open(2U, &healthy) == MIDI_STATUS_OK);
+  uint32_t healthy_token = healthy.open_token;
+  midi_port_event_t event = {0};
+  midi_port_handle_info_t info = {0};
+  midi_input_info_t input = {0};
+  midi_port_handle_t old = failed;
+
+  for (unsigned int cycle = 0U; cycle < 3U; cycle++) {
+    for (unsigned int i = 0U; i < MIDI_INPUT_QUEUE_CAPACITY; i++)
+      inject(0U, 0x90U, (uint8_t)i);
+    inject(0U, 0x90U, 99U);
+    inject(1U, 0x91U, (uint8_t)(70U + cycle));
+    assert(midi_port_get_handle_info(&failed, &info) == MIDI_STATUS_OK);
+    assert(info.status == MIDI_STATUS_DATA_LOST && info.cable_data_lost);
+    assert(info.cable_queue_depth == MIDI_INPUT_QUEUE_CAPACITY);
+    assert(info.cable_overflow_packets == 1U && info.cable_dropped_packets == 1U);
+    assert(midi_port_open(1U, &failed) == MIDI_STATUS_OK);
+    assert(midi_port_get_handle_info(&failed, &info) == MIDI_STATUS_OK);
+    assert(info.status == MIDI_STATUS_DATA_LOST); // No implicit recovery.
+    for (unsigned int i = 0U; i < MIDI_INPUT_QUEUE_CAPACITY; i++) {
+      assert(midi_port_read(&failed, &event) == MIDI_STATUS_OK);
+      assert(event.generation == device.generation && event.event.message.data[0] == i);
+    }
+    event.port = 99U;
+    assert(midi_port_read(&failed, &event) == MIDI_STATUS_DATA_LOST);
+    assert(event.port == 0U);
+    inject(0U, 0x90U, 100U); // Still discarded after the queue is empty.
+    assert(midi_port_read(&failed, &event) == MIDI_STATUS_DATA_LOST);
+    assert(midi_port_get_handle_info(&failed, &info) == MIDI_STATUS_OK);
+    assert(info.cable_dropped_packets == 2U);
+    assert(midi_port_get_handle_info(&healthy, &info) == MIDI_STATUS_OK);
+    assert(info.status == MIDI_STATUS_OK && !info.cable_data_lost);
+    assert(info.cable_dropped_packets == 0U && healthy.open_token == healthy_token);
+    assert(midi_port_read(&healthy, &event) == MIDI_STATUS_OK);
+    assert(event.event.message.data[0] == 70U + cycle);
+    old = failed;
+    uint32_t serial = failed.definition_serial;
+    assert(midi_port_close(&failed) == MIDI_STATUS_OK);
+    assert(midi_port_open(1U, &failed) == MIDI_STATUS_OK);
+    assert(failed.generation == old.generation && failed.definition_serial == serial);
+    assert(failed.open_token != old.open_token);
+    assert(midi_port_get_handle_info(&failed, &info) == MIDI_STATUS_OK);
+    assert(info.status == MIDI_STATUS_OK && !info.cable_data_lost);
+    assert(info.cable_overflow_packets == 0U && info.cable_dropped_packets == 0U);
+    assert(midi_input_get_info(device.generation, &input));
+    assert(input.cable[0].overflow_packets == cycle + 1U);
+    assert(input.cable[0].dropped_packets == 2U * (cycle + 1U));
+    assert(midi_port_read(&old, &event) == MIDI_STATUS_DISCONNECTED);
+    assert(midi_port_get_handle_info(&old, &info) == MIDI_STATUS_OK);
+    assert(info.status == MIDI_STATUS_DISCONNECTED && !info.cable_data_lost);
+    assert(info.cable_dropped_packets == 0U); // A stale handle cannot inspect a new open.
+  }
+
+  midi_port_info_t definition = {0};
+  assert(midi_port_get_info(1U, &definition) == MIDI_STATUS_OK);
+  old = failed;
+  assert(midi_port_undefine(1U) == MIDI_STATUS_OK);
+  assert(midi_ports_define(1U, &definition.key));
+  assert(midi_ports_reconcile(&device, 1U));
+  failed = (midi_port_handle_t){0};
+  assert(midi_port_open(1U, &failed) == MIDI_STATUS_OK);
+  assert(failed.definition_serial != old.definition_serial);
+  assert(midi_port_read(&old, &event) == MIDI_STATUS_DISCONNECTED);
+  assert(midi_port_get_handle_info(&failed, &info) == MIDI_STATUS_OK);
+  assert(!info.cable_data_lost && info.cable_dropped_packets == 0U);
+
+  // Overflow in an established SysEx retains all earlier events and one
+  // ABORT. Retirement then pins these events to the original open token.
+  for (unsigned int i = 0U; i < MIDI_INPUT_QUEUE_CAPACITY - 3U; i++)
+    inject(0U, 0x90U, (uint8_t)i);
+  usb_midi_event_t packet = {
+    .cable = 0U, .cin = 4U, .length = 3U, .data = {0xf0U, 0x7dU, 1U}
+  };
+  assert(subscriber(device.generation, &packet, subscriber_context));
+  packet = (usb_midi_event_t){.cable = 0U, .cin = 5U, .length = 1U, .data = {0xf7U}};
+  assert(subscriber(device.generation, &packet, subscriber_context));
+  assert(midi_port_get_handle_info(&failed, &info) == MIDI_STATUS_OK);
+  assert(info.status == MIDI_STATUS_DATA_LOST);
+  for (unsigned int i = 0U; i < MIDI_INPUT_QUEUE_CAPACITY - 3U; i++) {
+    assert(midi_port_read(&failed, &event) == MIDI_STATUS_OK);
+    assert(event.event.message.data[0] == i);
+  }
+  const midi_stream_event_type_t aborted[] = {MIDI_STREAM_SYSEX_BEGIN,
+    MIDI_STREAM_SYSEX_DATA, MIDI_STREAM_SYSEX_DATA, MIDI_STREAM_SYSEX_ABORT};
+  for (unsigned int i = 0U; i < 4U; i++) {
+    assert(midi_port_read(&failed, &event) == MIDI_STATUS_OK);
+    assert(event.event.type == aborted[i]);
+  }
+  assert(midi_port_read(&failed, &event) == MIDI_STATUS_DATA_LOST);
+  assert(midi_port_close(&failed) == MIDI_STATUS_OK);
+  assert(midi_port_open(1U, &failed) == MIDI_STATUS_OK);
+  for (unsigned int i = 0U; i < MIDI_INPUT_QUEUE_CAPACITY - 3U; i++)
+    inject(0U, 0x90U, (uint8_t)i);
+  packet = (usb_midi_event_t){
+    .cable = 0U, .cin = 4U, .length = 3U, .data = {0xf0U, 0x7dU, 1U}
+  };
+  assert(subscriber(device.generation, &packet, subscriber_context));
+  packet = (usb_midi_event_t){.cable = 0U, .cin = 5U, .length = 1U, .data = {0xf7U}};
+  assert(subscriber(device.generation, &packet, subscriber_context));
+  input_disconnect();
+  uint32_t original_generation = failed.generation;
+  input_reconnect(&device, 41U);
+  midi_port_handle_t replacement = {0}, second = {0};
+  assert(midi_port_open(1U, &replacement) == MIDI_STATUS_OK);
+  assert(midi_port_open(2U, &second) == MIDI_STATUS_OK);
+  assert(midi_port_get_handle_info(&replacement, &info) == MIDI_STATUS_OK);
+  assert(info.status == MIDI_STATUS_OK && !info.cable_data_lost);
+  assert(info.cable_dropped_packets == 0U && info.retired_depth == 0U);
+  assert(midi_port_read(&replacement, &event) == MIDI_STATUS_EMPTY);
+  for (unsigned int i = 0U; i < MIDI_INPUT_QUEUE_CAPACITY - 3U; i++) {
+    assert(midi_port_read(&failed, &event) == MIDI_STATUS_OK);
+    assert(event.generation == original_generation && event.event.message.data[0] == i);
+  }
+  const midi_stream_event_type_t types[] = {MIDI_STREAM_SYSEX_BEGIN,
+    MIDI_STREAM_SYSEX_DATA, MIDI_STREAM_SYSEX_DATA, MIDI_STREAM_SYSEX_ABORT};
+  for (unsigned int i = 0U; i < 4U; i++) {
+    assert(midi_port_read(&failed, &event) == MIDI_STATUS_OK);
+    assert(event.generation == original_generation && event.event.type == types[i]);
+  }
+  assert(midi_port_read(&failed, &event) == MIDI_STATUS_DISCONNECTED);
+  assert(midi_port_close(&failed) == MIDI_STATUS_OK);
+  assert(midi_port_close(&healthy) == MIDI_STATUS_OK);
+  inject(1U, 0x91U, 90U);
+  assert(midi_port_read(&second, &event) == MIDI_STATUS_OK);
+  assert(event.event.message.data[0] == 90U);
+  // Last-cable closure/reopen keeps cumulative diagnostics, but a fresh
+  // definition/session or device generation inherits no active loss state.
+  assert(midi_port_close(&replacement) == MIDI_STATUS_OK);
+  assert(midi_port_close(&second) == MIDI_STATUS_OK);
+  assert(midi_port_open(1U, &replacement) == MIDI_STATUS_OK);
+  assert(midi_port_get_handle_info(&replacement, &info) == MIDI_STATUS_OK);
+  assert(info.status == MIDI_STATUS_OK && !info.cable_data_lost);
+  assert(midi_port_close(&replacement) == MIDI_STATUS_OK);
 }
 
 int main(void) {
@@ -1183,6 +1324,7 @@ int main(void) {
   check_application_io(device);
   check_single_direction_devices(device);
   check_receiver_policy(device);
+  check_application_cable_loss(device);
 
   puts("MIDI logical I/O: PASS");
   return 0;

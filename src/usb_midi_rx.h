@@ -52,8 +52,10 @@ bool usb_midi_rx_get_info(uint32_t generation, usb_midi_rx_info_t *info);
 // active device's receive queue.
 bool usb_midi_rx_read(uint32_t generation, usb_midi_event_t *event);
 
-// Return true only when the event has been accepted.
-// Returning false retains the event at the FIFO head.
+// Return true when the event has been consumed, including an explicit
+// application-level discard. Consumption releases receiver FIFO ownership;
+// it is not proof of delivery to the application. Return false to retain
+// the event at the FIFO head.
 //
 // Callbacks execute in the USB foreground service.
 // They must not block, recurse into usb_service(),

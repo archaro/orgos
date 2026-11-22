@@ -94,7 +94,9 @@ check: | $(OBJ_DIR)
 	$(OBJ_DIR)/midi_stream_bridge_test
 	$(HOSTCC) $(HOSTCFLAGS) -I$(SRC_DIR) \
 		tests/usb_midi_rx_test.c $(SRC_DIR)/usb_midi_rx.c \
-		$(SRC_DIR)/usb_midi.c -o $(OBJ_DIR)/usb_midi_rx_test
+		$(SRC_DIR)/usb_midi.c $(SRC_DIR)/midi_input.c \
+		$(SRC_DIR)/midi_usb_bridge.c $(SRC_DIR)/midi_stream.c \
+		-o $(OBJ_DIR)/usb_midi_rx_test
 	$(OBJ_DIR)/usb_midi_rx_test
 	$(HOSTCC) $(HOSTCFLAGS) -I$(SRC_DIR) \
 		tests/usb_midi_config_test.c $(SRC_DIR)/usb_midi.c \

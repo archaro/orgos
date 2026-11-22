@@ -6,6 +6,7 @@
 #include "usb.h"
 #include "usb_enumerate.h"
 #include "usb_midi_rx.h"
+#include "midi_input.h"
 #include "xhci.h"
 
 static usb_device_t live = {
@@ -13,6 +14,7 @@ static usb_device_t live = {
   .slot_id = 2U, .generation = 1U, .state = USB_DEVICE_ACTIVE
 };
 static bool stream_started;
+static bool stream_failed;
 static unsigned int stream_starts;
 // Completed hardware transfers only. The real receiver implements all
 // packet buffering, subscription ownership and discard/retention policy.
@@ -58,7 +60,7 @@ bool usb_get_enumeration_generation(uint32_t generation, usb_enum_info_t *info) 
     return false;
   *info = (usb_enum_info_t){
     .result = USB_ENUM_OK, .slot_id = live.slot_id, .hub_port = live.parent_port,
-    .midi = {.in_found = true, .bulk_in_jacks = 1U}
+    .midi = {.in_found = true, .bulk_in_jacks = 2U}
   };
   return true;
 }
@@ -66,7 +68,7 @@ bool usb_get_enumeration_generation(uint32_t generation, usb_enum_info_t *info) 
 bool xhci_bulk_in_stream_get_stats(uint8_t slot, xhci_bulk_in_stream_stats_t *info) {
   if (slot != live.slot_id)
     return false;
-  *info = (xhci_bulk_in_stream_stats_t){.started = stream_started};
+  *info = (xhci_bulk_in_stream_stats_t){.started = stream_started, .failed = stream_failed};
   return true;
 }
 
@@ -221,9 +223,251 @@ static void check_diagnostic_policy(void) {
   assert(stream_starts == 2U);
 }
 
+static uint32_t input_generation;
+
+static void start_input(uint32_t generation, bool filtered) {
+  live.state = USB_DEVICE_DISCONNECTING;
+  usb_midi_rx_service();
+  midi_input_service();
+  live.generation = input_generation = generation;
+  live.state = USB_DEVICE_ACTIVE;
+  stream_started = stream_failed = false;
+  pending_head = pending_depth = 0U;
+  assert(usb_midi_rx_start_auto_generation(generation));
+  if (filtered) {
+    assert(midi_input_open_port_cable(generation, 0U));
+    assert(midi_input_open_port_cable(generation, 1U));
+  } else {
+    assert(midi_input_start_generation(generation));
+  }
+}
+
+static void packet(unsigned int cable, unsigned int cin,
+    uint8_t first, uint8_t second, uint8_t third) {
+  receive(1U, 0U);
+  unsigned int tail = (pending_head + pending_depth - 1U) % 8U;
+  pending[tail].data[0] = (uint8_t)((cable << 4U) | cin);
+  pending[tail].data[1] = first;
+  pending[tail].data[2] = second;
+  pending[tail].data[3] = third;
+}
+
+static void short_packet(unsigned int cable, uint8_t value) {
+  packet(cable, 0xbU, 0xbfU, 0x66U, value);
+}
+
+static void fill_input(unsigned int count) {
+  for (unsigned int i = 0U; i < count; i++) {
+    short_packet(0U, (uint8_t)i);
+    usb_midi_rx_service();
+  }
+}
+
+static midi_input_info_t input_info(void) {
+  midi_input_info_t info = {0};
+  assert(midi_input_get_info(input_generation, &info));
+  return info;
+}
+
+static void check_cable_progress(void) {
+  start_input(10U, true);
+  unsigned int started = stream_starts;
+  midi_input_event_t event = {0};
+  for (unsigned int cycle = 0U; cycle < 3U; cycle++) {
+    fill_input(MIDI_INPUT_QUEUE_CAPACITY);
+    short_packet(0U, 100U); // This becomes the shared receiver's FIFO head.
+    for (unsigned int i = 0U; i < 7U; i++)
+      short_packet(1U, (uint8_t)(cycle * 8U + i));
+    usb_midi_rx_service();
+    usb_midi_rx_info_t rx = {0};
+    assert(usb_midi_rx_get_info(input_generation, &rx));
+    assert(rx.state == USB_MIDI_RX_RUNNING && rx.queue_depth == 0U && rx.staged == 0U);
+    assert(pending_depth == 0U && stream_starts == started);
+    midi_input_info_t info = input_info();
+    assert(info.attached && !info.lost && info.malformed == 0U);
+    assert(rx.rejected == 0U);
+    assert(rx.events == info.packets + info.cable[0].dropped_packets);
+    assert(info.cable[0].data_lost && !info.cable[1].data_lost);
+    assert(info.cable[0].overflow_packets == cycle + 1U);
+    assert(info.cable[0].dropped_packets == cycle * 2U + 1U);
+    assert(info.cable[0].queue_depth == MIDI_INPUT_QUEUE_CAPACITY);
+    assert(info.queue_depth == MIDI_INPUT_QUEUE_CAPACITY + 7U);
+    // Consumption acknowledges USB FIFO ownership, not application delivery.
+    assert(info.packets == (cycle + 1U) * (MIDI_INPUT_QUEUE_CAPACITY + 8U) - 1U);
+    for (unsigned int i = 0U; i < 7U; i++) {
+      assert(midi_input_read_cable(input_generation, 1U, &event));
+      assert(event.event.message.data[1] == cycle * 8U + i);
+    }
+    assert(midi_input_read_cable(input_generation, 0U, &event));
+    assert(event.event.message.data[1] == 0U);
+    short_packet(0U, 101U); // Space becoming available is not resynchronisation.
+    short_packet(1U, (uint8_t)(cycle * 8U + 7U));
+    usb_midi_rx_service();
+    assert(midi_input_read_cable(input_generation, 1U, &event));
+    assert(event.event.message.data[1] == cycle * 8U + 7U);
+    for (unsigned int i = 1U; i < MIDI_INPUT_QUEUE_CAPACITY; i++) {
+      assert(midi_input_read_cable(input_generation, 0U, &event));
+      assert(event.event.message.data[1] == i);
+    }
+    assert(!midi_input_read_cable(input_generation, 0U, &event));
+    info = input_info();
+    assert(info.cable[0].data_lost && info.cable[0].dropped_packets == (cycle + 1U) * 2U);
+    assert(info.cable[1].dropped_packets == 0U);
+    assert(midi_input_open_port_cable(input_generation, 0U));
+    assert(input_info().cable[0].data_lost); // Idempotent open does not clear loss.
+    assert(midi_input_close_port_cable(input_generation, 0U));
+    assert(midi_input_open_port_cable(input_generation, 0U));
+    assert(!input_info().cable[0].data_lost);
+  }
+}
+
+static void check_atomic_boundaries(void) {
+  midi_input_event_t event = {0};
+  start_input(11U, true);
+  fill_input(MIDI_INPUT_QUEUE_CAPACITY - 3U);
+  packet(0U, 4U, 0xf0U, 0x11U, 0x22U);
+  usb_midi_rx_service();
+  midi_input_info_t info = input_info();
+  assert(!info.cable[0].data_lost && info.cable[0].queue_depth == MIDI_INPUT_QUEUE_CAPACITY);
+  assert(info.sysex_begins == 1U && info.sysex_bytes == 2U);
+  start_input(12U, true);
+  fill_input(MIDI_INPUT_QUEUE_CAPACITY - 2U);
+  packet(0U, 4U, 0xf0U, 0x11U, 0x22U);
+  usb_midi_rx_service();
+  info = input_info();
+  assert(info.cable[0].data_lost && info.cable[0].queue_depth == MIDI_INPUT_QUEUE_CAPACITY - 2U);
+  assert(info.cable[0].overflow_packets == 1U && info.cable[0].dropped_packets == 1U);
+  assert(info.sysex_begins == 0U && info.sysex_bytes == 0U && info.pending_aborts == 0U);
+  for (unsigned int i = 0U; i < MIDI_INPUT_QUEUE_CAPACITY - 2U; i++) {
+    assert(midi_input_read(input_generation, &event));
+    assert(event.event.type == MIDI_STREAM_SHORT && event.event.message.data[1] == i);
+  }
+  assert(!midi_input_read(input_generation, &event));
+}
+
+static void check_sysex_abort_order(void) {
+  start_input(13U, true);
+  midi_input_event_t event = {0};
+  fill_input(MIDI_INPUT_QUEUE_CAPACITY - 3U);
+  packet(0U, 4U, 0xf0U, 0x11U, 0x22U);
+  short_packet(1U, 50U);
+  usb_midi_rx_service();
+  packet(0U, 5U, 0xf7U, 0U, 0U); // END cannot fit; it must never be fabricated.
+  short_packet(1U, 51U);
+  usb_midi_rx_service();
+  midi_input_info_t info = input_info();
+  assert(info.cable[0].data_lost && info.cable[0].pending_abort);
+  assert(info.pending_aborts == 1U && info.sysex_aborts == 1U && info.sysex_ends == 0U);
+  for (unsigned int i = 0U; i < MIDI_INPUT_QUEUE_CAPACITY - 3U; i++) {
+    assert(midi_input_read(input_generation, &event));
+    assert(event.cable == 0U && event.event.message.data[1] == i);
+  }
+  const midi_stream_event_type_t types[] = {MIDI_STREAM_SYSEX_BEGIN,
+    MIDI_STREAM_SYSEX_DATA, MIDI_STREAM_SYSEX_DATA, MIDI_STREAM_SHORT,
+    MIDI_STREAM_SYSEX_ABORT, MIDI_STREAM_SHORT};
+  const unsigned int cables[] = {0U, 0U, 0U, 1U, 0U, 1U};
+  for (unsigned int i = 0U; i < 6U; i++) {
+    assert(midi_input_read(input_generation, &event));
+    assert(event.event.type == types[i] && event.cable == cables[i]);
+  }
+  assert(!midi_input_read(input_generation, &event));
+  assert(input_info().pending_aborts == 0U && input_info().cable[0].data_lost);
+  packet(0U, 5U, 0xf7U, 0U, 0U);
+  usb_midi_rx_service();
+  assert(input_info().cable[0].dropped_packets == 2U && input_info().sysex_ends == 0U);
+
+  // A malformed packet whose cancellation cannot fit must not pin the
+  // shared receiver either; malformed and cable-overflow counts stay distinct.
+  start_input(14U, true);
+  fill_input(MIDI_INPUT_QUEUE_CAPACITY - 3U);
+  packet(0U, 4U, 0xf0U, 0x11U, 0x22U);
+  usb_midi_rx_service();
+  packet(0U, 9U, 0x80U, 0U, 0U);
+  short_packet(1U, 52U);
+  usb_midi_rx_service();
+  info = input_info();
+  assert(info.malformed == 1U && info.cable[0].overflow_packets == 1U);
+  assert(info.cable[0].pending_abort && info.sysex_aborts == 1U);
+  assert(midi_input_close_port_cable(input_generation, 0U));
+  assert(input_info().pending_aborts == 0U && input_info().closed_events == 64U);
+  assert(midi_input_read(input_generation, &event) && event.cable == 1U);
+  assert(event.event.message.data[1] == 52U);
+}
+
+static void check_independent_capacity_and_wrap(void) {
+  start_input(17U, true);
+  fill_input(MIDI_INPUT_QUEUE_CAPACITY);
+  for (unsigned int i = 0U; i < MIDI_INPUT_QUEUE_CAPACITY; i++) {
+    short_packet(1U, (uint8_t)i);
+    usb_midi_rx_service();
+  }
+  midi_input_info_t info = input_info();
+  assert(info.queue_depth == 2U * MIDI_INPUT_QUEUE_CAPACITY);
+  assert(!info.cable[0].data_lost && !info.cable[1].data_lost);
+  midi_input_event_t event = {0};
+  for (unsigned int i = 0U; i < MIDI_INPUT_QUEUE_CAPACITY; i++) {
+    assert(midi_input_read(input_generation, &event));
+    assert(event.cable == 0U && event.event.message.data[1] == i);
+  }
+  // Wrap cable 0 while cable 1 retains older events. The global reader
+  // must deliver every cable-1 event before the newer wrapped cable-0 data.
+  fill_input(MIDI_INPUT_QUEUE_CAPACITY);
+  for (unsigned int i = 0U; i < MIDI_INPUT_QUEUE_CAPACITY; i++) {
+    assert(midi_input_read(input_generation, &event));
+    assert(event.cable == 1U && event.event.message.data[1] == i);
+  }
+  for (unsigned int i = 0U; i < MIDI_INPUT_QUEUE_CAPACITY; i++) {
+    assert(midi_input_read(input_generation, &event));
+    assert(event.cable == 0U && event.event.message.data[1] == i);
+  }
+  assert(!midi_input_read(input_generation, &event));
+}
+
+static void check_diagnostic_loss_and_recycling(void) {
+  start_input(15U, false);
+  fill_input(MIDI_INPUT_QUEUE_CAPACITY);
+  short_packet(0U, 100U);
+  short_packet(1U, 90U);
+  usb_midi_rx_service();
+  midi_input_info_t info = input_info();
+  assert(!info.port_filtered && info.cable[0].data_lost && !info.cable[1].data_lost);
+  assert(!midi_input_close_port_cable(input_generation, 0U)); // Ownership is explicit.
+  assert(midi_input_stop_generation(input_generation));
+  midi_input_event_t event = {0};
+  for (unsigned int i = 0U; i < MIDI_INPUT_QUEUE_CAPACITY; i++) {
+    assert(midi_input_read(input_generation, &event));
+    assert(event.cable == 0U && event.event.message.data[1] == i);
+  }
+  assert(midi_input_read(input_generation, &event) && event.cable == 1U);
+  assert(!midi_input_read(input_generation, &event));
+  assert(midi_input_start_generation(input_generation));
+  info = input_info();
+  assert(!info.port_filtered && !info.cable[0].data_lost);
+  assert(info.cable[0].overflow_packets == 1U && info.cable[0].dropped_packets == 1U);
+  short_packet(0U, 91U);
+  usb_midi_rx_service();
+  assert(midi_input_read(input_generation, &event) && event.event.message.data[1] == 91U);
+  // Real transport failure still detaches input; FIFO loss never masks it.
+  stream_failed = true;
+  usb_midi_rx_service();
+  midi_input_service();
+  assert(input_info().lost && !input_info().attached);
+  start_input(16U, true);
+  assert(!midi_input_get_info(15U, &info));
+  info = input_info();
+  assert(!info.cable[0].data_lost && info.cable[0].dropped_packets == 0U);
+  assert(info.queue_depth == 0U && info.pending_aborts == 0U);
+  assert(midi_input_backpressure_selftest());
+}
+
 int main(void) {
   check_application_policy();
   check_diagnostic_policy();
+  check_cable_progress();
+  check_atomic_boundaries();
+  check_sysex_abort_order();
+  check_independent_capacity_and_wrap();
+  check_diagnostic_loss_and_recycling();
   puts("USB MIDI receiver policies: PASS");
   return 0;
 }

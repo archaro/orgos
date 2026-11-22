@@ -238,7 +238,7 @@ static void cmd_midi_input(const char *args) {
   const char *probe = args;
   if (console_arg_word(&probe, "selftest") && console_arg_end(probe)) {
     bool passed = midi_input_backpressure_selftest();
-    console_printf("MIDI input backpressure: %s\n", passed ? "PASS" : "FAIL");
+    console_printf("MIDI input FIFO overflow: %s\n", passed ? "PASS" : "FAIL");
     return;
   } else if (console_arg_word(&args, "status")) {
     uint32_t generation = 0U;
@@ -277,10 +277,17 @@ static void cmd_midi_input(const char *args) {
     console_printf("  SysEx abort : %llu\n",
         (unsigned long long)info.sysex_aborts);
     console_printf("  Queue       : %u / %u\n",
-        info.queue_depth, MIDI_INPUT_QUEUE_CAPACITY);
+        info.queue_depth, MIDI_INPUT_QUEUE_CAPACITY * info.cables);
     console_printf("  Queue peak  : %u\n", info.queue_peak);
     console_printf("  Pending end : %u aborts\n", info.pending_aborts);
-    console_printf("  Stalls      : %llu\n", (unsigned long long)info.stalls);
+    console_printf("  FIFO losses : %llu\n", (unsigned long long)info.stalls);
+    for (unsigned int cable = 0U; cable < info.cables; cable++) {
+      const midi_input_cable_info_t *c = &info.cable[cable];
+      console_printf("  Cable %u: queue %u / %u, lost %s, "
+          "overflow %llu, dropped %llu\n", cable, c->queue_depth,
+          MIDI_INPUT_QUEUE_CAPACITY, c->data_lost ? "Yes" : "No",
+          (unsigned long long)c->overflow_packets, (unsigned long long)c->dropped_packets);
+    }
     console_printf("  Closed drop : %llu events\n",
         (unsigned long long)info.closed_events);
     if (!info.have_last)
@@ -442,6 +449,14 @@ static void midi_port_print(const midi_port_info_t *info) {
         handle.service_queue_depth, handle.service_queue_capacity);
     console_printf("  Service pending aborts: %u\n", handle.service_pending_aborts);
     console_printf("  Service in flight: %u\n", handle.service_in_flight);
+    if (handle.handle.direction == MIDI_PORT_IN) {
+      console_printf("  Cable queue : %u / %u\n", handle.cable_queue_depth,
+          handle.cable_queue_capacity);
+      console_printf("  Cable lost  : %s, overflow %llu, dropped %llu\n",
+          handle.cable_data_lost ? "Yes" : "No",
+          (unsigned long long)handle.cable_overflow_packets,
+          (unsigned long long)handle.cable_dropped_packets);
+    }
   }
 }
 

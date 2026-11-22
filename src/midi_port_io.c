@@ -18,6 +18,8 @@ typedef struct {
   midi_port_info_t previous;
   uint32_t opened_generation;
   uint32_t open_token;
+  uint64_t cable_overflow_base;
+  uint64_t cable_dropped_base;
 
   midi_port_event_t retired[PORT_RETIRED_CAPACITY];
   uint32_t retired_tokens[PORT_RETIRED_CAPACITY];
@@ -297,6 +299,8 @@ static midi_status_t input_ready(uint32_t generation, unsigned int cable,
   if (!info->attached || (info->port_filtered &&
       !(info->open_cables & (uint16_t)(1U << cable))))
     return MIDI_STATUS_NOT_OPEN;
+  if (info->cable[cable].data_lost)
+    return MIDI_STATUS_DATA_LOST;
   return MIDI_STATUS_OK;
 }
 
@@ -344,8 +348,16 @@ midi_status_t midi_port_get_handle_info(const midi_port_handle_t *handle,
       return MIDI_STATUS_OK;
     info->service_present = true;
     info->service_queue_depth = input.queue_depth;
-    info->service_queue_capacity = MIDI_INPUT_QUEUE_CAPACITY;
+    info->service_queue_capacity = MIDI_INPUT_QUEUE_CAPACITY * input.cables;
     info->service_pending_aborts = input.pending_aborts;
+    const midi_input_cable_info_t *cable = &input.cable[handle->cable];
+    const port_runtime_t *runtime = &runtimes[handle->port - 1U];
+    info->cable_queue_depth = cable->queue_depth;
+    info->cable_queue_capacity = MIDI_INPUT_QUEUE_CAPACITY;
+    info->cable_queue_peak = cable->queue_peak;
+    info->cable_data_lost = cable->data_lost;
+    info->cable_overflow_packets = cable->overflow_packets - runtime->cable_overflow_base;
+    info->cable_dropped_packets = cable->dropped_packets - runtime->cable_dropped_base;
   } else {
     midi_output_info_t output = {0};
     info->status = output_ready(handle->generation, &output);
@@ -427,6 +439,13 @@ midi_status_t midi_port_open(unsigned int id, midi_port_handle_t *handle) {
   if (!handle->active) {
     runtime->opened_generation = generation;
     runtime->open_token = next_open_token++;
+    if (current.key.direction == MIDI_PORT_IN) {
+      midi_input_info_t input = {0};
+      if (midi_input_get_info(generation, &input)) {
+        runtime->cable_overflow_base = input.cable[cable].overflow_packets;
+        runtime->cable_dropped_base = input.cable[cable].dropped_packets;
+      }
+    }
     *handle = (midi_port_handle_t){
       .active = true,
       .port = id,

@@ -13,6 +13,7 @@ typedef enum {
   MIDI_STATUS_INVALID_ARGUMENT,
   MIDI_STATUS_NOT_DEFINED,
   MIDI_STATUS_AMBIGUOUS,
+  MIDI_STATUS_DATA_LOST,
 } midi_status_t;
 
 static inline const char *midi_status_name(midi_status_t status) {
@@ -27,6 +28,7 @@ static inline const char *midi_status_name(midi_status_t status) {
     case MIDI_STATUS_INVALID_ARGUMENT: return "INVALID_ARGUMENT";
     case MIDI_STATUS_NOT_DEFINED: return "NOT_DEFINED";
     case MIDI_STATUS_AMBIGUOUS: return "AMBIGUOUS";
+    case MIDI_STATUS_DATA_LOST: return "DATA_LOST";
     default: return "UNKNOWN";
   }
 }

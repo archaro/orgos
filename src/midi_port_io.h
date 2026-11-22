@@ -24,6 +24,7 @@
 // QUEUE_FULL: output backpressure; retry the unaccepted byte/operation.
 // FAILED: service failure or an unclassified transport rejection.
 // EMPTY: no input event or connection notification is available.
+// DATA_LOST: cable FIFO overflow; drain accepted events, then close/reopen.
 // Output structures are cleared before unsuccessful reads/queries.
 
 // Caller-owned capability. Initialise to zero; treat fields as read-only.
@@ -93,6 +94,14 @@ typedef struct {
   unsigned int service_in_flight;
   bool sysex_active;
   uint8_t sysex_cable;
+  // Input-only, scoped to this open's cable. Counts exclude earlier opens;
+  // lower-level input statistics retain generation-lifetime loss totals.
+  unsigned int cable_queue_depth;
+  unsigned int cable_queue_capacity;
+  unsigned int cable_queue_peak;
+  bool cable_data_lost;
+  uint64_t cable_overflow_packets;
+  uint64_t cable_dropped_packets;
 } midi_port_handle_info_t;
 
 // Session identity remains pinned after end, cancellation or disconnect.
@@ -211,6 +220,9 @@ midi_status_t midi_port_send_short(const midi_port_handle_t *handle,
 // Other virtual cables retain their queued events.
 // A handle can drain its own retired events before DISCONNECTED, even
 // while a replacement is open. It never consumes another open's events.
-// An open, attached input with no event returns EMPTY.
+// An open, attached input with no event returns EMPTY, or DATA_LOST once
+// its accepted events/terminal ABORT have drained after FIFO overflow.
+// Repeating open alone cannot reset this fault; explicitly close/reopen.
+// Disconnection/stale permission takes precedence after retired events drain.
 midi_status_t midi_port_read(const midi_port_handle_t *handle,
     midi_port_event_t *event);

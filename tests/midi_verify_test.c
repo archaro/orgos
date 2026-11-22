@@ -327,7 +327,7 @@ static void test_terminal_failures(void) {
     assert(strstr(output, "Result     : STALE HANDLE\n"));
   }
   const midi_status_t terminal[] = {MIDI_STATUS_NOT_OPEN, MIDI_STATUS_FAILED,
-    MIDI_STATUS_INVALID_ARGUMENT};
+    MIDI_STATUS_INVALID_ARGUMENT, MIDI_STATUS_DATA_LOST};
   for (unsigned int i = 0U; i < sizeof(terminal) / sizeof(terminal[0]); i++) {
     fixture();
     command("start 1 3 auto");
