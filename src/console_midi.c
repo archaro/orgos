@@ -10,7 +10,6 @@
 #include "midi_auto.h"
 #include "midi_input.h"
 #include "midi_output.h"
-#include "midi_stream.h"
 #include "midi_ports.h"
 #include "midi_ports_usb.h"
 #include "midi.h"
@@ -193,44 +192,42 @@ static void cmd_midi_auto(const char *args) {
   console_puts("Usage: midi auto [on | off | status]\n");
 }
 
-static void midi_console_emit(const midi_stream_output_t *output) {
-  for (unsigned int i = 0U; i < output->count; i++) {
-    const midi_stream_event_t *event = &output->events[i];
-    if (event->type == MIDI_STREAM_SHORT) {
-      const midi_short_message_t *message = &event->message;
-      console_puts("  ");
-      console_puthex(message->status, 2U);
-      for (unsigned int j = 1U; j < message->length; j++) {
-        console_putc(' ');
-        console_puthex(message->data[j - 1U], 2U);
+// Both diagnostics print an already-parsed event, not a parser output batch.
+static void midi_console_emit(const midi_stream_event_t *event) {
+  if (event->type == MIDI_STREAM_SHORT) {
+    const midi_short_message_t *message = &event->message;
+    console_puts("  ");
+    console_puthex(message->status, 2U);
+    for (unsigned int j = 1U; j < message->length; j++) {
+      console_putc(' ');
+      console_puthex(message->data[j - 1U], 2U);
+    }
+    console_putc('\n');
+    return;
+  }
+  switch (event->type) {
+    case MIDI_STREAM_SYSEX_BEGIN:
+      console_puts("  SysEx BEGIN\n");
+      break;
+    case MIDI_STREAM_SYSEX_DATA:
+      console_puts("  SysEx DATA ");
+      console_puthex(event->byte, 2U);
+      console_putc('\n');
+      break;
+    case MIDI_STREAM_SYSEX_END:
+      console_puts("  SysEx END\n");
+      break;
+    case MIDI_STREAM_SYSEX_ABORT:
+      console_puts("  SysEx ABORT");
+      if (event->byte != 0U) {
+        console_puts(" (status ");
+        console_puthex(event->byte, 2U);
+        console_putc(')');
       }
       console_putc('\n');
-      continue;
-    }
-    switch (event->type) {
-      case MIDI_STREAM_SYSEX_BEGIN:
-        console_puts("  SysEx BEGIN\n");
-        break;
-      case MIDI_STREAM_SYSEX_DATA:
-        console_puts("  SysEx DATA ");
-        console_puthex(event->byte, 2U);
-        console_putc('\n');
-        break;
-      case MIDI_STREAM_SYSEX_END:
-        console_puts("  SysEx END\n");
-        break;
-      case MIDI_STREAM_SYSEX_ABORT:
-        console_puts("  SysEx ABORT");
-        if (event->byte != 0U) {
-          console_puts(" (status ");
-          console_puthex(event->byte, 2U);
-          console_putc(')');
-        }
-        console_putc('\n');
-        break;
-      default:
-        break;
-    }
+      break;
+    default:
+      break;
   }
 }
 
@@ -295,13 +292,7 @@ static void cmd_midi_input(const char *args) {
     console_printf("  Last cable  : %u\n", (unsigned int)info.last_cable);
     console_puts("  Last event:\n");
 
-    // Reuse the existing stream-event formatter.
-    midi_stream_output_t output = {
-      .count = 1U
-    };
-
-    output.events[0] = info.last;
-    midi_console_emit(&output);
+    midi_console_emit(&info.last);
   } else {
     console_puts("Usage: midi input [status <generation> | selftest]\n");
     return;
@@ -989,12 +980,7 @@ static void cmd_midi_port(const char *args) {
     console_printf("MIDI port %u event (generation %u):\n",
         received.port, (unsigned int)received.generation);
 
-    midi_stream_output_t output = {
-      .count = 1U
-    };
-
-    output.events[0] = received.event;
-    midi_console_emit(&output);
+    midi_console_emit(&received.event);
     return;
   }
 

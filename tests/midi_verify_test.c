@@ -40,6 +40,15 @@ void console_printf(const char *format, ...) {
   output_length += (size_t)length;
 }
 
+void console_putc(char c) {
+  char text[] = {c, '\0'};
+  console_puts(text);
+}
+
+void console_puthex(uint32_t value, unsigned int digits) {
+  console_printf("%0*X", (int)digits, value);
+}
+
 midi_status_t midi_port_get_info(unsigned int id, midi_port_info_t *info) {
   *info = (midi_port_info_t){0};
   if (id != 1U || !defined)
@@ -409,6 +418,32 @@ static void test_start_guards(void) {
   assert(port_verify.running && port_verify.automatic && port_verify.expected_count == 10U);
 }
 
+static void test_event_formatting(void) {
+  const struct {
+    midi_stream_event_t event;
+    const char *text;
+  } cases[] = {
+    {{.type = MIDI_STREAM_SHORT, .message = {.status = 0xf8U, .length = 1U}},
+      "  F8\n"},
+    {{.type = MIDI_STREAM_SHORT, .message = {.status = 0xc0U, .data = {7U}, .length = 2U}},
+      "  C0 07\n"},
+    {{.type = MIDI_STREAM_SHORT, .message = {.status = 0xbfU, .data = {102U, 127U}, .length = 3U}},
+      "  BF 66 7F\n"},
+    {{.type = MIDI_STREAM_SYSEX_BEGIN}, "  SysEx BEGIN\n"},
+    {{.type = MIDI_STREAM_SYSEX_DATA, .byte = 0x7dU}, "  SysEx DATA 7D\n"},
+    {{.type = MIDI_STREAM_SYSEX_END}, "  SysEx END\n"},
+    {{.type = MIDI_STREAM_SYSEX_ABORT}, "  SysEx ABORT\n"},
+    {{.type = MIDI_STREAM_SYSEX_ABORT, .byte = 0x90U}, "  SysEx ABORT (status 90)\n"},
+    {{.type = (midi_stream_event_type_t)99}, ""}
+  };
+  for (unsigned int i = 0U; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    output_length = 0U;
+    output[0] = '\0';
+    midi_console_emit(&cases[i].event);
+    assert(strcmp(output, cases[i].text) == 0);
+  }
+}
+
 int main(void) {
   test_automatic_sequence();
   test_paced_and_extra();
@@ -417,6 +452,7 @@ int main(void) {
   test_terminal_failures();
   test_manual_compatibility();
   test_start_guards();
+  test_event_formatting();
   puts("MIDI receive verification: PASS");
   return 0;
 }

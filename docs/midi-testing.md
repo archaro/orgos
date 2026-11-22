@@ -42,7 +42,17 @@ The commands and link composition are authoritative in the [`Makefile`](../Makef
 | [`usb_midi_rx_test.c`](../tests/usb_midi_rx_test.c) | Real receiver, input, codec, bridge and stream code; discard/retain ownership policies, stale receiver queues/staging, atomic packet fit, cable isolation, SysEx ABORT ordering, sticky loss, device-wide order and generation recycling. Includes the three-cable integration scenarios below. | Simulated completed xHCI Bulk IN records; no physical descriptors/controller/DMA. |
 | [`usb_midi_config_test.c`](../tests/usb_midi_config_test.c) | Synthetic valid/invalid configurations, required associations on both endpoints, zero/excess cable counts, exact descriptor lengths, truncation/boundaries and CME-style nine-byte audio endpoint descriptors. | Descriptor parsing only; no hardware enumeration or broadened endpoint compatibility. |
 | [`usb_hub_change_test.c`](../tests/usb_hub_change_test.c) | White-box production USB lifecycle/enumeration code: ordinary disconnect, unexpected disable, harmless/repeated changes, safe retirement/admission, fail-closed ownership and narrowly gated pre-slot disappearance rearm. | Hub status, slot/endpoint ownership and lifecycle hardware actions are deterministic mocks; unrelated hardware/MSI sections are excluded. |
-| [`midi_verify_test.c`](../tests/midi_verify_test.c) | Real console verifier command/state/service code: correct and paced sequences, empty reads, extras/missing/malformed events, first mismatch, early stop/reset, terminal status/handle invalidation, manual compatibility and 32-event auto budget. Service output is asserted absent. | Public MIDI reads/inspection and console output are mocked. A paced sequence is simulated with empty service iterations, not wall-clock timing. |
+| [`midi_verify_test.c`](../tests/midi_verify_test.c) | Real console verifier command/state/service code: correct and paced sequences, empty reads, extras/missing/malformed events, first mismatch, early stop/reset, terminal status/handle invalidation, manual compatibility and 32-event auto budget. Service output is asserted absent; diagnostic event formatting is checked exactly. | Public MIDI reads/inspection and console output are mocked. A paced sequence is simulated with empty service iterations, not wall-clock timing. |
+
+The suite also runs [`console_dma_test.c`](../tests/console_dma_test.c), a white-box
+fixture for the actual DMA diagnostic commands. CPU-backed mock allocations
+exercise direction order/labels, page-accounting failures, allocation failure,
+command syntax and preservation of device ownership after a failed return. This
+checks diagnostic logic and output, not real DMA or cache maintenance.
+[`console_pci_test.c`](../tests/console_pci_test.c) exercises the real PCI diagnostic
+dispatcher with hardware mocks: IRQ inspection works with continuous MSI on/off,
+while mutating commands and malformed IRQ suffixes remain blocked during live
+MSI operation. It does not validate physical interrupt delivery.
 
 ### Three-cable receive integration
 

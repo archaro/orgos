@@ -605,8 +605,11 @@ void cmd_pci(const char *args) {
     // must not run during continuous MSI operation.
     usb_msi_mode_info_t mode = {0};
     usb_msi_mode_get_info(&mode);
+    // Inspect a copy: the dispatcher below must still consume the command.
+    // Only the complete read-only command may bypass this mutation guard.
+    const char *probe = args;
     if (mode.enabled && !console_arg_end(args) &&
-        !console_arg_word(&args, "irq")) {
+        !(console_arg_word(&probe, "irq") && console_arg_end(probe))) {
       console_puts("Disable continuous MSI mode first.\n");
       return;
     }

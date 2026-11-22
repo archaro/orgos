@@ -112,5 +112,12 @@ check: | $(OBJ_DIR)
 		tests/midi_verify_test.c -Wl,--gc-sections -o $(OBJ_DIR)/midi_verify_test
 	$(OBJ_DIR)/midi_verify_test
 
+	$(HOSTCC) $(HOSTCFLAGS) -iquote $(SRC_DIR) \
+		tests/console_dma_test.c -o $(OBJ_DIR)/console_dma_test
+	$(OBJ_DIR)/console_dma_test
+	$(HOSTCC) $(HOSTCFLAGS) -iquote $(SRC_DIR) \
+		tests/console_pci_test.c -o $(OBJ_DIR)/console_pci_test
+	$(OBJ_DIR)/console_pci_test
+
 -include $(DEPS)
 
