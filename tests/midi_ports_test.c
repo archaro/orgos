@@ -3,6 +3,7 @@
 #include <stdio.h>
 
 #include "midi_ports.h"
+#include "midi_ports_internal.h"
 
 int main(void) {
   midi_port_key_t input = {
@@ -117,9 +118,9 @@ int main(void) {
   uint32_t original_serial = info.definition_serial;
 
   // Definition can be explicitly cleared and reused.
-  assert(midi_ports_clear(1U));
+  assert(midi_ports_clear_registry(1U));
   assert(!midi_ports_get(1U, &info));
-  assert(!midi_ports_clear(1U));
+  assert(!midi_ports_clear_registry(1U));
   assert(midi_ports_define(1U, &input));
 
   assert(midi_ports_get(1U, &info));

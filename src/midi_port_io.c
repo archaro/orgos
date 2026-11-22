@@ -8,6 +8,7 @@
 #include "midi_input.h"
 #include "midi_output.h"
 #include "usb_midi_rx.h"
+#include "usb_midi.h"
 
 #define PORT_RETIRED_CAPACITY (MIDI_INPUT_QUEUE_CAPACITY + 1U)
 #define PORT_CHANGE_CAPACITY 8U
@@ -164,30 +165,70 @@ void midi_port_io_service(void) {
     port_update(id, NULL);
 }
 
-static bool port_target(unsigned int id, midi_port_direction_t expected,
-    uint32_t *generation, uint8_t *cable) {
-
-  midi_port_info_t current = {0};
-
-  if (!port_update(id, &current) || current.state != MIDI_PORT_BOUND ||
-      current.key.direction != expected)
-    return false;
-
-  // A previous open cannot authorise operations
-  // on a newly bound USB generation.
-  if (runtimes[id - 1U].opened_generation != current.generation)
-    return false;
-
-  *generation = current.generation;
-  *cable = current.key.cable;
-  return true;
+static midi_status_t port_lookup(unsigned int id, midi_port_info_t *info) {
+  if (id == 0U || id > MIDI_PORT_CAPACITY)
+    return MIDI_STATUS_INVALID_ARGUMENT;
+  if (!midi_ports_get(id, info))
+    return MIDI_STATUS_NOT_DEFINED;
+  return port_update(id, info) ? MIDI_STATUS_OK : MIDI_STATUS_FAILED;
 }
 
-bool midi_port_open(unsigned int id) {
+static midi_status_t port_binding(const midi_port_info_t *info) {
+  if (info->state == MIDI_PORT_AMBIGUOUS)
+    return MIDI_STATUS_AMBIGUOUS;
+  return info->state == MIDI_PORT_BOUND ?
+      MIDI_STATUS_OK : MIDI_STATUS_DISCONNECTED;
+}
+
+static midi_status_t port_target(unsigned int id, midi_port_direction_t expected,
+    uint32_t *generation, uint8_t *cable) {
+  midi_port_info_t current = {0};
+  midi_status_t status = port_lookup(id, &current);
+  if (status != MIDI_STATUS_OK)
+    return status;
+  if (current.key.direction != expected)
+    return MIDI_STATUS_INVALID_ARGUMENT;
+  status = port_binding(&current);
+  if (status != MIDI_STATUS_OK)
+    return status;
+  if (runtimes[id - 1U].opened_generation != current.generation)
+    return MIDI_STATUS_NOT_OPEN;
+  *generation = current.generation;
+  *cable = current.key.cable;
+  return MIDI_STATUS_OK;
+}
+
+static midi_status_t output_ready(uint32_t generation, midi_output_info_t *info) {
+  if (!midi_output_get_info(generation, info))
+    return MIDI_STATUS_FAILED;
+  switch (info->state) {
+    case MIDI_OUTPUT_RUNNING: return MIDI_STATUS_OK;
+    case MIDI_OUTPUT_DISCONNECTED: return MIDI_STATUS_DISCONNECTED;
+    case MIDI_OUTPUT_FAILED: return MIDI_STATUS_FAILED;
+    default: return MIDI_STATUS_NOT_OPEN;
+  }
+}
+
+// Classify only observable rejection reasons. Do not label an unexplained
+// Boolean failure as retryable backpressure.
+static midi_status_t output_rejected(uint32_t generation) {
+  midi_output_info_t info = {0};
+  midi_status_t status = output_ready(generation, &info);
+  if (status != MIDI_STATUS_OK)
+    return status;
+  return info.queue_depth >= MIDI_OUTPUT_QUEUE_CAPACITY ?
+      MIDI_STATUS_QUEUE_FULL : MIDI_STATUS_FAILED;
+}
+
+midi_status_t midi_port_open(unsigned int id) {
   midi_port_info_t current = {0};
 
-  if (!port_update(id, &current) || current.state != MIDI_PORT_BOUND)
-    return false;
+  midi_status_t status = port_lookup(id, &current);
+  if (status != MIDI_STATUS_OK)
+    return status;
+  status = port_binding(&current);
+  if (status != MIDI_STATUS_OK)
+    return status;
 
   uint32_t generation = current.generation;
   uint8_t cable = current.key.cable;
@@ -196,8 +237,13 @@ bool midi_port_open(unsigned int id) {
   if (current.key.direction == MIDI_PORT_OUT) {
     midi_output_info_t output = {0};
 
-    if (midi_output_get_info(generation, &output) &&
-        output.state == MIDI_OUTPUT_RUNNING)
+    if (midi_output_get_info(generation, &output)) {
+      if (output.state == MIDI_OUTPUT_DISCONNECTED)
+        return MIDI_STATUS_DISCONNECTED;
+      if (output.state == MIDI_OUTPUT_FAILED)
+        return MIDI_STATUS_FAILED;
+    }
+    if (output.state == MIDI_OUTPUT_RUNNING)
       opened = cable < output.cables;
     else
       opened = midi_output_start_generation(generation);
@@ -210,7 +256,7 @@ bool midi_port_open(unsigned int id) {
     if (!usb_midi_rx_get_info(generation, &rx) ||
         rx.state != USB_MIDI_RX_RUNNING) {
       if (!usb_midi_rx_start_generation(generation))
-        return false;
+        return MIDI_STATUS_FAILED;
     }
 
     // Claim only this logical port's virtual cable.
@@ -221,19 +267,23 @@ bool midi_port_open(unsigned int id) {
   if (opened)
     runtimes[id - 1U].opened_generation = generation;
 
-  return opened;
+  return opened ? MIDI_STATUS_OK : MIDI_STATUS_FAILED;
 }
 
-bool midi_port_close(unsigned int id) {
+midi_status_t midi_port_close(unsigned int id) {
   midi_port_info_t current = {0};
 
-  if (!port_update(id, &current) || current.state != MIDI_PORT_BOUND)
-    return false;
+  midi_status_t status = port_lookup(id, &current);
+  if (status != MIDI_STATUS_OK)
+    return status;
+  status = port_binding(&current);
+  if (status != MIDI_STATUS_OK)
+    return status;
 
   port_runtime_t *runtime = &runtimes[id - 1U];
 
   if (runtime->opened_generation != current.generation)
-    return false;
+    return MIDI_STATUS_NOT_OPEN;
 
   uint32_t generation = current.generation;
   unsigned int cable = current.key.cable;
@@ -243,7 +293,7 @@ bool midi_port_close(unsigned int id) {
     if (midi_input_get_info(generation, &input) &&
         input.attached && input.port_filtered &&
         !midi_input_close_port_cable(generation, cable))
-      return false;
+      return MIDI_STATUS_FAILED;
   } else if (current.key.direction == MIDI_PORT_OUT) {
     midi_output_info_t output = {0};
     // Do not abandon an unfinished SysEx session.
@@ -251,9 +301,9 @@ bool midi_port_close(unsigned int id) {
     // this logical port from closing.
     if (midi_output_get_info(generation, &output) &&
         output.sysex_active && output.sysex_cable == cable)
-      return false;
+      return MIDI_STATUS_BUSY;
   } else {
-    return false;
+    return MIDI_STATUS_FAILED;
   }
 
   // Revoke application access, not device ownership.
@@ -261,53 +311,74 @@ bool midi_port_close(unsigned int id) {
   // transmission by the normal output service.
   runtime->opened_generation = 0U;
 
-  return true;
+  return MIDI_STATUS_OK;
 }
 
-bool midi_port_undefine(unsigned int id) {
+midi_status_t midi_port_undefine(unsigned int id) {
   midi_port_info_t current = {0};
 
-  if (!port_update(id, &current))
-    return false;
+  midi_status_t status = port_lookup(id, &current);
+  if (status != MIDI_STATUS_OK)
+    return status;
 
   port_runtime_t *runtime = &runtimes[id - 1U];
 
   // Release any application ownership before
   // removing the registry definition.
-  if (runtime->opened_generation != 0U && !midi_port_close(id))
-    return false;
+  if (runtime->opened_generation != 0U) {
+    status = midi_port_close(id);
+    if (status != MIDI_STATUS_OK)
+      return status;
+  }
 
   if (!midi_ports_clear_registry(id))
-    return false;
+    return MIDI_STATUS_FAILED;
 
   // No old events, changes or permissions may
   // survive reuse of this numeric port ID.
   *runtime = (port_runtime_t){0};
 
-  return true;
+  return MIDI_STATUS_OK;
 }
 
-bool midi_port_send_short(unsigned int id,
+midi_status_t midi_port_send_short(unsigned int id,
     const midi_short_message_t *message) {
   uint32_t generation = 0U;
   uint8_t cable = 0U;
 
-  if (!port_target(id, MIDI_PORT_OUT, &generation, &cable))
-    return false;
+  midi_status_t status = port_target(id, MIDI_PORT_OUT, &generation, &cable);
+  if (status != MIDI_STATUS_OK)
+    return status;
 
-  return midi_output_enqueue_short(generation, cable, message);
+  // Reuse transport validation without changing its Boolean contract.
+  usb_midi_config_t config = {.out_found = true,
+      .bulk_out_jacks = MIDI_PORT_MAX_CABLES};
+  uint8_t packet[4];
+  if (!usb_midi_short_packet(&config, cable, message, packet))
+    return MIDI_STATUS_INVALID_ARGUMENT;
+  midi_output_info_t output = {0};
+  status = output_ready(generation, &output);
+  if (status != MIDI_STATUS_OK)
+    return status;
+  if (output.sysex_active)
+    return MIDI_STATUS_BUSY;
+  return midi_output_enqueue_short(generation, cable, message) ?
+      MIDI_STATUS_OK : output_rejected(generation);
 }
 
-bool midi_port_read(unsigned int id, midi_port_event_t *event) {
+midi_status_t midi_port_read(unsigned int id, midi_port_event_t *event) {
   if (!event)
-    return false;
+    return MIDI_STATUS_INVALID_ARGUMENT;
 
   *event = (midi_port_event_t){0};
 
   midi_port_info_t current = {0};
 
-  if (!port_update(id, &current) || current.key.direction != MIDI_PORT_IN)
-    return false;
+  midi_status_t status = port_lookup(id, &current);
+  if (status != MIDI_STATUS_OK)
+    return status;
+  if (current.key.direction != MIDI_PORT_IN)
+    return MIDI_STATUS_INVALID_ARGUMENT;
 
   port_runtime_t *runtime = &runtimes[id - 1U];
 
@@ -319,18 +390,26 @@ bool midi_port_read(unsigned int id, midi_port_event_t *event) {
     runtime->retired_head =
         (runtime->retired_head + 1U) % PORT_RETIRED_CAPACITY;
     runtime->retired_depth--;
-    return true;
+    return MIDI_STATUS_OK;
   }
 
-  if (current.state != MIDI_PORT_BOUND ||
-      runtime->opened_generation != current.generation)
-    return false;
+  status = port_binding(&current);
+  if (status != MIDI_STATUS_OK)
+    return status;
+  if (runtime->opened_generation != current.generation)
+    return MIDI_STATUS_NOT_OPEN;
 
   midi_input_event_t received = {0};
 
   if (!midi_input_read_cable(current.generation,
-          current.key.cable, &received))
-    return false;
+          current.key.cable, &received)) {
+    midi_input_info_t input = {0};
+    if (!midi_input_get_info(current.generation, &input))
+      return MIDI_STATUS_FAILED;
+    if (input.lost)
+      return MIDI_STATUS_DISCONNECTED;
+    return input.attached ? MIDI_STATUS_EMPTY : MIDI_STATUS_NOT_OPEN;
+  }
 
   *event = (midi_port_event_t){
     .port = id,
@@ -338,39 +417,43 @@ bool midi_port_read(unsigned int id, midi_port_event_t *event) {
     .event = received.event
   };
 
-  return true;
+  return MIDI_STATUS_OK;
 }
 
-bool midi_port_next_change(unsigned int id, midi_port_change_t *change) {
+midi_status_t midi_port_next_change(unsigned int id, midi_port_change_t *change) {
   if (!change)
-    return false;
+    return MIDI_STATUS_INVALID_ARGUMENT;
 
   *change = (midi_port_change_t){0};
 
-  if (!port_update(id, NULL))
-    return false;
+  midi_port_info_t current = {0};
+  midi_status_t status = port_lookup(id, &current);
+  if (status != MIDI_STATUS_OK)
+    return status;
 
   port_runtime_t *runtime = &runtimes[id - 1U];
 
   if (runtime->change_depth == 0U)
-    return false;
+    return MIDI_STATUS_EMPTY;
 
   *change = runtime->changes[runtime->change_head];
 
   runtime->change_head = (runtime->change_head + 1U) % PORT_CHANGE_CAPACITY;
   runtime->change_depth--;
-  return true;
+  return MIDI_STATUS_OK;
 }
 
-bool midi_port_lifecycle_get_info(unsigned int id,
+midi_status_t midi_port_lifecycle_get_info(unsigned int id,
     midi_port_lifecycle_info_t *info) {
   if (!info)
-    return false;
+    return MIDI_STATUS_INVALID_ARGUMENT;
 
   *info = (midi_port_lifecycle_info_t){0};
 
-  if (!port_update(id, NULL))
-    return false;
+  midi_port_info_t current = {0};
+  midi_status_t status = port_lookup(id, &current);
+  if (status != MIDI_STATUS_OK)
+    return status;
 
   port_runtime_t *runtime = &runtimes[id - 1U];
 
@@ -383,28 +466,38 @@ bool midi_port_lifecycle_get_info(unsigned int id,
     .changes_dropped = runtime->changes_dropped
   };
 
-  return true;
+  return MIDI_STATUS_OK;
 }
 
-bool midi_port_sysex_begin(unsigned int id, midi_port_sysex_t *session) {
-  if (!session || session->active)
-    return false;
+midi_status_t midi_port_sysex_begin(unsigned int id, midi_port_sysex_t *session) {
+  if (!session)
+    return MIDI_STATUS_INVALID_ARGUMENT;
+  if (session->active)
+    return MIDI_STATUS_BUSY;
 
   uint32_t generation = 0U;
   uint8_t cable = 0U;
 
-  if (!port_target(id, MIDI_PORT_OUT, &generation, &cable))
-    return false;
+  midi_status_t status = port_target(id, MIDI_PORT_OUT, &generation, &cable);
+  if (status != MIDI_STATUS_OK)
+    return status;
 
   midi_port_info_t current = {0};
 
   if (!midi_ports_get(id, &current))
-    return false;
+    return MIDI_STATUS_FAILED;
+
+  midi_output_info_t output = {0};
+  status = output_ready(generation, &output);
+  if (status != MIDI_STATUS_OK)
+    return status;
+  if (output.sysex_active)
+    return MIDI_STATUS_BUSY;
 
   uint32_t claim = 0U;
 
   if (!midi_output_sysex_claim(generation, cable, &claim))
-    return false;
+    return MIDI_STATUS_FAILED;
 
   *session = (midi_port_sysex_t){
     .active = true,
@@ -415,56 +508,64 @@ bool midi_port_sysex_begin(unsigned int id, midi_port_sysex_t *session) {
     .claim = claim
   };
 
-  return true;
+  return MIDI_STATUS_OK;
 }
 
-static bool sysex_target_current(const midi_port_sysex_t *session) {
-  if (!session || !session->active || session->claim == 0U)
-    return false;
-
+static midi_status_t sysex_target_current(const midi_port_sysex_t *session) {
+  if (!session)
+    return MIDI_STATUS_INVALID_ARGUMENT;
+  if (!session->active || session->claim == 0U)
+    return MIDI_STATUS_NOT_OPEN;
   midi_port_info_t current = {0};
-
-  if (!port_update(session->port, &current))
-    return false;
-
-  if (current.definition_serial != session->definition_serial ||
-      current.state != MIDI_PORT_BOUND ||
-      current.key.direction != MIDI_PORT_OUT ||
+  if (!midi_ports_get(session->port, &current) ||
+      current.definition_serial != session->definition_serial ||
       current.generation != session->generation ||
       current.key.cable != session->cable)
-    return false;
-
-  return runtimes[session->port - 1U].opened_generation ==
-      session->generation;
+    return MIDI_STATUS_DISCONNECTED;
+  uint32_t generation;
+  uint8_t cable;
+  midi_status_t status = port_target(session->port, MIDI_PORT_OUT,
+      &generation, &cable);
+  if (status != MIDI_STATUS_OK)
+    return status;
+  midi_output_info_t output = {0};
+  status = output_ready(generation, &output);
+  if (status != MIDI_STATUS_OK)
+    return status;
+  if (!output.sysex_active || output.sysex_claim != session->claim)
+    return MIDI_STATUS_NOT_OPEN;
+  return MIDI_STATUS_OK;
 }
 
-bool midi_port_sysex_write(midi_port_sysex_t *session, uint8_t byte) {
-
-  if (!sysex_target_current(session))
-    return false;
-
-  return midi_output_sysex_write_claim(
-      session->generation, session->claim, byte);
+midi_status_t midi_port_sysex_write(midi_port_sysex_t *session, uint8_t byte) {
+  if (byte >= 0x80U)
+    return MIDI_STATUS_INVALID_ARGUMENT;
+  midi_status_t status = sysex_target_current(session);
+  if (status != MIDI_STATUS_OK)
+    return status;
+  return midi_output_sysex_write_claim(session->generation, session->claim, byte) ?
+      MIDI_STATUS_OK : output_rejected(session->generation);
 }
 
-bool midi_port_sysex_end(midi_port_sysex_t *session) {
-  if (!sysex_target_current(session))
-    return false;
-
+midi_status_t midi_port_sysex_end(midi_port_sysex_t *session) {
+  midi_status_t status = sysex_target_current(session);
+  if (status != MIDI_STATUS_OK)
+    return status;
   if (!midi_output_sysex_end_claim(session->generation, session->claim))
-    return false;
-
+    return output_rejected(session->generation);
   session->active = false;
-  return true;
+  return MIDI_STATUS_OK;
 }
 
-bool midi_port_sysex_cancel(midi_port_sysex_t *session) {
-  if (!session || !session->active || session->claim == 0U)
-    return false;
+midi_status_t midi_port_sysex_cancel(midi_port_sysex_t *session) {
+  if (!session)
+    return MIDI_STATUS_INVALID_ARGUMENT;
+  if (!session->active || session->claim == 0U)
+    return MIDI_STATUS_NOT_OPEN;
 
   if (midi_output_sysex_cancel_claim(session->generation, session->claim)) {
     session->active = false;
-    return true;
+    return MIDI_STATUS_OK;
   }
 
   // The original driver record might already have
@@ -475,12 +576,12 @@ bool midi_port_sysex_cancel(midi_port_sysex_t *session) {
   if (!midi_output_get_info(session->generation, &info) ||
       !info.sysex_active || info.sysex_claim != session->claim) {
     session->active = false;
-    return true;
+    return MIDI_STATUS_OK;
   }
 
   // The original claim is still active.
   // Most importantly, a full output queue may
   // require the caller to retry cancellation.
-  return false;
+  return output_rejected(session->generation);
 }
 
