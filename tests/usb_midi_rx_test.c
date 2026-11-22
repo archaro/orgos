@@ -7,7 +7,7 @@
 #include "usb_enumerate.h"
 #include "usb_midi_rx.h"
 #include "midi_input.h"
-#include "xhci.h"
+#include "xhci_transfer.h"
 
 static usb_device_t live = {
   .root_port = 1U, .parent_slot = 1U, .parent_port = 1U,

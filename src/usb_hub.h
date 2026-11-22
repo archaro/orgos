@@ -3,7 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "xhci.h"
+#include "xhci_transfer.h"
 
 typedef enum {
   USB_HUB_OK,

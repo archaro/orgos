@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdbool.h>
+
 // Internal USB console command handlers.
 // Not part of the USB subsystem API.
 

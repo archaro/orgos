@@ -5,7 +5,7 @@
 #include "usb.h"
 #include "usb_enumerate.h"
 #include "usb_midi_rx.h"
-#include "xhci.h"
+#include "xhci_transfer.h"
 
 #define MIDI_EVENTS_PER_TRANSFER (XHCI_BULK_IN_MAX_DATA / 4U)
 

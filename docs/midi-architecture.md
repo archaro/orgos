@@ -79,8 +79,12 @@ application I/O. See [`usb_midi_quirks.c`](../src/usb_midi_quirks.c).
 ## xHCI Bulk IN and OUT
 
 [`xhci.c`](../src/xhci.c) owns transfer rings, completion waiters, DMA ownership and
-controller resources. Persistent Bulk IN uses 64-byte requests and a queue of
-completed transfers (currently 16 records), with completion validation and rearm
+controller resources. Its controller/device lifecycle declarations are in
+[`xhci.h`](../src/xhci.h); Bulk/control clients use the independent
+[`xhci_transfer.h`](../src/xhci_transfer.h). Controller DMA allocation layouts and
+helpers remain private to the implementation. Persistent Bulk IN uses 64-byte
+requests and a queue of completed transfers (currently 16 records), with
+completion validation and rearm
 in foreground service. The MIDI receiver obtains completed-transfer records,
 not raw DMA ownership. A full hardware/completion queue and actual transport
 failures retain their transport-level behaviour; cable-local application

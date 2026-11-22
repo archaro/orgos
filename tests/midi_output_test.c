@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "xhci.h"
+#include "xhci_transfer.h"
 #include "usb.h"
 #include "usb_enumerate.h"
 #include "usb_midi.h"

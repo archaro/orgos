@@ -3,7 +3,6 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "timer.h"
 #include "usb_device.h"
 
 typedef enum {

@@ -6,7 +6,7 @@
 #include "usb.h"
 #include "usb_enumerate.h"
 #include "usb_midi.h"
-#include "xhci.h"
+#include "xhci_transfer.h"
 #include "timer.h"
 
 _Static_assert(MIDI_OUTPUT_QUEUE_CAPACITY >= MIDI_OUTPUT_BATCH_PACKETS,

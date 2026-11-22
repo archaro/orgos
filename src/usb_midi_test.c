@@ -7,6 +7,7 @@
 #include "usb_enumerate.h"
 #include "usb_midi_test.h"
 #include "xhci.h"
+#include "xhci_transfer.h"
 
 #define USB_MIDI_IN_RING_ENTRIES 255U
 

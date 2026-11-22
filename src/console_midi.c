@@ -4,7 +4,7 @@
 #include "console.h"
 #include "console_args.h"
 #include "console_midi.h"
-#include "xhci.h"
+#include "xhci_transfer.h"
 #include "usb_midi.h"
 #include "usb_midi_rx.h"
 #include "midi_auto.h"

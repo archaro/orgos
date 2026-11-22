@@ -3,7 +3,7 @@
 
 #include "timer.h"
 #include "usb_midi_quirks.h"
-#include "xhci.h"
+#include "xhci_transfer.h"
 
 typedef struct {
   uint16_t vendor_id;

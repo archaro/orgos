@@ -2,10 +2,12 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "timer.h"
 #include "irq.h"
 #include "gic.h"
 #include "pcie.h"
 #include "xhci.h"
+#include "xhci_transfer.h"
 #include "usb.h"
 #include "usb_hub.h"
 #include "usb_enumerate.h"

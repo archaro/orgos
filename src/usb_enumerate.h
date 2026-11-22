@@ -3,10 +3,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "xhci.h"
+#include "xhci_transfer.h"
 #include "usb_device.h"
 #include "usb_midi.h"
-#include "usb_midi_quirks.h"
 
 // Maximum number of managed downstream device
 // records. This is storage capacity, not an

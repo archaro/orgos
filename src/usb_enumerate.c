@@ -6,7 +6,9 @@
 #include "usb.h"
 #include "usb_hub.h"
 #include "usb_enumerate.h"
+#include "usb_midi_quirks.h"
 #include "xhci.h"
+#include "xhci_transfer.h"
 
 #define USB_DESC_DEVICE 0x01U
 #define USB_DESC_CONFIGURATION 0x02U

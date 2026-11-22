@@ -8,8 +8,32 @@
 #include "irq.h"
 #include "pcie.h"
 #include "xhci.h"
+#include "xhci_transfer.h"
 #include "dma.h"
 #include "string.h"
+
+// Private controller allocation layouts; no external DMA ownership API.
+// Current implementation supports the 31 scratchpad
+// buffers reported by the Raspberry Pi 4B's VL805.
+// Larger requirements are rejected rather than
+// silently truncated.
+#define XHCI_MAX_SCRATCHPADS 31U
+
+typedef struct {
+  uint64_t base;
+  uint32_t size;
+  uint32_t reserved;
+} xhci_erst_entry_t;
+
+typedef struct {
+  dma_buffer_t command_ring;
+  dma_buffer_t event_ring;
+  dma_buffer_t erst;
+  dma_buffer_t dcbaa;
+  dma_buffer_t scratchpad_array;
+  dma_buffer_t scratchpads[XHCI_MAX_SCRATCHPADS];
+  unsigned int scratchpad_count;
+} xhci_dma_t;
 
 // The VL805 BAR has been assigned PCI bus address
 // 0xC0000000, which the BCM2711 outbound window
@@ -825,7 +849,7 @@ _Static_assert(sizeof(xhci_trb_t) == 16, "xHCI TRB must be 16 bytes");
 _Static_assert(sizeof(xhci_erst_entry_t) == 16,
     "xHCI ERST entry must be 16 bytes");
 
-bool xhci_dma_release(xhci_dma_t *dma) {
+static bool xhci_dma_release(xhci_dma_t *dma) {
   if (!dma)
     return false;
 
@@ -860,7 +884,7 @@ bool xhci_dma_release(xhci_dma_t *dma) {
   return ok;
 }
 
-bool xhci_dma_prepare(xhci_dma_t *dma) {
+static bool xhci_dma_prepare(xhci_dma_t *dma) {
   if (!dma)
     return false;
 

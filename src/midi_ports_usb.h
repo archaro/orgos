@@ -3,7 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "midi_ports.h"
+#include "midi.h"
 
 // Snapshot the currently enumerated physical endpoint
 // and assign it to a logical ID. No hardware claim occurs.

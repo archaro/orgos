@@ -3,7 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "midi_stream.h"
+#include "midi.h"
 
 typedef struct {
   uint8_t configuration;

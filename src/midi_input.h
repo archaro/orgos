@@ -3,7 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "midi_stream.h"
+#include "midi.h"
 
 // Capacity per virtual cable, not a shared device-wide budget.
 #define MIDI_INPUT_QUEUE_CAPACITY 64U

@@ -3,7 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "midi_stream.h"
+#include "midi.h"
 
 #define MIDI_OUTPUT_QUEUE_CAPACITY 64U
 #define MIDI_OUTPUT_BATCH_PACKETS 16U
