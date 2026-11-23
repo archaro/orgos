@@ -45,6 +45,7 @@ OrgOS was written with the assistance of Codex.
 The Raspberry Pi 4B firmware and Linux DTB are included in `boot/` for
 convenience.  They are not part of OrgOS, but have been used for testing.
 
+
 # License
 
 Unless otherwise excepted, OrgOS source code is licensed under the MIT License.
@@ -55,7 +56,8 @@ Exceptions:
 adaptations from FreeBSD and OpenBSD. Original copyright and permission
 notices are retained in the file.  It is therefore dual-licensed MIT/ISC.
 - Firmware binaries in `boot/` are governed by the Broadcom / Raspberry Pi
-firmware license.
+firmware license.  It is available at https://github.com/raspberrypi/firmware
+and is tagged `1.20260915`.
 - The Linux DTB is governed by the GNU GPL version 2.0, and is used unmodified:
 the sources are available at https://github.com/raspberrypi/linux.
 - The full text of all licenses will be found in `LICENSES/`.
