@@ -27,6 +27,11 @@ typedef struct {
 } dma_buffer_t;
 
 bool dma_alloc(uint64_t size, uint64_t alignment, dma_buffer_t *buffer);
+// Allocate only at this physical address, aligned to at least PAGE_SIZE.
+// Validate the complete page-rounded extent before claiming or touching it.
+// Failure empties the descriptor; pass fresh storage, as for dma_alloc().
+bool dma_alloc_at(paddr_t physical, uint64_t size,
+    uint64_t alignment, dma_buffer_t *buffer);
 bool dma_free(dma_buffer_t *buffer);
 bool dma_begin_device(dma_buffer_t *buffer, dma_direction_t direction);
 bool dma_end_device(dma_buffer_t *buffer);

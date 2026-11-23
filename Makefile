@@ -73,6 +73,9 @@ clean:
 
 check: | $(OBJ_DIR)
 	$(HOSTCC) $(HOSTCFLAGS) -iquote $(SRC_DIR) \
+		tests/dma_test.c -o $(OBJ_DIR)/dma_test
+	$(OBJ_DIR)/dma_test
+	$(HOSTCC) $(HOSTCFLAGS) -iquote $(SRC_DIR) \
 		tests/page_test.c -o $(OBJ_DIR)/page_test
 	$(OBJ_DIR)/page_test
 	$(HOSTCC) $(HOSTCFLAGS) -iquote $(SRC_DIR) \

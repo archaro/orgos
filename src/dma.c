@@ -7,6 +7,8 @@
 #include "cache.h"
 #include "pcie.h"
 #include "string.h"
+#include "console.h"
+#include "dma_io.h"
 
 // Current firmware-advertised inbound DMA limit.
 // Physical range [0, 3 GiB).
@@ -15,15 +17,8 @@
 // decoded PCIe dma-ranges information.
 #define DMA_PHYSICAL_LIMIT 0xC0000000ULL
 
-bool dma_alloc(uint64_t size, uint64_t alignment, dma_buffer_t *buffer) {
-
-  if (!buffer)
-    return false;
-
-  // Preserve a predictable empty descriptor if
-  // validation or allocation fails.
-  *buffer = (dma_buffer_t){0};
-
+static bool dma_allocation_geometry(uint64_t size, uint64_t alignment,
+    unsigned int *pages, unsigned int *alignment_pages) {
   if (size == 0 || alignment == 0)
     return false;
 
@@ -50,24 +45,14 @@ bool dma_alloc(uint64_t size, uint64_t alignment, dma_buffer_t *buffer) {
   if (alignment_pages64 > UINT32_MAX)
     return false;
 
-  unsigned int pages = (unsigned int)pages64;
-  unsigned int alignment_pages = (unsigned int)alignment_pages64;
-  paddr_t physical;
+  *pages = (unsigned int)pages64;
+  *alignment_pages = (unsigned int)alignment_pages64;
+  return true;
+}
 
-  if (!page_alloc_run_below(pages, alignment_pages,
-          DMA_PHYSICAL_LIMIT, &physical))
-    return false;
-
-  uint64_t allocated_size = pages64 * PAGE_SIZE;
-  uint64_t bus;
-  // Validate the entire allocated extent, not
-  // merely the requested byte count.
-  if (!pcie_phys_to_dma(
-          physical, allocated_size, &bus)) {
-    page_free_run(physical, pages);
-    return false;
-  }
-
+static void dma_initialize(paddr_t physical, uint64_t bus, uint64_t size,
+    unsigned int pages, dma_buffer_t *buffer) {
+  uint64_t allocated_size = (uint64_t)pages * PAGE_SIZE;
   // OrgOS currently identity-maps all physical RAM.
   // This conversion must change if virtual mappings
   // become independent of physical addresses.
@@ -86,6 +71,83 @@ bool dma_alloc(uint64_t size, uint64_t alignment, dma_buffer_t *buffer) {
   buffer->pages = pages;
   buffer->owner = DMA_OWNER_CPU;
   buffer->direction = DMA_TO_DEVICE;
+}
+
+bool dma_alloc(uint64_t size, uint64_t alignment, dma_buffer_t *buffer) {
+  if (!buffer)
+    return false;
+  *buffer = (dma_buffer_t){0};
+
+  unsigned int pages, alignment_pages;
+  if (!dma_allocation_geometry(size, alignment, &pages, &alignment_pages))
+    return false;
+
+  paddr_t physical;
+  if (!page_alloc_run_below(pages, alignment_pages,
+          DMA_PHYSICAL_LIMIT, &physical))
+    return false;
+
+  uint64_t bus;
+  if (!pcie_phys_to_dma(physical, (uint64_t)pages * PAGE_SIZE, &bus)) {
+    if (!page_free_run(physical, pages)) {
+      // An allocator invariant failed. Preserve the exact extent in the
+      // diagnostic rather than concealing an allocation leak.
+      console_puts("DMA allocation rollback failed: physical=");
+      console_puthex64(physical);
+      console_puts(" pages=");
+      console_putu32(pages);
+      console_puts("\n");
+    }
+    return false;
+  }
+
+  dma_initialize(physical, bus, size, pages, buffer);
+  return true;
+}
+
+// TODO: Stage 9 - High-address PCIe DMA integrity testing.
+//
+// Targeted page allocation and DMA buffer allocation are implemented,
+// but actual DMA integrity above low physical memory is unverified.
+//
+// Build a diagnostic xHCI transfer path which uses dma_alloc_at()
+// buffers directly, without copying payloads into private buffers.
+// Verify both DMA directions at selected physical addresses below
+// the 3 GiB software allocation ceiling.
+//
+// Use an independent USB test fixture (provisionally an RP2040 Pico)
+// with Bulk IN/OUT endpoints and separate UART verification. Test
+// known patterns, cache synchronization, address boundaries, and
+// repeated transfers. Never release buffers with uncertain DMA
+// ownership.
+
+bool dma_alloc_at(paddr_t physical, uint64_t size,
+    uint64_t alignment, dma_buffer_t *buffer) {
+  if (!buffer)
+    return false;
+  *buffer = (dma_buffer_t){0};
+
+  unsigned int pages, alignment_pages;
+  if (!dma_allocation_geometry(size, alignment, &pages, &alignment_pages))
+    return false;
+
+  uint64_t effective_alignment = (uint64_t)alignment_pages * PAGE_SIZE;
+  uint64_t allocated_size = (uint64_t)pages * PAGE_SIZE;
+  if ((physical & (effective_alignment - 1U)) ||
+      physical >= DMA_PHYSICAL_LIMIT ||
+      allocated_size > DMA_PHYSICAL_LIMIT - physical)
+    return false;
+
+  // Validate the complete rounded extent before acquiring any pages.
+  uint64_t bus;
+  if (!pcie_phys_to_dma(physical, allocated_size, &bus))
+    return false;
+  if (!page_claim_run(physical, pages))
+    return false;
+
+  // Initialisation cannot report a recoverable failure. No translation or
+  // other fallible operation follows the successful exact claim.
+  dma_initialize(physical, bus, size, pages, buffer);
   return true;
 }
 
@@ -147,7 +209,7 @@ static bool dma_cache_sync(dma_buffer_t *buffer, bool for_device) {
         // No device writes to invalidate.
         // The preceding handoff and cache clean
         // already established the necessary ordering.
-        __asm__ volatile("dsb sy" ::: "memory");
+        dma_barrier();
         return true;
       case DMA_FROM_DEVICE:
       case DMA_BIDIRECTIONAL:
