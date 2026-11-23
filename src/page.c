@@ -214,6 +214,45 @@ bool page_alloc(paddr_t *address) {
   return false;
 }
 
+bool page_claim_run(paddr_t address, unsigned int count) {
+  if (!ready || count == 0 || (address & (PAGE_SIZE - 1U)) ||
+      (uint64_t)count > (UINT64_MAX - address) / PAGE_SIZE ||
+      count > statistics.free_pages)
+    return false;
+
+  for (unsigned int b = 0; b < bank_count; b++) {
+    const page_bank_t *bank = &banks[b];
+    if (address < bank->start || address >= bank->end)
+      continue;
+
+    // Subtraction bounds the whole run without overflowing its byte length
+    // or end address. Never span banks, even when two banks are adjacent.
+    if ((uint64_t)count > (bank->end - address) / PAGE_SIZE)
+      return false;
+
+    uint64_t index = bank->first_bit +
+        (address - bank->start) / PAGE_SIZE;
+    for (unsigned int n = 0; n < count; n++) {
+      if (page_is_set(index + n))
+        return false;
+    }
+
+    // The complete run is free. No failure path remains after this point.
+    for (unsigned int n = 0; n < count; n++) {
+      bitmap_set(unavailable, index + n);
+      bitmap_set(allocated, index + n);
+    }
+    statistics.allocated_pages += count;
+    statistics.free_pages -= count;
+    next_page = index + count;
+    if (next_page >= statistics.total_pages)
+      next_page = 0;
+    return true;
+  }
+
+  return false;
+}
+
 bool page_free(paddr_t address) {
   if (!ready)
     return false;

@@ -73,6 +73,9 @@ clean:
 
 check: | $(OBJ_DIR)
 	$(HOSTCC) $(HOSTCFLAGS) -iquote $(SRC_DIR) \
+		tests/page_test.c -o $(OBJ_DIR)/page_test
+	$(OBJ_DIR)/page_test
+	$(HOSTCC) $(HOSTCFLAGS) -iquote $(SRC_DIR) \
 		tests/pcie_test.c -o $(OBJ_DIR)/pcie_test
 	$(OBJ_DIR)/pcie_test
 	$(HOSTCC) $(HOSTCFLAGS) -I$(SRC_DIR) -c \

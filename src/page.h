@@ -22,6 +22,10 @@ bool page_alloc(paddr_t *address);
 bool page_free(paddr_t address);
 bool page_alloc_run(unsigned int count,
     unsigned int alignment_pages, paddr_t *address);
+// Claim exactly this page-aligned run within one RAM bank. Failure leaves
+// allocator state unchanged. Release with page_free_run(); track ownership
+// in the caller, as for other allocations. Does not access physical memory.
+bool page_claim_run(paddr_t address, unsigned int count);
 bool page_free_run(paddr_t address, unsigned int count);
 bool page_alloc_run_below(unsigned int count,
     unsigned int alignment_pages, paddr_t limit, paddr_t *address);
