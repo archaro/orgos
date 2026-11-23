@@ -618,6 +618,7 @@ bool xhci_get_state(xhci_state_t *state) {
   lo = xhci_read(base + XHCI_DCBAAP_LO);
   hi = xhci_read(base + XHCI_DCBAAP_HI);
   state->dcbaa = ((uint64_t)hi << 32) | lo;
+  state->hccparams1 = xhci_read(XHCI_HCCPARAMS1);
   return true;
 }
 
@@ -1235,7 +1236,9 @@ xhci_configure_result_t xhci_configure(xhci_configure_info_t *result) {
   if (!xhci_probe(&info) || !xhci_get_state(&state))
     return XHCI_CONFIGURE_UNAVAILABLE;
 
-  if (!(state.status & XHCI_STS_HALTED) ||
+  // All OrgOS DMA bus pointers are above 4 GiB; AC64 is mandatory.
+  if (!(state.hccparams1 & 1U) ||
+      !(state.status & XHCI_STS_HALTED) ||
       (state.status & XHCI_STS_CNR) ||
       (state.command & (XHCI_CMD_RUN | XHCI_CMD_HCRST)) ||
       !(state.pagesize & 1U) ||

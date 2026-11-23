@@ -1,1095 +1,648 @@
+// New OrgOS integration, validation and diagnostics are licensed under MIT;
+// Controller operations are adapted from the following ISC sources, whose
+// original copyrights and notices are retained below:
+// FreeBSD bcm2838_pci.c, a05af6ddf9016e4ea4f0b361aa674e7ece6fe7ec;
+// OpenBSD bcm2711_pcie.c, a5eb81483dd17781492c4e8a54e1317ff8fd9837.
 
-#include <stdint.h>
-#include <stdbool.h>
+// Copyright (c) 2020 Dr Robert Harvey Crowston <crowston@protonmail.com>
+// Copyright (c) 2020, 2025 Mark Kettenis <kettenis@openbsd.org>
+//
+// Permission to use, copy, modify, and distribute this software for any
+// purpose with or without fee is hereby granted, provided that the above
+// copyright notice and this permission notice appear in all copies.
+//
+// THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+// MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+// ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+// WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+// ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+// OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-#include "mmio.h"
+#include "pcie.h"
+#include "pcie_io.h"
 #include "fdt.h"
 #include "timer.h"
-#include "pcie.h"
+#include "console.h"
 
-//BCM2711 PCIe root-complex registers.
-//The controller occupies the physical MMIO region
-//beginning at 0xFD500000.
-//OrgOS currently runs with the MMU disabled, so
-//physical and CPU-visible addresses coincide.
-//Based on the Linux Broadcom PCIe driver
-#define PCIE_BASE         0xfd500000UL
+// CPU mappings are identity mappings, including Device memory for PCIe MMIO.
+#define RC_ADDRESS 0xfd500000UL
+#define XHCI_PCI_ADDRESS 0xc0000000U
+#define XHCI_ARM_ADDRESS 0x600000000ULL
+#define OUTBOUND_BYTES 0x04000000ULL
+#define RAM_PCI_ADDRESS 0x100000000ULL
+#define RAM_ADDRESS_CEILING 0xc0000000ULL
+#define RAM_SIZE_CODE (32U - 15U)
+#define VL805_ID 0x34831106U
+#define XHCI_CLASS 0x0c0330U
+#define MSI_ADDRESS 0xffffffffcULL
+#define MSI_MATCH 0xffe06540U
+#define MSI_VECTOR_DATA 0x6540U
+#define MSI_REVISION 0x0304U
 
-#define PCIE_STATUS       (PCIE_BASE + 0x4068)
-#define PCIE_REVISION     (PCIE_BASE + 0x406c)
+// Controller offsets and field encodings: FreeBSD/OpenBSD sources above.
+enum {
+  BAR2_ENDIAN = 0x0188,
+  DMA_CONTROL = 0x4008,
+  OUTBOUND_LOW = 0x400c,
+  OUTBOUND_HIGH = 0x4010,
+  INBOUND1_LOW = 0x402c,
+  INBOUND1_HIGH = 0x4030,
+  INBOUND2_LOW = 0x4034,
+  INBOUND2_HIGH = 0x4038,
+  INBOUND3_LOW = 0x403c,
+  MSI_TARGET_LOW = 0x4044,
+  MSI_TARGET_HIGH = 0x4048,
+  MSI_MATCH_DATA = 0x404c,
+  LINK_STATE = 0x4068,
+  REVISION = 0x406c,
+  OUTBOUND_RANGE = 0x4070,
+  OUTBOUND_START_HIGH = 0x4080,
+  OUTBOUND_END_HIGH = 0x4084,
+  SERDES_CONTROL = 0x4204,
+  MSI_PENDING = 0x4500,
+  MSI_ACK = 0x4508,
+  MSI_MASK = 0x4510,
+  MSI_UNMASK = 0x4514,
+  CONFIG_DATA = 0x8000,
+  CONFIG_SELECT = 0x9000,
+  RESET_CONTROL = 0x9210
+};
 
-//Extended configuration access.
-//INDEX selects the bus/device/function.
-//DATA maps the selected device's config space.
-#define PCIE_CFG_INDEX    (PCIE_BASE + 0x9000)
-#define PCIE_CFG_DATA     (PCIE_BASE + 0x8000)
+enum {
+  RESET_ENDPOINT = 1U,
+  RESET_BRIDGE = 2U,
+  LINK_PHY = 1U << 4,
+  LINK_DATA = 1U << 5,
+  MODE_ROOT = 1U << 7,
+  COMPLETION_64 = 1U << 7,
+  COMPLETION_MPS = 1U << 10,
+  SCB_ACCESS = 1U << 12,
+  CONFIG_UR = 1U << 13,
+  BURST_FIELD = 3U << 20,
+  SERDES_POWERDOWN = 1U << 27,
+  ENDIAN_FIELD = 3U << 2
+};
+#define SCB0_FIELD (31U << 27)
 
-//PCI configuration-space offsets.
-#define PCI_VENDOR_DEVICE 0x00
-#define PCI_CLASS_REV     0x08
-#define PCI_BUS_NUMBERS   0x18
-#define PCI_BAR0          0x10
-#define PCI_BAR1          0x14
+// Standard PCI fields; numerical layout corroborated by FreeBSD pcireg.h.
+enum {
+  CFG_ID = 0x00,
+  CFG_COMMAND = 0x04,
+  CFG_CLASS = 0x08,
+  CFG_HEADER = 0x0c,
+  CFG_BAR_LOW = 0x10,
+  CFG_BAR_HIGH = 0x14,
+  CFG_BUSES = 0x18,
+  CFG_MEMORY = 0x20,
+  CFG_CAPABILITIES = 0x34,
+  CFG_INTERRUPT = 0x3c,
+  CFG_FIRMWARE = 0x50,
+  COMMAND_MEMORY = 2U,
+  COMMAND_MASTER = 4U,
+  STATUS_CAPABILITIES = 1U << 4,
+  CAP_PM = 1U,
+  CAP_MSI = 5U,
+  CAP_MSIX = 0x11U,
+  MSI_ENABLE = 1U,
+  MSI_MULTIPLE_ENABLE = 7U << 4,
+  MSI_WIDE_ADDRESS = 1U << 7
+};
 
-//PCIe link status bits.
-//Bit 7: Controller in root-complex mode
-//Bit 5: Data Link Layer active
-//Bit 4: PHY reports link up
-#define PCIE_STATUS_RC    (1U << 7)
-#define PCIE_STATUS_DL    (1U << 5)
-#define PCIE_STATUS_PHY   (1U << 4)
+static bool link_started;
+static bool resources_assigned;
+static bool ram_window_configured;
 
-// BCM2711 PCIe bridge reset register.
-// Bit 1: bridge software initialization/reset.
-// Bit 0: downstream PERST# control.
-// Both controls are active-high requests:
-// setting a bit asserts the corresponding reset.
-#define PCIE_SW_INIT       (PCIE_BASE + 0x9210)
-#define PCIE_SW_INIT_BRIDGE (1U << 1)
-#define PCIE_SW_INIT_PERST  (1U << 0)
+static uint32_t host_read(unsigned int reg) {
+  return pcie_read32(RC_ADDRESS + reg);
+}
 
-// PCIe SerDes and miscellaneous configuration.
-#define PCIE_HARD_DEBUG   (PCIE_BASE + 0x4204)
-#define PCIE_MISC_CTRL    (PCIE_BASE + 0x4008)
+static void host_write(unsigned int reg, uint32_t value) {
+  pcie_write32(RC_ADDRESS + reg, value);
+  pcie_barrier();
+}
 
-// BCM2711 root-complex inbound windows.
-// BAR2 is the principal system-memory DMA window.
-#define PCIE_RC_BAR2_LO        (PCIE_BASE + 0x4034)
-#define PCIE_RC_BAR2_HI        (PCIE_BASE + 0x4038)
-#define PCIE_RC_BAR3_LO        (PCIE_BASE + 0x403c)
-#define PCIE_MSI_BAR_LO        (PCIE_BASE + 0x4044)
-#define PCIE_MSI_BAR_HI        (PCIE_BASE + 0x4048)
-#define PCIE_MSI_DATA_CONFIG   (PCIE_BASE + 0x404c)
-#define PCIE_MSI_STATUS        (PCIE_BASE + 0x4500)
-#define PCIE_MSI_CLEAR         (PCIE_BASE + 0x4508)
-#define PCIE_MSI_MASK_SET      (PCIE_BASE + 0x4510)
-#define PCIE_MSI_MASK_CLR      (PCIE_BASE + 0x4514)
+static void host_change(unsigned int reg, uint32_t mask, uint32_t bits) {
+  host_write(reg, (host_read(reg) & ~mask) | bits);
+}
 
-// BCM2711 MSI target above the 4 GiB DMA aperture.
-#define PCIE_MSI_TARGET_LO  0xfffffffcU
-#define PCIE_MSI_TARGET_HI  0x0000000fU
+static bool active_link(uint32_t state) {
+  return (state & (LINK_PHY | LINK_DATA)) == (LINK_PHY | LINK_DATA);
+}
 
-// Broadcom 32-vector MSI data configuration.
-#define PCIE_MSI_DATA_VALUE 0xffe06540U
-#define PCIE_MSI_ALL_VECTORS 0xffffffffU
+// Only the root and the VL805 at device/function 0/0 are used by this API.
+// IRQ handling accesses host MSI registers only; it never changes the selector.
+static uintptr_t config_address(uint8_t bus, unsigned int reg) {
+  if (bus == 0)
+    return RC_ADDRESS + reg;
+  host_write(CONFIG_SELECT, (uint32_t)bus << 20);
+  return RC_ADDRESS + CONFIG_DATA + reg;
+}
 
-// Root-complex vendor-specific BAR2 endian control.
-#define PCIE_RC_ENDIAN_CTRL    (PCIE_BASE + 0x0188)
+static uint32_t config_read(uint8_t bus, unsigned int reg) {
+  return pcie_read32(config_address(bus, reg));
+}
 
-#define PCIE_RC_BAR2_SIZE_MASK  0x1fU
-#define PCIE_SCB0_SIZE_MASK    0xf8000000U
-#define PCIE_SCB0_SIZE_SHIFT   27U
-#define PCIE_BAR2_ENDIAN_MASK  0x0cU
+static uint16_t config_half(uint8_t bus, unsigned int reg) {
+  return pcie_read16(config_address(bus, reg));
+}
 
-#define PCIE_DMA_WINDOW_SIZE   0x100000000ULL
-#define PCIE_DMA_VALID_SIZE    0xC0000000ULL
-#define PCIE_DMA_BUS_BASE      0x100000000ULL
+static void config_write(uint8_t bus, unsigned int reg, uint32_t value) {
+  pcie_write32(config_address(bus, reg), value);
+  pcie_barrier();
+}
 
-// log2(4 GiB) - 15
-#define PCIE_DMA_SIZE_CODE     17U
+static void config_write_half(uint8_t bus, unsigned int reg, uint16_t value) {
+  pcie_write16(config_address(bus, reg), value);
+  pcie_barrier();
+}
 
-#define PCIE_SERDES_IDDQ  (1U << 27)
-
-#define PCIE_SCB_ACCESS   (1U << 12)
-#define PCIE_CFG_READ_UR  (1U << 13)
-#define PCIE_RCB_MPS      (1U << 10)
-#define PCIE_RCB_64B      (1U << 7)
-
-#define PCIE_BURST_MASK   (3U << 20)
-
-/*
- * BCM2711 PCIe outbound MMIO aperture.
- *
- * CPU physical 0x600000000 maps to PCI bus 0xC0000000.
- * Window size: 64 MiB.
- */
-#define PCIE_CPU_MMIO_BASE   0x600000000ULL
-#define PCIE_BUS_MMIO_BASE   0xc0000000U
-#define PCIE_MMIO_SIZE_MB    64U
-
-/*
- * BCM2711 outbound window 0 registers.
- */
-#define PCIE_MEM_WIN0_LO         (PCIE_BASE + 0x400c)
-#define PCIE_MEM_WIN0_HI         (PCIE_BASE + 0x4010)
-#define PCIE_MEM_WIN0_BASE_LIMIT (PCIE_BASE + 0x4070)
-#define PCIE_MEM_WIN0_BASE_HI    (PCIE_BASE + 0x4080)
-#define PCIE_MEM_WIN0_LIMIT_HI   (PCIE_BASE + 0x4084)
-
-/*
- * PCI configuration-space registers.
- */
-#define PCI_COMMAND             0x04U
-#define PCI_MEMORY_BASE_LIMIT   0x20U
-
-#define PCI_COMMAND_MEMORY      (1U << 1)
-
-static bool xhci_resources_ready;
-static bool dma_window_ready;
-static bool pcie_link_initialised;
+static void command_change(uint8_t bus, uint16_t mask, uint16_t bits) {
+  uint16_t command = config_half(bus, CFG_COMMAND);
+  config_write_half(bus, CFG_COMMAND, (command & (uint16_t)~mask) | bits);
+}
 
 bool pcie_xhci_ready(void) {
-  return xhci_resources_ready;
-}
-
-// Read a register from the root-complex configuration
-// space, which is directly mapped at PCIE_BASE.
-static uint32_t root_config_read(uint32_t offset) {
-  return mmio_read(PCIE_BASE + offset);
-}
-
-// Read a 32-bit configuration register from a
-// downstream PCIe device.
-// The Broadcom controller requires us to select a
-// bus/device/function using the extended config index.
-// Only call this after confirming the link is up.
-static uint32_t device_config_read(uint8_t bus, uint8_t device, uint8_t function, uint32_t offset) {
-  uint32_t index = ((uint32_t)bus << 20) | ((uint32_t)device << 15) | ((uint32_t)function << 12);
-
-  mmio_write(PCIE_CFG_INDEX, index);
-
-  // Ensure the index write completes before reading
-  // the selected configuration register.
-  __asm__ volatile("dsb sy" ::: "memory");
-  return mmio_read(PCIE_CFG_DATA + offset);
-}
-
-static void pcie_set_memory_decode(uint8_t bus, bool enabled) {
-  uintptr_t address;
-
-  if (bus == 0) {
-    address = PCIE_BASE + PCI_COMMAND;
-  } else {
-    mmio_write(PCIE_CFG_INDEX, ((uint32_t)bus << 20));
-    __asm__ volatile("dsb sy" ::: "memory");
-    address = PCIE_CFG_DATA + PCI_COMMAND;
-  }
-
-  volatile uint16_t *command =
-      (volatile uint16_t *)address;
-  uint16_t value = *command;
-  if (enabled)
-    value |= PCI_COMMAND_MEMORY;
-  else
-    value &= (uint16_t)~PCI_COMMAND_MEMORY;
-  *command = value;
-  __asm__ volatile("dsb sy" ::: "memory");
-}
-
-// Write a 32-bit downstream configuration register.
-// This mirrors device_config_read() but performs
-// a write to the selected BDF.
-static void device_config_write(uint8_t bus, uint8_t device, uint8_t function, uint32_t offset, uint32_t value) {
-  uint32_t index = ((uint32_t)bus << 20) | ((uint32_t)device << 15) | ((uint32_t)function << 12);
-
-  mmio_write(PCIE_CFG_INDEX, index);
-  __asm__ volatile("dsb sy" ::: "memory");
-  mmio_write(PCIE_CFG_DATA + offset, value);
-  __asm__ volatile("dsb sy" ::: "memory");
+  return resources_assigned;
 }
 
 void pcie_probe(pcie_info_t *info) {
   if (!info)
     return;
-
-  // Initialise all results explicitly.
   *info = (pcie_info_t){0};
-
-  // Inspect the controller's current state.
-  // We do not change resets, clocks, address windows
-  // or controller configuration at this stage.
-  info->status = mmio_read(PCIE_STATUS);
-  info->revision = mmio_read(PCIE_REVISION);
-
-  info->root_complex = (info->status & PCIE_STATUS_RC) != 0;
-
-  info->link_up = (info->status & (PCIE_STATUS_DL | PCIE_STATUS_PHY)) ==
-     (PCIE_STATUS_DL | PCIE_STATUS_PHY);
-
-  // If the link is inactive, stop here.
-  // Linux's Broadcom driver specifically avoids
-  // downstream configuration reads when the link
-  // is down because they can cause a CPU abort.
+  uint32_t state = host_read(LINK_STATE);
+  info->status = state;
+  info->revision = host_read(REVISION);
+  info->root_complex = (state & MODE_ROOT) != 0;
+  info->link_up = active_link(state);
   if (!info->root_complex || !info->link_up)
     return;
 
-  // Read the root bridge's PCI identification.
-  uint32_t id = root_config_read(PCI_VENDOR_DEVICE);
-
-  info->root_vendor = (uint16_t)(id & 0xffffU);
-  info->root_device = (uint16_t)(id >> 16);
-
-  // A Type 1 PCI bridge contains primary,
-  // secondary and subordinate bus numbers.
-  uint32_t buses = root_config_read(PCI_BUS_NUMBERS);
-
-  info->secondary_bus = (uint8_t)((buses >> 8) & 0xffU);
-
-  info->subordinate_bus = (uint8_t)((buses >> 16) & 0xffU);
-
-  // If the firmware hasn't configured a downstream
-  // bus number, don't invent one.
-  if (info->secondary_bus == 0 ||
-      info->subordinate_bus < info->secondary_bus)
+  uint32_t root = config_read(0, CFG_ID);
+  info->root_vendor = (uint16_t)root;
+  info->root_device = (uint16_t)(root >> 16);
+  uint32_t buses = config_read(0, CFG_BUSES);
+  uint8_t bus = (uint8_t)(buses >> 8);
+  info->secondary_bus = bus;
+  info->subordinate_bus = (uint8_t)(buses >> 16);
+  if (!bus || bus > info->subordinate_bus)
     return;
 
-  // On a Raspberry Pi 4B, the VL805 is normally
-  // the first device (device 0, function 0)
-  // on the downstream bus.
-  id = device_config_read(info->secondary_bus, 0, 0, PCI_VENDOR_DEVICE);
-
-  // PCI configuration reads commonly return all
-  // ones when no device responds.
-  if (id == 0xffffffffU || (id & 0xffffU) == 0xffffU)
+  uint32_t endpoint = config_read(bus, CFG_ID);
+  if ((uint16_t)endpoint == 0xffffU)
     return;
-
   info->endpoint_present = true;
-  info->endpoint_vendor = (uint16_t)(id & 0xffffU);
-  info->endpoint_device = (uint16_t)(id >> 16);
-
-  // Class code occupies bits [31:8].
-  // USB xHCI class/subclass/interface = 0x0C0330.
-  uint32_t class_rev = device_config_read(
-      info->secondary_bus, 0, 0,
-      PCI_CLASS_REV);
-
-  info->endpoint_class = class_rev >> 8;
-
-  // Read the BARs without writing to them.
-  // These may be unassigned if the host bridge
-  // has not been configured.
-  info->endpoint_bar0 = device_config_read(
-      info->secondary_bus, 0, 0, PCI_BAR0);
-
-  info->endpoint_bar1 = device_config_read(
-      info->secondary_bus, 0, 0, PCI_BAR1);
+  info->endpoint_vendor = (uint16_t)endpoint;
+  info->endpoint_device = (uint16_t)(endpoint >> 16);
+  info->endpoint_class = config_read(bus, CFG_CLASS) >> 8;
+  info->endpoint_bar0 = config_read(bus, CFG_BAR_LOW);
+  info->endpoint_bar1 = config_read(bus, CFG_BAR_HIGH);
 }
 
-// Change selected bits in a 32-bit MMIO register
-// without disturbing the remaining bits.
-static void pcie_update_bits(uintptr_t address, uint32_t clear_mask, uint32_t set_mask) {
-  uint32_t value = mmio_read(address);
+static bool is_vl805(const pcie_info_t *info) {
+  return info->root_complex && info->link_up && info->endpoint_present &&
+      info->endpoint_vendor == (uint16_t)VL805_ID &&
+      info->endpoint_device == (uint16_t)(VL805_ID >> 16);
+}
 
-  value &= ~clear_mask;
-  value |= set_mask;
-  mmio_write(address, value);
-  __asm__ volatile("dsb sy" ::: "memory");
+static bool mapped_endpoint(uint8_t *bus) {
+  if (!resources_assigned)
+    return false;
+  pcie_info_t info;
+  pcie_probe(&info);
+  if (!is_vl805(&info) || info.endpoint_class != XHCI_CLASS)
+    return false;
+  *bus = info.secondary_bus;
+  return true;
 }
 
 pcie_init_result_t pcie_init_link(void) {
-
-  // Do not reset a PCIe link already initialised
-  // by OrgOS. This would disrupt the running xHCI.
-  if (pcie_link_initialised)
+  if (link_started)
     return PCIE_INIT_ALREADY_UP;
 
-  // The PCIe status register must not be read
-  // before initialising the bridge. On some firmware
-  // revisions an early read stalls for 10.8 seconds.
-
-  // Assert bridge reset and endpoint PERST#.
-  pcie_update_bits(PCIE_SW_INIT, 0, PCIE_SW_INIT_BRIDGE | PCIE_SW_INIT_PERST);
+  // Adapted reset mechanism; delays and polling budget are the OrgOS contract.
+  // Do not sample controller status until the bridge has left reset.
+  host_change(RESET_CONTROL, 0, RESET_BRIDGE | RESET_ENDPOINT);
   timer_delay_us(150);
-
-  // Release the bridge, keeping the VL805 in reset.
-  pcie_update_bits(PCIE_SW_INIT, PCIE_SW_INIT_BRIDGE, 0);
-
-  // Wake the PCIe SerDes from IDDQ power-down.
-  pcie_update_bits(PCIE_HARD_DEBUG, PCIE_SERDES_IDDQ, 0);
+  host_change(RESET_CONTROL, RESET_BRIDGE, 0);
+  host_change(SERDES_CONTROL, SERDES_POWERDOWN, 0);
   timer_delay_us(150);
-
-  // Configure the basic PCIe controller mode.
-  // DMA translation windows are configured later.
-  pcie_update_bits(PCIE_MISC_CTRL, PCIE_BURST_MASK,
-      PCIE_SCB_ACCESS | PCIE_CFG_READ_UR |
-      PCIE_RCB_MPS | PCIE_RCB_64B);
-
-  // The bridge is now initialised and its status
-  // register can be accessed without the startup stall.
-  uint32_t status = mmio_read(PCIE_STATUS);
-  if (!(status & PCIE_STATUS_RC))
+  host_change(DMA_CONTROL, BURST_FIELD,
+      SCB_ACCESS | CONFIG_UR | COMPLETION_64 | COMPLETION_MPS);
+  if (!(host_read(LINK_STATE) & MODE_ROOT))
     return PCIE_INIT_NOT_ROOT_COMPLEX;
 
-  // Release the VL805 from fundamental reset.
-  pcie_update_bits(PCIE_SW_INIT, PCIE_SW_INIT_PERST, 0);
-
-  // Allow the downstream device to settle.
+  host_change(RESET_CONTROL, RESET_ENDPOINT, 0);
   timer_delay_ms(100);
-
-  // Allow up to another 100 ms for link establishment.
-  uint64_t deadline = timer_now_us() + 100000U;
+  uint64_t started = timer_now_us();
   do {
-    status = mmio_read(PCIE_STATUS);
-    if ((status & (PCIE_STATUS_PHY | PCIE_STATUS_DL)) ==
-        (PCIE_STATUS_PHY | PCIE_STATUS_DL)) {
-      pcie_link_initialised = true;
+    if (active_link(host_read(LINK_STATE))) {
+      link_started = true;
       return PCIE_INIT_OK;
     }
     timer_delay_ms(5);
-  } while (timer_now_us() < deadline);
-
+  } while (timer_now_us() - started < 100000ULL);
   return PCIE_INIT_LINK_TIMEOUT;
 }
 
+// FreeBSD encode_cpu_window_* encoding, specialized to OrgOS's one aperture.
+static void assign_outbound_window(void) {
+  uint64_t last = XHCI_ARM_ADDRESS + OUTBOUND_BYTES - 1;
+  host_write(OUTBOUND_LOW, XHCI_PCI_ADDRESS);
+  host_write(OUTBOUND_HIGH, 0);
+  host_write(OUTBOUND_RANGE,
+      ((XHCI_ARM_ADDRESS >> 16) & 0xfff0U) | (last & 0xfff00000U));
+  host_write(OUTBOUND_START_HIGH, (XHCI_ARM_ADDRESS >> 32) & 0xffU);
+  host_write(OUTBOUND_END_HIGH, (last >> 32) & 0xffU);
+}
+
 pcie_map_result_t pcie_map_xhci(void) {
-  pcie_info_t info;
-
-  if (xhci_resources_ready)
+  if (resources_assigned)
     return PCIE_MAP_OK;
-  // Only proceed when the link is active and
-  // the expected VIA VL805 has been identified.
+  pcie_info_t info;
   pcie_probe(&info);
-
-  if (!info.link_up)
+  if (!info.root_complex || !info.link_up)
     return PCIE_MAP_LINK_DOWN;
-
-  // A fundamental bridge reset may clear its PCI bus
-  // numbers. The BCM2711 has one downstream bus, bus 1.
-  if (info.secondary_bus == 0U ||
-      info.subordinate_bus < info.secondary_bus) {
-    uint32_t buses = root_config_read(PCI_BUS_NUMBERS);
-
-    // Preserve the secondary latency timer. Assign
-    // primary bus 0, secondary 1 and subordinate 1.
-    buses = (buses & 0xff000000U) | 0x00010100U;
-
-    mmio_write(PCIE_BASE + PCI_BUS_NUMBERS, buses);
-    __asm__ volatile("dsb sy" ::: "memory");
-
-    if ((root_config_read(PCI_BUS_NUMBERS) & 0x00ffffffU) !=
-        0x00010100U)
+  if (!info.secondary_bus || info.secondary_bus > info.subordinate_bus) {
+    uint32_t value = config_read(0, CFG_BUSES);
+    config_write(0, CFG_BUSES, (value & 0xff000000U) | 0x00010100U);
+    if ((config_read(0, CFG_BUSES) & 0x00ffffffU) != 0x00010100U)
       return PCIE_MAP_BUS_FAILED;
-
-    // Re-probe now that downstream configuration
-    // transactions can address bus 1.
     pcie_probe(&info);
   }
-
-  // This code is tested on the CME U2MIDI Pro:
-  // Other devices will need to be tested and enabled.
-  if (!info.endpoint_present ||
-      info.endpoint_vendor != 0x1106U ||
-      info.endpoint_device != 0x3483U ||
-      info.endpoint_class != 0x0c0330U)
+  if (!is_vl805(&info) || info.endpoint_class != XHCI_CLASS)
     return PCIE_MAP_WRONG_DEVICE;
-
-  // BAR0 should describe a 64-bit, non-I/O,
-  // non-prefetchable memory resource.
-  // PCI memory BAR bits [2:1] = 10 for 64-bit.
-  if ((info.endpoint_bar0 & 0x0fU) != 0x04U)
+  if ((info.endpoint_bar0 & 15U) != 4U)
     return PCIE_MAP_BAD_BAR;
 
-  // Configure outbound window 0.
-  // PCIe address base = 0xC0000000.
-  // ARM physical base = 0x600000000.
-  // BCM2711 base/limit registers express
-  // CPU addresses in units of 1 MiB.
-  uint64_t cpu_base_mb = PCIE_CPU_MMIO_BASE >> 20;
-  uint64_t cpu_limit_mb = cpu_base_mb + PCIE_MMIO_SIZE_MB - 1U;
-
-  mmio_write(PCIE_MEM_WIN0_LO, PCIE_BUS_MMIO_BASE);
-  mmio_write(PCIE_MEM_WIN0_HI, 0);
-
-  uint32_t base_limit =
-      (uint32_t)((cpu_base_mb & 0xfffU) << 4) |
-      (uint32_t)((cpu_limit_mb & 0xfffU) << 20);
-
-  mmio_write(PCIE_MEM_WIN0_BASE_LIMIT, base_limit);
-  mmio_write(PCIE_MEM_WIN0_BASE_HI, (uint32_t)(cpu_base_mb >> 12));
-  mmio_write(PCIE_MEM_WIN0_LIMIT_HI, (uint32_t)(cpu_limit_mb >> 12));
-
-  // Configure the root bridge's downstream
-  // memory forwarding aperture.
-  // Type 1 bridge memory-base/limit registers
-  // have 1 MiB granularity.
-  // 0xC000C000 describes a 1 MiB aperture
-  // beginning at bus address 0xC0000000.
-  // The VL805 occupies only 4 KiB, so 1 MiB
-  // is enough for this initial experiment.
-  mmio_write(PCIE_BASE + PCI_MEMORY_BASE_LIMIT, 0xc000c000U);
-
-  // Disable the endpoint's memory decoding
-  // before changing its BAR.
-  // Preserve unrelated PCI command bits.
+  assign_outbound_window();
+  // Type 1 forwarding covers the first MiB of the assigned PCIe aperture.
+  config_write(0, CFG_MEMORY, 0xc000c000U);
   uint8_t bus = info.secondary_bus;
-  pcie_set_memory_decode(bus, false);
-
-  // Assign the 64-bit BAR.
-  // The low DWORD contains the base address
-  // and the BAR type bits.
-  // The high DWORD is zero because our PCIe
-  // bus address fits in 32 bits.
-  device_config_write(bus, 0, 0, PCI_BAR0, PCIE_BUS_MMIO_BASE | 0x04U);
-  device_config_write(bus, 0, 0, PCI_BAR1, 0);
-
-  // Read back the assignment before allowing
-  // memory transactions to reach the device.
-  uint32_t bar0 = device_config_read( bus, 0, 0, PCI_BAR0);
-  uint32_t bar1 = device_config_read( bus, 0, 0, PCI_BAR1);
-
-  if ((bar0 & ~0x0fU) != PCIE_BUS_MMIO_BASE || bar1 != 0)
+  command_change(bus, COMMAND_MEMORY, 0);
+  config_write(bus, CFG_BAR_LOW, XHCI_PCI_ADDRESS | 4U);
+  config_write(bus, CFG_BAR_HIGH, 0);
+  if ((config_read(bus, CFG_BAR_LOW) & ~15U) != XHCI_PCI_ADDRESS ||
+      config_read(bus, CFG_BAR_HIGH) != 0)
     return PCIE_MAP_VERIFY_FAILED;
-
-  // Enable downstream memory forwarding at the
-  // root bridge, followed by endpoint decoding.
-  // PCI bus mastering is deliberately NOT enabled.
-  pcie_set_memory_decode(0, true);
-  pcie_set_memory_decode(bus, true);
-  __asm__ volatile("dsb sy\nisb" ::: "memory");
-  xhci_resources_ready = true;
+  command_change(0, COMMAND_MEMORY, COMMAND_MEMORY);
+  command_change(bus, COMMAND_MEMORY, COMMAND_MEMORY);
+  pcie_instruction_sync();
+  resources_assigned = true;
   return PCIE_MAP_OK;
+}
+
+bool pcie_xhci_get_command(uint16_t *command) {
+  uint8_t bus;
+  if (!command || !mapped_endpoint(&bus))
+    return false;
+  uint16_t value = config_half(bus, CFG_COMMAND);
+  if (value == 0xffffU)
+    return false;
+  *command = value;
+  return true;
+}
+
+bool pcie_xhci_bar_valid(void) {
+  uint8_t bus;
+  return mapped_endpoint(&bus) &&
+      (config_read(bus, CFG_BAR_LOW) & ~15U) == XHCI_PCI_ADDRESS &&
+      config_read(bus, CFG_BAR_HIGH) == 0;
+}
+
+bool pcie_xhci_disable_bus_master(void) {
+  uint8_t bus;
+  if (!mapped_endpoint(&bus))
+    return false;
+  command_change(bus, COMMAND_MASTER, 0);
+  uint16_t result;
+  return pcie_xhci_get_command(&result) && !(result & COMMAND_MASTER);
+}
+
+bool pcie_xhci_enable_bus_master(void) {
+  uint8_t bus;
+  if (!mapped_endpoint(&bus) || !pcie_xhci_bar_valid())
+    return false;
+  uint16_t command = config_half(bus, CFG_COMMAND);
+  if (command == 0xffffU || !(command & COMMAND_MEMORY))
+    return false;
+  config_write_half(bus, CFG_COMMAND, command | COMMAND_MASTER);
+  uint16_t result;
+  return pcie_xhci_get_command(&result) &&
+      (result & (COMMAND_MEMORY | COMMAND_MASTER)) ==
+          (COMMAND_MEMORY | COMMAND_MASTER);
 }
 
 bool pcie_dma_probe(pcie_dma_info_t *info) {
   if (!info)
     return false;
-
   *info = (pcie_dma_info_t){0};
-  // These registers belong to the BCM2711 root
-  // complex. They are not VL805 endpoint registers.
-  // Do not inspect them until the PCIe controller
-  // has been brought out of reset and is active.
-  uint32_t status = mmio_read(PCIE_STATUS);
-
-  if (!(status & PCIE_STATUS_RC))
+  if (!(host_read(LINK_STATE) & MODE_ROOT))
     return false;
-
-  info->misc_ctrl = mmio_read(PCIE_MISC_CTRL);
-  info->bar2_lo = mmio_read(PCIE_RC_BAR2_LO);
-  info->bar2_hi = mmio_read(PCIE_RC_BAR2_HI);
-  info->bar3_lo = mmio_read(PCIE_RC_BAR3_LO);
-  info->endian_ctrl = mmio_read(PCIE_RC_ENDIAN_CTRL);
+  info->misc_ctrl = host_read(DMA_CONTROL);
+  info->bar2_lo = host_read(INBOUND2_LOW);
+  info->bar2_hi = host_read(INBOUND2_HIGH);
+  info->bar3_lo = host_read(INBOUND3_LOW);
+  info->endian_ctrl = host_read(BAR2_ENDIAN);
+  info->bar1_lo = host_read(INBOUND1_LOW);
+  info->bar1_hi = host_read(INBOUND1_HIGH);
   return true;
 }
 
-bool pcie_msi_host_probe(pcie_msi_host_info_t *info) {
-  if (!info || !pcie_link_initialised)
+static bool supported_firmware_dma(void) {
+  fdt_pcie_dma_t description;
+  if (!fdt_get_pcie_dma(&description))
     return false;
-
-  *info = (pcie_msi_host_info_t){0};
-
-  if (!(mmio_read(PCIE_STATUS) & PCIE_STATUS_RC))
+  if (description.child_address_cells != 3 ||
+      description.parent_address_cells != 2 || description.size_cells != 2 ||
+      description.dma_cell_count != 7 || description.scb_cell_count != 0)
     return false;
-
-  info->revision = mmio_read(PCIE_REVISION);
-  info->target_lo = mmio_read(PCIE_MSI_BAR_LO);
-  info->target_hi = mmio_read(PCIE_MSI_BAR_HI);
-  info->data_config = mmio_read(PCIE_MSI_DATA_CONFIG);
-  info->interrupt_status = mmio_read(PCIE_MSI_STATUS);
-
-  return true;
-}
-
-pcie_msi_prepare_result_t pcie_msi_host_prepare(void) {
-  if (!pcie_link_initialised || !xhci_resources_ready || !dma_window_ready)
-    return PCIE_MSI_PREPARE_NOT_READY;
-
-  // This implementation is explicitly for the
-  // BCM2711 PCIe controller revision 0x0304.
-  if (mmio_read(PCIE_REVISION) != 0x00000304U)
-    return PCIE_MSI_PREPARE_UNSUPPORTED_REVISION;
-
-  pcie_xhci_interrupt_info_t endpoint = {0};
-
-  if (!pcie_xhci_get_interrupt_info(&endpoint) || !endpoint.msi_present ||
-      endpoint.msi_enabled || endpoint.msix_enabled)
-    return PCIE_MSI_PREPARE_ENDPOINT_STATE;
-
-  // First mask every vector, then discard any
-  // pending MSI status from earlier activity.
-  mmio_write(PCIE_MSI_MASK_SET, PCIE_MSI_ALL_VECTORS);
-  mmio_write(PCIE_MSI_CLEAR, PCIE_MSI_ALL_VECTORS);
-
-  __asm__ volatile("dsb sy" ::: "memory");
-
-  // Program the receiver while the endpoint is
-  // unable to generate MSI messages.
-  //
-  // Write the enabled low DWORD last.
-  mmio_write(PCIE_MSI_BAR_HI, PCIE_MSI_TARGET_HI);
-  mmio_write(PCIE_MSI_DATA_CONFIG, PCIE_MSI_DATA_VALUE);
-
-  __asm__ volatile("dsb sy" ::: "memory");
-
-  mmio_write(PCIE_MSI_BAR_LO, PCIE_MSI_TARGET_LO | 1U);
-
-  __asm__ volatile("dsb sy" ::: "memory");
-
-  // Verify registers that can be read back.
-  // MASK_SET is a write-one register; do not
-  // mistake a read from it for mask verification.
-  if (mmio_read(PCIE_MSI_BAR_LO) != (PCIE_MSI_TARGET_LO | 1U) ||
-      mmio_read(PCIE_MSI_BAR_HI) != PCIE_MSI_TARGET_HI ||
-      mmio_read(PCIE_MSI_DATA_CONFIG) != PCIE_MSI_DATA_VALUE ||
-      mmio_read(PCIE_MSI_STATUS) != 0U) {
-
-    // Fail closed: disable the receiver and
-    // mask all vectors again.
-    mmio_write(PCIE_MSI_MASK_SET, PCIE_MSI_ALL_VECTORS);
-    mmio_write(PCIE_MSI_BAR_LO, PCIE_MSI_TARGET_LO);
-    __asm__ volatile("dsb sy" ::: "memory");
-
-    return PCIE_MSI_PREPARE_VERIFY_FAILED;
+  // This is an input whitelist, not the base programmed by OrgOS.
+  const uint32_t expected[] = {0x02000000U, 4, 0, 0, 0, 0, 0xc0000000U};
+  for (unsigned int cell = 0; cell < 7; cell++) {
+    if (description.dma_cells[cell] != expected[cell])
+      return false;
   }
-
-  return PCIE_MSI_PREPARE_OK;
+  return true;
 }
 
-uint32_t pcie_msi_host_irq_quiesce(void) {
-  // Prevent further MSI vector delivery before
-  // inspecting the receiver's pending bits.
-  mmio_write(PCIE_MSI_MASK_SET, PCIE_MSI_ALL_VECTORS);
-
-  __asm__ volatile("dsb sy" ::: "memory");
-
-  uint32_t pending = mmio_read(PCIE_MSI_STATUS);
-
-  // Acknowledge only the status bits observed.
-  if (pending != 0U)
-    mmio_write(PCIE_MSI_CLEAR, pending);
-
-  // Ensure the source is cleared before the GIC
-  // interrupt is completed.
-  __asm__ volatile("dsb sy" ::: "memory");
-
-  return pending;
-}
-
-// Important: This function must only
-// ever be called once, during startup.
 bool pcie_dma_init(void) {
-  fdt_pcie_dma_t dma;
-
-  dma_window_ready = false;
-
-  if (!pcie_xhci_ready())
-    return false;
-
-  if (!fdt_get_pcie_dma(&dma))
-    return false;
-
-  // This initial implementation deliberately supports
-  // only the exact BCM2711 mapping reported by the
-  // firmware on our development Raspberry Pi.
-  // The code will have to be made more intelligent if
-  // another revision is used.
-  // PCIe address: 0x100000000
-  // CPU address:  0x000000000
-  // Valid size:   3 GiB
-  //
-  // The hardware aperture is rounded up to 4 GiB.
-  if (dma.child_address_cells != 3 ||
-      dma.parent_address_cells != 2 ||
-      dma.size_cells != 2 ||
-      dma.dma_cell_count != 7)
-    return false;
-
-  if (dma.dma_cells[0] != 0x02000000U ||
-      dma.dma_cells[1] != 0x00000004U ||
-      dma.dma_cells[2] != 0x00000000U ||
-      dma.dma_cells[3] != 0x00000000U ||
-      dma.dma_cells[4] != 0x00000000U ||
-      dma.dma_cells[5] != 0x00000000U ||
-      dma.dma_cells[6] != 0xC0000000U)
-    return false;
-
-  // We have no explicit memory-controller sizes.
-  // For this single-range BCM2711 configuration,
-  // use the same power-of-two fallback as Linux.
-  if (dma.scb_cell_count != 0)
-    return false;
-
-  // The VL805 must not be bus mastering while
-  // its inbound memory window is being configured.
-  // Existing OrgOS PCIe initialisation leaves
-  // bus mastering disabled.
-  uint32_t bar2_lo = (uint32_t)PCIE_DMA_BUS_BASE | PCIE_DMA_SIZE_CODE;
-  uint32_t bar2_hi = (uint32_t)(PCIE_DMA_BUS_BASE >> 32);
-
-  // Program the inbound PCIe-to-RAM window.
-  mmio_write(PCIE_RC_BAR2_LO, bar2_lo);
-  mmio_write(PCIE_RC_BAR2_HI, bar2_hi);
-
-  // Configure the system-memory controller aperture.
-  uint32_t misc = mmio_read(PCIE_MISC_CTRL);
-  misc &= ~PCIE_SCB0_SIZE_MASK;
-  misc |= PCIE_DMA_SIZE_CODE << PCIE_SCB0_SIZE_SHIFT;
-  mmio_write(PCIE_MISC_CTRL, misc);
-
-  // Explicitly select little-endian DMA operation.
-  uint32_t endian = mmio_read(PCIE_RC_ENDIAN_CTRL);
-  endian &= ~PCIE_BAR2_ENDIAN_MASK;
-  mmio_write(PCIE_RC_ENDIAN_CTRL, endian);
-
-  // Ensure all register writes have completed
-  // before verifying the programmed values.
-  __asm__ volatile("dsb sy" ::: "memory");
-  if (mmio_read(PCIE_RC_BAR2_LO) != bar2_lo ||
-      mmio_read(PCIE_RC_BAR2_HI) != bar2_hi)
-    return false;
-
-  if ((mmio_read(PCIE_MISC_CTRL) &
-          PCIE_SCB0_SIZE_MASK) !=
-      (PCIE_DMA_SIZE_CODE << PCIE_SCB0_SIZE_SHIFT))
-    return false;
-
-  if (mmio_read(PCIE_RC_ENDIAN_CTRL) &
-      PCIE_BAR2_ENDIAN_MASK)
-    return false;
-
-  dma_window_ready = true;
-  return true;
-}
-
-bool pcie_phys_to_dma(uint64_t physical,
-    uint64_t length, uint64_t *dma_address) {
-
-  if (!dma_window_ready || !dma_address || length == 0)
-    return false;
-
-  // Firmware advertises CPU physical addresses
-  // [0, 3 GiB) through the BCM2711 PCIe inbound
-  // window, whose bus base is 0x100000000.
-  // Check subtraction rather than computing the
-  // end address, avoiding integer overflow.
-  if (physical >= PCIE_DMA_VALID_SIZE)
-    return false;
-  if (length > PCIE_DMA_VALID_SIZE - physical)
-    return false;
-
-  *dma_address = PCIE_DMA_BUS_BASE + physical;
-  return true;
-}
-
-bool pcie_xhci_get_command(uint16_t *command) {
-  if (!command || !xhci_resources_ready)
-    return false;
-
-  pcie_info_t info;
-  pcie_probe(&info);
-  if (!info.link_up || !info.endpoint_present ||
-      info.endpoint_vendor != 0x1106U ||
-      info.endpoint_device != 0x3483U ||
-      info.endpoint_class != 0x0c0330U)
-    return false;
-
-  uint32_t value = device_config_read( info.secondary_bus, 0, 0, PCI_COMMAND);
-  *command = (uint16_t)(value & 0xffffU);
-  return true;
-}
-
-bool pcie_xhci_diagnose(pcie_xhci_diagnostic_t *result) {
-  if (!result || !xhci_resources_ready)
-    return false;
-
-  *result = (pcie_xhci_diagnostic_t){0};
-
-  pcie_info_t info;
-  pcie_probe(&info);
-  if (!info.link_up || !info.endpoint_present ||
-      info.endpoint_vendor != 0x1106U ||
-      info.endpoint_device != 0x3483U ||
-      info.endpoint_class != 0x0c0330U)
-    return false;
-
-  uint8_t bus = info.secondary_bus;
-  result->class_revision = device_config_read(bus, 0, 0, 0x08U);
-  result->command_status = device_config_read(bus, 0, 0, 0x04U);
-  result->header = device_config_read(bus, 0, 0, 0x0cU);
-
-  // PCI Status bit 4 indicates the presence
-  // of a standard PCI capability list.
-  uint16_t status = (uint16_t)(result->command_status >> 16);
-  result->capabilities_present = (status & (1U << 4)) != 0;
-  if (!result->capabilities_present)
+  // A running controller must never have its address translation rebuilt.
+  if (ram_window_configured)
     return true;
+  if (!resources_assigned || !supported_firmware_dma())
+    return false;
 
-  result->capability_pointer = device_config_read(bus, 0, 0, 0x34U);
-
-  // Follow the standard PCI capabilities list.
-  // Each entry starts with:
-  // byte 0: capability ID
-  // byte 1: pointer to next capability.
-  //
-  // Bound traversal to avoid loops or corrupt
-  // firmware-provided capability chains.
-  uint8_t offset = (uint8_t)(result->capability_pointer & 0xfcU);
-  for (unsigned int n = 0; n < 48 && offset; n++) {
-    if (offset < 0x40U || offset > 0xfcU)
-      return false;
-    uint32_t entry = device_config_read(bus, 0, 0, offset);
-    uint8_t id = (uint8_t)(entry & 0xffU);
-    uint8_t next = (uint8_t)((entry >> 8) & 0xfcU);
-    if (id == 0x01U) {
-      // Standard PCI Power Management capability:
-      // +0x00: capability ID and next pointer
-      // +0x02: PM capabilities
-      // +0x04: PM control/status.
-      //
-      // PCI config offsets 0x40..0xff are readable
-      // using the existing extended-config mechanism.
-      result->pm_present = true;
-      result->pm_offset = offset;
-      result->pm_capabilities = (uint16_t)(entry >> 16);
-      if (offset > 0xf8U)
-        return false;
-      uint32_t pmcsr = device_config_read(bus, 0, 0, offset + 4U);
-      result->pm_control = (uint16_t)pmcsr;
-      return true;
-    }
-    if (next == offset)
-      return false;
-    offset = next;
+  uint16_t command;
+  if (!pcie_xhci_get_command(&command)) {
+    console_puts("\nPCIe pre-DMA: Command read failed (BME unknown)\n");
+    return false;
   }
+  console_printf("\nPCIe pre-DMA: Command=0x%04x BME=%u\n",
+      (unsigned int)command, (unsigned int)((command >> 2) & 1U));
+  if (command & COMMAND_MASTER)
+    return false;
 
+  // OpenBSD/FreeBSD single-RAM-window model: eliminate other inbound decodes.
+  host_write(INBOUND1_LOW, 0);
+  host_write(INBOUND3_LOW, 0);
+  if ((host_read(INBOUND1_LOW) & 31U) || (host_read(INBOUND3_LOW) & 31U))
+    return false;
+
+  // BAR2 targets physical RAM at zero; PCIe base is the deliberate 4 GiB
+  // override. The 4 GiB aperture admits only the lower 3 GiB in software.
+  host_write(INBOUND2_LOW, RAM_SIZE_CODE);
+  host_write(INBOUND2_HIGH, RAM_PCI_ADDRESS >> 32);
+  host_change(DMA_CONTROL, SCB0_FIELD, RAM_SIZE_CODE << 27);
+  host_change(BAR2_ENDIAN, ENDIAN_FIELD, 0);
+  if (host_read(INBOUND2_LOW) != RAM_SIZE_CODE ||
+      host_read(INBOUND2_HIGH) != (RAM_PCI_ADDRESS >> 32) ||
+      (host_read(DMA_CONTROL) & SCB0_FIELD) != (RAM_SIZE_CODE << 27) ||
+      (host_read(BAR2_ENDIAN) & ENDIAN_FIELD))
+    return false;
+  ram_window_configured = true;
   return true;
 }
 
-bool pcie_xhci_get_interrupt_info(pcie_xhci_interrupt_info_t *result) {
-  if (!result || !xhci_resources_ready)
+bool pcie_phys_to_dma(uint64_t physical, uint64_t length, uint64_t *address) {
+  if (!address || !ram_window_configured || !length ||
+      physical >= RAM_ADDRESS_CEILING)
     return false;
-
-  *result = (pcie_xhci_interrupt_info_t){0};
-
-  pcie_info_t info;
-  pcie_probe(&info);
-  if (!info.link_up || !info.endpoint_present ||
-      info.endpoint_vendor != 0x1106U || info.endpoint_device != 0x3483U ||
-      info.endpoint_class != 0x0c0330U)
+  if (length > RAM_ADDRESS_CEILING - physical)
     return false;
-
-  uint8_t bus = info.secondary_bus;
-  // PCI interrupt line and pin are at offsets
-  // 0x3c and 0x3d respectively.
-  uint32_t interrupt = device_config_read(bus, 0, 0, 0x3cU);
-  result->interrupt_line = (uint8_t)(interrupt & 0xffU);
-  result->interrupt_pin = (uint8_t)((interrupt >> 8) & 0xffU);
-
-  // PCI Status bit 4 indicates a capability list.
-  uint32_t command_status = device_config_read(bus, 0, 0, 0x04U);
-  uint16_t status = (uint16_t)(command_status >> 16);
-  result->capabilities_present = (status & (1U << 4)) != 0U;
-
-  if (!result->capabilities_present)
-    return true;
-
-  // Standard PCI capabilities occupy configuration
-  // offsets 0x40 through 0xfc, on DWORD boundaries.
-  uint32_t pointer = device_config_read(bus, 0, 0, 0x34U);
-  uint8_t offset = (uint8_t)(pointer & 0xffU);
-  // Record previously visited capability offsets.
-  // This prevents circular or malformed lists
-  // from causing an indefinite traversal.
-  uint32_t visited[2] = {0};
-
-  while (offset != 0U) {
-    if (offset < 0x40U || (offset & 3U) != 0U)
-      return false;
-
-    unsigned int index = (offset - 0x40U) / 4U;
-    if (index >= 48U)
-      return false;
-
-    uint32_t bit = 1U << (index % 32U);
-    unsigned int word = index / 32U;
-
-    if (visited[word] & bit)
-      return false;
-
-    visited[word] |= bit;
-
-    uint32_t capability = device_config_read(bus, 0, 0, offset);
-    uint8_t id = (uint8_t)(capability & 0xffU);
-    uint8_t next = (uint8_t)((capability >> 8) & 0xffU);
-    uint16_t control = (uint16_t)(capability >> 16);
-
-    result->capabilities_scanned++;
-
-    switch (id) {
-      case 0x05U:
-        // MSI capability.
-        if (result->msi_present)
-          return false;
-        result->msi_present = true;
-        result->msi_offset = offset;
-        result->msi_control = control;
-        result->msi_enabled = (control & 1U) != 0U;
-        result->msi_64bit = (control & (1U << 7)) != 0U;
-        break;
-      case 0x11U:
-        // MSI-X capability.
-        if (result->msix_present)
-          return false;
-        result->msix_present = true;
-        result->msix_offset = offset;
-        result->msix_control = control;
-        result->msix_enabled = (control & (1U << 15)) != 0U;
-        result->msix_masked = (control & (1U << 14)) != 0U;
-        break;
-      default:
-        break;
-    }
-
-    offset = next;
-  }
-
-  return true;
-}
-
-bool pcie_xhci_msi_get_message(pcie_xhci_msi_message_t *message) {
-  if (!message)
-    return false;
-
-  pcie_xhci_interrupt_info_t info = {0};
-
-  if (!pcie_xhci_get_interrupt_info(&info) ||
-      !info.msi_present || !info.msi_64bit)
-    return false;
-
-  pcie_info_t pci;
-  pcie_probe(&pci);
-
-  if (!pci.link_up || !pci.endpoint_present)
-    return false;
-
-  uint8_t bus = pci.secondary_bus;
-  uint32_t offset = info.msi_offset;
-
-  message->address_lo = device_config_read(bus, 0, 0, offset + 4U);
-  message->address_hi = device_config_read(bus, 0, 0, offset + 8U);
-  message->data = (uint16_t) device_config_read(bus, 0, 0, offset + 12U);
-  message->control = info.msi_control;
-
-  return true;
-}
-
-bool pcie_xhci_msi_program(void) {
-  pcie_xhci_interrupt_info_t info = {0};
-
-  if (!pcie_xhci_get_interrupt_info(&info) ||
-      !info.msi_present || !info.msi_64bit ||
-      info.msi_enabled || info.msix_enabled)
-    return false;
-
-  // Multiple Message Enable must be zero.
-  if ((info.msi_control & (7U << 4)) != 0U)
-    return false;
-
-  pcie_msi_host_info_t host = {0};
-
-  if (!pcie_msi_host_probe(&host) || host.revision != 0x00000304U ||
-      host.target_lo != 0xfffffffdU || host.target_hi != 0x0000000fU ||
-      host.data_config != 0xffe06540U || host.interrupt_status != 0U)
-    return false;
-
-  pcie_info_t pci;
-  pcie_probe(&pci);
-
-  if (!pci.link_up || !pci.endpoint_present)
-    return false;
-
-  uint32_t offset = info.msi_offset;
-
-  // Select the VL805's extended configuration space.
-  mmio_write(PCIE_CFG_INDEX,(uint32_t)pci.secondary_bus << 20);
-
-  __asm__ volatile("dsb sy" ::: "memory");
-
-  // Program the 64-bit message address.
-  // MSI remains disabled throughout this operation.
-  mmio_write(PCIE_CFG_DATA + offset + 4U, 0xfffffffcU);
-  mmio_write(PCIE_CFG_DATA + offset + 8U, 0x0000000fU);
-
-  // The MSI message data field is only 16 bits.
-  // Do not overwrite the neighbouring configuration
-  // space by using a 32-bit write.
-  volatile uint16_t *data =
-      (volatile uint16_t *)(PCIE_CFG_DATA + offset + 12U);
-
-  *data = 0x6540U;
-
-  __asm__ volatile("dsb sy" ::: "memory");
-
-  // Verify both message fields and the unchanged
-  // disabled state of the MSI capability.
-  pcie_xhci_msi_message_t message = {0};
-
-  return pcie_xhci_msi_get_message(&message) &&
-      message.address_lo == 0xfffffffcU &&
-      message.address_hi == 0x0000000fU &&
-      message.data == 0x6540U &&
-      message.control == info.msi_control &&
-      !(message.control & 1U);
-}
-
-bool pcie_xhci_msi_set_enabled(bool enabled) {
-  pcie_xhci_interrupt_info_t info = {0};
-
-  if (!pcie_xhci_get_interrupt_info(&info) ||
-      !info.msi_present || !info.msi_64bit || info.msix_enabled)
-    return false;
-
-  if (enabled) {
-    pcie_xhci_msi_message_t message = {0};
-
-    if (info.msi_enabled || (info.msi_control & (7U << 4)) ||
-        !pcie_xhci_msi_get_message(&message) ||
-        message.address_lo != 0xfffffffcU ||
-        message.address_hi != 0x0000000fU ||
-        message.data != 0x6540U)
-      return false;
-  }
-
-  pcie_info_t pci;
-  pcie_probe(&pci);
-
-  if (!pci.link_up || !pci.endpoint_present)
-    return false;
-
-  mmio_write(PCIE_CFG_INDEX, (uint32_t)pci.secondary_bus << 20);
-  __asm__ volatile("dsb sy" ::: "memory");
-
-  // MSI control occupies the upper half of the
-  // capability's first DWORD. Preserve all other bits.
-  volatile uint16_t *control =
-      (volatile uint16_t *)(PCIE_CFG_DATA + info.msi_offset + 2U);
-
-  uint16_t value = *control;
-
-  if (enabled)
-    value |= 1U;
-  else
-    value &= (uint16_t)~1U;
-
-  *control = value;
-  __asm__ volatile("dsb sy" ::: "memory");
-
-  pcie_xhci_interrupt_info_t verify = {0};
-
-  return pcie_xhci_get_interrupt_info(&verify) &&
-      verify.msi_enabled == enabled;
-}
-
-bool pcie_msi_host_unmask_vector0(void) {
-  pcie_msi_host_info_t info = {0};
-
-  if (!pcie_msi_host_probe(&info) || info.revision != 0x00000304U ||
-      info.target_lo != 0xfffffffdU || info.target_hi != 0x0000000fU ||
-      info.data_config != 0xffe06540U || info.interrupt_status != 0U)
-    return false;
-
-  // The preparation function masked all vectors.
-  // Unmask only vector zero.
-  mmio_write(PCIE_MSI_MASK_CLR, 1U);
-  __asm__ volatile("dsb sy" ::: "memory");
-
+  *address = physical + RAM_PCI_ADDRESS;
   return true;
 }
 
 bool pcie_xhci_get_firmware_version(uint32_t *version) {
-  if (!version || !xhci_resources_ready)
+  if (!version || !resources_assigned)
     return false;
-
   pcie_info_t info;
   pcie_probe(&info);
-
-  if (!info.link_up || !info.endpoint_present ||
-      info.endpoint_vendor != 0x1106U || info.endpoint_device != 0x3483U)
+  if (!is_vl805(&info))
     return false;
-
-  *version = device_config_read( info.secondary_bus, 0, 0, 0x50U);
-
+  *version = config_read(info.secondary_bus, CFG_FIRMWARE);
   return true;
 }
 
-bool pcie_xhci_disable_bus_master(void) {
-  if (!xhci_resources_ready)
-    return false;
+// Each standard capability occupies a DWORD-aligned position in [0x40,0xfc].
+// A 64-bit visited bitmap bounds traversal without trusting endpoint pointers.
+typedef struct {
+  uint64_t visited;
+  uint8_t next;
+} capability_cursor_t;
 
-  pcie_info_t info;
-  pcie_probe(&info);
-
-  if (!info.link_up || !info.endpoint_present ||
-      info.endpoint_vendor != 0x1106U ||
-      info.endpoint_device != 0x3483U ||
-      info.endpoint_class != 0x0c0330U)
-    return false;
-
-  uint8_t bus = info.secondary_bus;
-  // Use a 16-bit write. The upper half of this
-  // DWORD is PCI Status, which contains
-  // write-one-to-clear bits.
-  mmio_write(PCIE_CFG_INDEX, (uint32_t)bus << 20);
-  __asm__ volatile("dsb sy" ::: "memory");
-
-  volatile uint16_t *command =
-      (volatile uint16_t *)(PCIE_CFG_DATA + PCI_COMMAND);
-
-  uint16_t value = *command;
-  value &= (uint16_t)~(1U << 2);
-  *command = value;
-  __asm__ volatile("dsb sy" ::: "memory");
-  uint16_t verify;
-  return pcie_xhci_get_command(&verify) && !(verify & (1U << 2));
+static int capability_read(uint8_t bus, capability_cursor_t *cursor,
+    uint8_t *position, uint32_t *header) {
+  unsigned int offset = cursor->next;
+  if (!offset)
+    return 0;
+  if (offset < 0x40U || (offset & 3U))
+    return -1;
+  uint64_t bit = 1ULL << (offset / 4);
+  if (cursor->visited & bit)
+    return -1;
+  cursor->visited |= bit;
+  *position = offset;
+  *header = config_read(bus, offset);
+  cursor->next = (uint8_t)(*header >> 8);
+  return 1;
 }
 
-bool pcie_xhci_enable_bus_master(void) {
-  if (!xhci_resources_ready)
+bool pcie_xhci_diagnose(pcie_xhci_diagnostic_t *result) {
+  uint8_t bus;
+  if (!result || !mapped_endpoint(&bus))
     return false;
-
-  pcie_info_t info;
-  pcie_probe(&info);
-
-  if (!info.link_up || !info.endpoint_present ||
-      info.endpoint_vendor != 0x1106U ||
-      info.endpoint_device != 0x3483U ||
-      info.endpoint_class != 0x0c0330U)
-    return false;
-
-  if (!pcie_xhci_bar_valid())
-    return false;
-
-  // Select the VL805's PCI configuration space.
-  mmio_write(PCIE_CFG_INDEX, (uint32_t)info.secondary_bus << 20);
-
-  __asm__ volatile("dsb sy" ::: "memory");
-
-  // PCI Command occupies the lower 16 bits.
-  // Avoid writing the upper PCI Status field,
-  // which contains write-one-to-clear flags.
-  volatile uint16_t *command =
-      (volatile uint16_t *)(PCIE_CFG_DATA + PCI_COMMAND);
-
-  uint16_t value = *command;
-
-  // Memory decoding must already be enabled.
-  if (!(value & (1U << 1)))
-    return false;
-
-  // Enable bus mastering without changing
-  // any other PCI Command bits.
-  value |= (1U << 2);
-  *command = value;
-
-  __asm__ volatile("dsb sy" ::: "memory");
-
-  uint16_t verify;
-  return pcie_xhci_get_command(&verify) &&
-      (verify & (1U << 2)) != 0 && (verify & (1U << 1)) != 0;
+  *result = (pcie_xhci_diagnostic_t){0};
+  result->class_revision = config_read(bus, CFG_CLASS);
+  result->command_status = config_read(bus, CFG_COMMAND);
+  result->header = config_read(bus, CFG_HEADER);
+  result->capabilities_present =
+      ((result->command_status >> 16) & STATUS_CAPABILITIES) != 0;
+  if (!result->capabilities_present)
+    return true;
+  result->capability_pointer = config_read(bus, CFG_CAPABILITIES);
+  capability_cursor_t cursor = {.next = result->capability_pointer & 0xfcU};
+  uint8_t offset;
+  uint32_t header;
+  int step;
+  while ((step = capability_read(bus, &cursor, &offset, &header)) > 0) {
+    if ((uint8_t)header != CAP_PM)
+      continue;
+    if (offset > 0xf8U)
+      return false;
+    result->pm_present = true;
+    result->pm_offset = offset;
+    result->pm_capabilities = (uint16_t)(header >> 16);
+    result->pm_control = config_half(bus, offset + 4);
+    return true;
+  }
+  return step == 0;
 }
 
-bool pcie_xhci_bar_valid(void) {
-  if (!xhci_resources_ready)
+bool pcie_xhci_get_interrupt_info(pcie_xhci_interrupt_info_t *info) {
+  uint8_t bus;
+  if (!info || !mapped_endpoint(&bus))
     return false;
+  *info = (pcie_xhci_interrupt_info_t){0};
+  uint32_t irq = config_read(bus, CFG_INTERRUPT);
+  info->interrupt_line = (uint8_t)irq;
+  info->interrupt_pin = (uint8_t)(irq >> 8);
+  info->capabilities_present =
+      (config_half(bus, CFG_COMMAND + 2) & STATUS_CAPABILITIES) != 0;
+  if (!info->capabilities_present)
+    return true;
+  capability_cursor_t cursor = {.next = config_read(bus, CFG_CAPABILITIES)};
+  uint8_t offset;
+  uint32_t header;
+  int step;
+  while ((step = capability_read(bus, &cursor, &offset, &header)) > 0) {
+    uint16_t control = (uint16_t)(header >> 16);
+    info->capabilities_scanned++;
+    switch ((uint8_t)header) {
+      case CAP_MSI:
+        if (info->msi_present)
+          return false;
+        info->msi_present = true;
+        info->msi_offset = offset;
+        info->msi_control = control;
+        info->msi_enabled = (control & MSI_ENABLE) != 0;
+        info->msi_64bit = (control & MSI_WIDE_ADDRESS) != 0;
+        break;
+      case CAP_MSIX:
+        if (info->msix_present)
+          return false;
+        info->msix_present = true;
+        info->msix_offset = offset;
+        info->msix_control = control;
+        info->msix_enabled = (control & 0x8000U) != 0;
+        info->msix_masked = (control & 0x4000U) != 0;
+        break;
+    }
+  }
+  return step == 0;
+}
 
-  pcie_info_t info;
-  pcie_probe(&info);
-  if (!info.link_up || !info.endpoint_present ||
-      info.endpoint_vendor != 0x1106U ||
-      info.endpoint_device != 0x3483U ||
-      info.endpoint_class != 0x0c0330U)
+// Validate the entire 64-bit MSI message before touching its data fields.
+static bool msi_endpoint(uint8_t *bus, pcie_xhci_interrupt_info_t *info) {
+  return pcie_xhci_get_interrupt_info(info) && info->msi_present &&
+      info->msi_64bit && info->msi_offset <= 0xf0U && mapped_endpoint(bus);
+}
+
+bool pcie_xhci_msi_get_message(pcie_xhci_msi_message_t *message) {
+  uint8_t bus;
+  pcie_xhci_interrupt_info_t info;
+  if (!message || !msi_endpoint(&bus, &info))
     return false;
+  unsigned int offset = info.msi_offset;
+  message->address_lo = config_read(bus, offset + 4);
+  message->address_hi = config_read(bus, offset + 8);
+  message->data = config_half(bus, offset + 12);
+  message->control = info.msi_control;
+  return true;
+}
 
-  return (info.endpoint_bar0 & ~0x0fU) ==
-             PCIE_BUS_MMIO_BASE && info.endpoint_bar1 == 0;
+bool pcie_msi_host_probe(pcie_msi_host_info_t *info) {
+  if (!info || !link_started)
+    return false;
+  *info = (pcie_msi_host_info_t){0};
+  if (!(host_read(LINK_STATE) & MODE_ROOT))
+    return false;
+  info->revision = host_read(REVISION);
+  info->target_lo = host_read(MSI_TARGET_LOW);
+  info->target_hi = host_read(MSI_TARGET_HIGH);
+  info->data_config = host_read(MSI_MATCH_DATA);
+  info->interrupt_status = host_read(MSI_PENDING);
+  return true;
+}
+
+static bool msi_receiver_ready(void) {
+  pcie_msi_host_info_t state;
+  return pcie_msi_host_probe(&state) && state.revision == MSI_REVISION &&
+      state.target_lo == ((uint32_t)MSI_ADDRESS | 1U) &&
+      state.target_hi == (MSI_ADDRESS >> 32) &&
+      state.data_config == MSI_MATCH &&
+      state.interrupt_status == 0;
+}
+
+pcie_msi_prepare_result_t pcie_msi_host_prepare(void) {
+  if (!link_started || !resources_assigned || !ram_window_configured)
+    return PCIE_MSI_PREPARE_NOT_READY;
+  if (host_read(REVISION) != MSI_REVISION)
+    return PCIE_MSI_PREPARE_UNSUPPORTED_REVISION;
+  pcie_xhci_interrupt_info_t endpoint;
+  if (!pcie_xhci_get_interrupt_info(&endpoint) || !endpoint.msi_present ||
+      endpoint.msi_enabled || endpoint.msix_enabled)
+    return PCIE_MSI_PREPARE_ENDPOINT_STATE;
+
+  // Host receiver mechanics from FreeBSD; OrgOS arms only vector zero later.
+  host_write(MSI_MASK, UINT32_MAX);
+  host_write(MSI_ACK, UINT32_MAX);
+  host_write(MSI_TARGET_HIGH, MSI_ADDRESS >> 32);
+  host_write(MSI_MATCH_DATA, MSI_MATCH);
+  host_write(MSI_TARGET_LOW, (uint32_t)MSI_ADDRESS | 1U);
+  if (msi_receiver_ready())
+    return PCIE_MSI_PREPARE_OK;
+  host_write(MSI_MASK, UINT32_MAX);
+  host_write(MSI_TARGET_LOW, (uint32_t)MSI_ADDRESS);
+  return PCIE_MSI_PREPARE_VERIFY_FAILED;
+}
+
+uint32_t pcie_msi_host_irq_quiesce(void) {
+  // The GIC route is closed by irq.c; foreground USB service later rearms it.
+  // Retain the tested mask/clear contract, without FreeBSD's extra host EOI.
+  host_write(MSI_MASK, UINT32_MAX);
+  uint32_t pending = host_read(MSI_PENDING);
+  if (pending)
+    host_write(MSI_ACK, pending);
+  pcie_barrier();
+  return pending;
+}
+
+bool pcie_msi_host_unmask_vector0(void) {
+  if (!msi_receiver_ready())
+    return false;
+  host_write(MSI_UNMASK, 1U);
+  return true;
+}
+
+bool pcie_xhci_msi_program(void) {
+  uint8_t bus;
+  pcie_xhci_interrupt_info_t endpoint;
+  if (!msi_endpoint(&bus, &endpoint) || endpoint.msi_enabled ||
+      endpoint.msix_enabled || (endpoint.msi_control & MSI_MULTIPLE_ENABLE) ||
+      !msi_receiver_ready())
+    return false;
+  unsigned int offset = endpoint.msi_offset;
+  config_write(bus, offset + 4, (uint32_t)MSI_ADDRESS);
+  config_write(bus, offset + 8, MSI_ADDRESS >> 32);
+  config_write_half(bus, offset + 12, MSI_VECTOR_DATA);
+  pcie_xhci_msi_message_t message;
+  return pcie_xhci_msi_get_message(&message) &&
+      message.address_lo == (uint32_t)MSI_ADDRESS &&
+      message.address_hi == (MSI_ADDRESS >> 32) &&
+      message.data == MSI_VECTOR_DATA &&
+      message.control == endpoint.msi_control;
+}
+
+bool pcie_xhci_msi_set_enabled(bool enabled) {
+  uint8_t bus;
+  pcie_xhci_interrupt_info_t endpoint;
+  if (!msi_endpoint(&bus, &endpoint) || endpoint.msix_enabled)
+    return false;
+  if (enabled) {
+    pcie_xhci_msi_message_t message;
+    if (endpoint.msi_enabled || (endpoint.msi_control & MSI_MULTIPLE_ENABLE) ||
+        !pcie_xhci_msi_get_message(&message) ||
+        message.address_lo != (uint32_t)MSI_ADDRESS ||
+        message.address_hi != (MSI_ADDRESS >> 32) ||
+        message.data != MSI_VECTOR_DATA)
+      return false;
+  }
+  uint16_t control = endpoint.msi_control & (uint16_t)~MSI_ENABLE;
+  if (enabled)
+    control |= MSI_ENABLE;
+  config_write_half(bus, endpoint.msi_offset + 2, control);
+  pcie_xhci_interrupt_info_t verify;
+  return pcie_xhci_get_interrupt_info(&verify) && verify.msi_enabled == enabled;
 }

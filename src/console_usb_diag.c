@@ -62,6 +62,11 @@ void cmd_usb_state(void) {
   console_puts("  DCBAAP         : 0x");
   console_puthex64(state.dcbaa);
   console_putc('\n');
+  console_puts("\nxHCI DMA capability:\n");
+  console_puts("  HCCPARAMS1     : 0x");
+  console_puthex(state.hccparams1, 8);
+  console_puts("\n  AC64           : ");
+  console_puts((state.hccparams1 & 1U) ? "Yes\n" : "No\n");
 }
 
 void cmd_usb_test_ep0match(void) {

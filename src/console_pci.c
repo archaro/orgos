@@ -95,6 +95,26 @@ static void cmd_pci_dma(void) {
   console_puts("  SCB0 size encoding : ");
   console_putu32((info.misc_ctrl >> 27) & 0x1fU);
   console_putc('\n');
+  console_puts("\n  BAR1 low    : 0x");
+  console_puthex(info.bar1_lo, 8);
+  console_puts("\n  BAR1 high   : 0x");
+  console_puthex(info.bar1_hi, 8);
+  uint32_t size_code = info.bar1_lo & 0x1fU;
+  console_printf("\n  BAR1 size encoding : %u\n", size_code);
+  if (size_code == 0U) {
+    console_puts("  BAR1 window        : Disabled\n");
+  } else if (size_code <= 21U || size_code >= 28U) {
+    unsigned int shift = size_code <= 21U ?
+        size_code + 15U : size_code - 28U + 12U;
+    uint64_t base = ((uint64_t)info.bar1_hi << 32) |
+        (info.bar1_lo & ~0x1fU);
+    console_puts("  BAR1 PCIe base     : 0x");
+    console_puthex64(base);
+    console_printf("\n  BAR1 aperture bytes: %llu\n",
+        (unsigned long long)(1ULL << shift));
+  } else {
+    console_puts("  BAR1 window        : Unknown size encoding\n");
+  }
   console_puts("\n");
   console_puts("  Note: Inbound DMA configuration is read-only here.\n");
 }

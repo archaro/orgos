@@ -34,6 +34,7 @@ typedef struct {
   uint32_t config;
   uint64_t command_ring;
   uint64_t dcbaa;
+  uint32_t hccparams1;
 } xhci_state_t;
 
 bool xhci_get_state(xhci_state_t *state);

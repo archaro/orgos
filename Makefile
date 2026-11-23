@@ -72,6 +72,9 @@ clean:
 	rm -rf $(OBJ_DIR) $(TARGET)
 
 check: | $(OBJ_DIR)
+	$(HOSTCC) $(HOSTCFLAGS) -iquote $(SRC_DIR) \
+		tests/pcie_test.c -o $(OBJ_DIR)/pcie_test
+	$(OBJ_DIR)/pcie_test
 	$(HOSTCC) $(HOSTCFLAGS) -I$(SRC_DIR) -c \
 		tests/midi_api_compile_test.c -o $(OBJ_DIR)/midi_api_compile_test.o
 	$(HOSTCC) $(HOSTCFLAGS) -I$(SRC_DIR) \

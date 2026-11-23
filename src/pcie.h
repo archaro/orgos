@@ -52,6 +52,8 @@ typedef struct {
   uint32_t bar2_hi;
   uint32_t bar3_lo;
   uint32_t endian_ctrl;
+  uint32_t bar1_lo;
+  uint32_t bar1_hi;
 } pcie_dma_info_t;
 
 bool pcie_dma_probe(pcie_dma_info_t *info);
