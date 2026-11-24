@@ -193,6 +193,7 @@ extern char __el0_text_start[];
 extern char __el0_text_end[];
 extern char __el0_stack_bottom[];
 extern char __el0_stack_top[];
+extern char __el0_stack1_bottom[], __el0_stack1_top[];
 extern char __rodata_start[];
 extern char __rodata_end[];
 extern char __data_start[];
@@ -228,6 +229,8 @@ static bool protect_kernel_pages(void) {
   uint64_t el0_text_end = (uintptr_t)__el0_text_end;
   uint64_t el0_stack_start = (uintptr_t)__el0_stack_bottom;
   uint64_t el0_stack_end = (uintptr_t)__el0_stack_top;
+  uint64_t el0_stack1_start = (uintptr_t)__el0_stack1_bottom;
+  uint64_t el0_stack1_end = (uintptr_t)__el0_stack1_top;
 
   // All section boundaries must be page-aligned.
   const uint64_t boundaries[] = {
@@ -236,7 +239,8 @@ static bool protect_kernel_pages(void) {
     data_start, data_end,
     bss_start, bss_end,
     stack_start, stack_end,
-    el0_text_start, el0_text_end, el0_stack_start, el0_stack_end
+    el0_text_start, el0_text_end, el0_stack_start, el0_stack_end,
+    el0_stack1_start, el0_stack1_end
   };
 
   for (unsigned int i = 0;
@@ -250,7 +254,7 @@ static bool protect_kernel_pages(void) {
   // our first 2 MiB page table.
   if (text_start < 0x80000ULL ||
       text_end > MMU_BLOCK_SIZE ||
-      el0_stack_end > MMU_BLOCK_SIZE)
+      el0_stack1_end > MMU_BLOCK_SIZE)
     return false;
 
   // Validate the section ordering.
@@ -266,7 +270,9 @@ static bool protect_kernel_pages(void) {
       bss_end > stack_start ||
       stack_start > stack_end ||
       stack_end > el0_stack_start ||
-      el0_stack_end - el0_stack_start != MMU_PAGE_SIZE)
+      el0_stack_end - el0_stack_start != MMU_PAGE_SIZE ||
+      el0_stack_end > el0_stack1_start ||
+      el0_stack1_end - el0_stack1_start != MMU_PAGE_SIZE)
     return false;
 
   // Populate every page in the first 2 MiB.
@@ -283,12 +289,13 @@ static bool protect_kernel_pages(void) {
       read_only = true;
     }
     uint64_t descriptor = page_descriptor(address, read_only, executable);
-    // Only these two linker-owned pages are accessible at EL0. They are
+    // Only these three linker-owned pages are accessible at EL0. They are
     // installed before enabling translation; no live PTE/TLB changes.
     if (address_in_range(address, el0_text_start, el0_text_end)) {
       descriptor = page_descriptor(address, true, false) | DESC_AP_EL0;
       descriptor &= ~DESC_UXN; // EL0 RX, EL1 RO/XN (AP=11, PXN=1).
-    } else if (address_in_range(address, el0_stack_start, el0_stack_end)) {
+    } else if (address_in_range(address, el0_stack_start, el0_stack_end) ||
+               address_in_range(address, el0_stack1_start, el0_stack1_end)) {
       descriptor |= DESC_AP_EL0; // EL0/EL1 RW, both XN (AP=01).
     }
     l3_kernel[i] = descriptor;

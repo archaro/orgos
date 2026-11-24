@@ -85,6 +85,12 @@ SECTIONS
     . += 4096;
     __el0_stack_top = .;
   } :data
+  .el0_stack1 (NOLOAD) : ALIGN(4096)
+  {
+    __el0_stack1_bottom = .;
+    . += 4096;
+    __el0_stack1_top = .;
+  } :data
   . = ALIGN(4096);
   __kernel_end = .;
 

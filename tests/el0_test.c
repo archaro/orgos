@@ -8,7 +8,9 @@
 __asm__(".global __el0_text_start\n.set __el0_text_start, 0x100000\n"
         ".global __el0_text_end\n.set __el0_text_end, 0x101000\n"
         ".global __el0_stack_bottom\n.set __el0_stack_bottom, 0x101000\n"
-        ".global __el0_stack_top\n.set __el0_stack_top, 0x102000\n");
+        ".global __el0_stack_top\n.set __el0_stack_top, 0x102000\n"
+        ".global __el0_stack1_bottom\n.set __el0_stack1_bottom, 0x102000\n"
+        ".global __el0_stack1_top\n.set __el0_stack1_top, 0x103000\n");
 #define memset test_memset
 #include "../src/el0_test.c"
 #undef memset
@@ -18,7 +20,10 @@ bool el0_context_handle_exception(exception_frame_t *frame) {
   return false;
 }
 static bool context_owns_stack;
-bool el0_context_owns_stack(void) { return context_owns_stack; }
+bool el0_context_owns_stack(unsigned int id) {
+  assert(id == 0U);
+  return context_owns_stack;
+}
 
 const char exception_test_resume[1] = {0};
 const char el0_test_check_resume[1] = {0};
@@ -90,7 +95,7 @@ bool mmu_enabled(void) { return enabled; }
 
 bool mmu_inspect(uint64_t address, mmu_descriptor_info_t *info) {
   bool code = address == 0x100000U;
-  bool stack = address == 0x101000U;
+  bool stack = address == 0x101000U || address == 0x102000U;
   *info = (mmu_descriptor_info_t){
     .physical_address = address,
     .kind = MMU_DESC_PAGE,
@@ -348,6 +353,8 @@ int main(void) {
     bad_mapping_address = 0x100000U;
     assert(!el0_test_run(&result) && !result.mappings && enters == 0U);
     bad_mapping_address = 0x101000U;
+    assert(!el0_test_run(&result) && !result.mappings && enters == 0U);
+    bad_mapping_address = 0x102000U;
     assert(!el0_test_run(&result) && !result.mappings && enters == 0U);
   }
   bad_mapping_address = 0x80000U;

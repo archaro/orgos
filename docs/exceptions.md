@@ -1,4 +1,4 @@
-# Recoverable exceptions (H2.1a and H2.1b)
+# Exception frames, diagnostics and context fault containment
 
 The kernel can return from its deliberately limited EL1 `SVC` diagnostic.
 This establishes the mechanism for preserving an interrupted context.
@@ -50,13 +50,14 @@ The existing EL1 diagnostic requires all of:
 
 The dispatcher leaves the frame unchanged. SVC already saves the address
 of the following instruction, so advancing ELR would skip an instruction.
-The active EL0 harness owns only its exact SVC and privilege-fault sites,
-with the expected vector, mode, syndrome and test stage. Any synchronous
-exception outside these two diagnostics, including another SVC site or
-immediate, a BRK, an undefined instruction or an abort, calls
-`exception_panic` with the saved entry registers. Other unsupported
-vectors retain their direct fatal path. The existing vector, exception class, ESR, ELR, FAR and SPSR
-diagnostics and masked halt remain intact.
+The legacy `el0` harness owns only its exact SVC and fault sites, with the
+expected vector, mode, syndrome, fault address and stage. An owned running
+context instead saves its frame and returns to the kernel on yield, exit
+or synchronous fault termination. A fault marks only that selected context
+FAULTED and never resumes its faulting instruction. Kernel faults, SError
+and exceptions outside the owned transition retain fatal diagnostics.
+The existing vector, class, ESR, ELR, FAR and SPSR diagnostics and masked
+halt remain intact.
 
 ## Validation
 
@@ -91,9 +92,11 @@ The cross-build and host tests cannot establish successful trap return on
 hardware. The `svc` command tests EL1 only. Use the separate `el0` procedure to
 exercise the lower-privilege boundary.
 
-H2.2 adds the [single resumable context](el0-context.md). Its SVC hook owns
-only yield/exit calls from the running fixed program. It keeps a copy of
-the EL0 frame in kernel storage between foreground returns; each live
-exception frame still has the lifetime described above. The shared return
-assembly also restores a copied context frame on explicit resume. No new
-fault-recovery cases are added.
+The [two explicit contexts](el0-two-contexts.md) keep independent copies
+of the common frame in kernel storage. The live entry frame retains its
+short lifetime; no persistent context stores a kernel continuation pointer.
+The active slot and borrowed kernel return pointer exist only during one
+explicit resume transition and are cleared before foreground execution
+continues. Shared return assembly restores a copied context on resume.
+There are no general resume-after-abort cases. The two contexts share an
+address space; separate stack storage does not imply mutual isolation.

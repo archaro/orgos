@@ -3,71 +3,97 @@
 #include "string.h"
 
 extern char __el0_stack_bottom[], __el0_stack_top[];
+extern char __el0_stack1_bottom[], __el0_stack1_top[];
 extern const char el0_context_program[], el0_context_program_end[];
 extern const char el0_context_program_resume[], el0_context_exit_resume[];
 extern const char el0_context_fault_program[], el0_context_fault_read[];
 extern volatile uint64_t el0_test_kernel_canary;
 extern uint64_t el0_context_switch(void);
 
-// The saved EL0 frame survives each foreground return. Only the currently
-// active switch may own kernel_return, a pointer into the live EL1 stack.
-static exception_frame_t saved;
+// Exactly two persistent contexts, no allocation. Neither holds a pointer
+// into an expired EL1 transition stack.
+typedef struct {
+  exception_frame_t saved;
+  uint64_t expected_daif;
+  el0_context_info_t info;
+} el0_slot_t;
+static el0_slot_t contexts[EL0_CONTEXT_COUNT];
+
+// Transient ownership for the single explicit foreground transition.
+static el0_slot_t *active;
 static exception_frame_t *kernel_return;
-static uint64_t expected_daif;
-static el0_context_info_t info;
 
-static uint64_t pattern(unsigned int reg) {
-  return 0x9abc567812340100ULL + reg;
+static uintptr_t stack_top(unsigned int id) {
+  return (uintptr_t)(id == 0U ? __el0_stack_top : __el0_stack1_top);
 }
 
-bool el0_context_owns_stack(void) {
-  return info.state == EL0_CONTEXT_READY ||
-      info.state == EL0_CONTEXT_RUNNING || info.state == EL0_CONTEXT_YIELDED ||
-      info.state == EL0_CONTEXT_FAULTED;
+static uintptr_t stack_bottom(unsigned int id) {
+  return (uintptr_t)(id == 0U ? __el0_stack_bottom : __el0_stack1_bottom);
 }
 
-static bool start_context(bool fault_test) {
-  if (el0_context_owns_stack() || el0_test_active() ||
-      !el0_test_mappings_ready())
+static uintptr_t frame_base(const el0_slot_t *ctx) {
+  return stack_top((unsigned int)(ctx - contexts)) - EL0_CONTEXT_STACK_BYTES;
+}
+
+static uint64_t pattern(const el0_slot_t *ctx, unsigned int reg) {
+  return 0x9abc567812340100ULL +
+      ((uint64_t)(ctx - contexts) << 32) + reg;
+}
+
+bool el0_context_owns_stack(unsigned int id) {
+  if (id >= EL0_CONTEXT_COUNT)
+    return false;
+  const el0_slot_t *ctx = &contexts[id];
+  return ctx->info.state == EL0_CONTEXT_READY ||
+      ctx->info.state == EL0_CONTEXT_RUNNING ||
+      ctx->info.state == EL0_CONTEXT_YIELDED ||
+      ctx->info.state == EL0_CONTEXT_FAULTED;
+}
+
+static bool start_context(unsigned int id, bool fault_test) {
+  if (id >= EL0_CONTEXT_COUNT || active || el0_context_owns_stack(id) ||
+      el0_test_active() || !el0_test_mappings_ready())
     return false;
 
-  memset(__el0_stack_bottom, 0, 4096U);
-  kernel_return = NULL;
-  expected_daif = 0;
-  saved = (exception_frame_t){0};
+  el0_slot_t *ctx = &contexts[id];
+  memset((void *)stack_bottom(id), 0, 4096U);
+  ctx->expected_daif = 0;
+  ctx->saved = (exception_frame_t){0};
   for (unsigned int i = 2; i < 31U; i++)
-    saved.x[i] = pattern(i);
-  saved.elr = (uintptr_t)(fault_test ? el0_context_fault_program :
-                         el0_context_program);
-  saved.sp = saved.sp_el0 = (uintptr_t)__el0_stack_top;
-  saved.spsr = 0xa0000000ULL; // EL0t. DAIF added on first switch.
-  info = (el0_context_info_t){
+    ctx->saved.x[i] = pattern(ctx, i);
+  ctx->saved.elr = (uintptr_t)(fault_test ? el0_context_fault_program :
+                                          el0_context_program);
+  ctx->saved.sp = ctx->saved.sp_el0 = stack_top(id);
+  ctx->saved.spsr = 0xa0000000ULL; // EL0t. DAIF added on first switch.
+  ctx->info = (el0_context_info_t){
     .state = EL0_CONTEXT_READY, .stack_ok = true, .fault_test = fault_test
   };
   return true;
 }
 
-bool el0_context_start(void) {
-  return start_context(false);
+bool el0_context_start(unsigned int id) {
+  return start_context(id, false);
 }
 
-bool el0_context_start_fault_test(void) {
-  return start_context(true);
+bool el0_context_start_fault_test(unsigned int id) {
+  return start_context(id, true);
 }
 
-bool el0_context_reset(void) {
-  if (info.state == EL0_CONTEXT_RUNNING)
+bool el0_context_reset(unsigned int id) {
+  if (id >= EL0_CONTEXT_COUNT || active)
     return false;
-  saved = (exception_frame_t){0};
-  kernel_return = NULL;
-  expected_daif = 0;
-  info = (el0_context_info_t){0};
+  contexts[id] = (el0_slot_t){0};
   return true;
 }
 
-void el0_context_get_info(el0_context_info_t *result) {
-  if (result)
-    *result = info;
+bool el0_context_get_info(unsigned int id, el0_context_info_t *result) {
+  if (!result)
+    return false;
+  *result = (el0_context_info_t){0};
+  if (id >= EL0_CONTEXT_COUNT)
+    return false;
+  *result = contexts[id].info;
+  return true;
 }
 
 static bool fault_far_valid(uint64_t esr) {
@@ -82,31 +108,37 @@ static bool fault_far_valid(uint64_t esr) {
       (esr & (1ULL << 10)) == 0;
 }
 
-bool el0_context_get_fault(el0_context_fault_t *fault) {
+bool el0_context_get_fault(unsigned int id, el0_context_fault_t *fault) {
   if (!fault)
     return false;
   *fault = (el0_context_fault_t){0};
-  if (info.state != EL0_CONTEXT_FAULTED)
+  if (id >= EL0_CONTEXT_COUNT)
     return false;
-  fault->frame = saved;
-  fault->far_valid = fault_far_valid(saved.esr);
+  const el0_slot_t *ctx = &contexts[id];
+  if (ctx->info.state != EL0_CONTEXT_FAULTED)
+    return false;
+  fault->context_id = id;
+  fault->frame = ctx->saved;
+  fault->far_valid = fault_far_valid(ctx->saved.esr);
   return true;
 }
 
-// Internal assembly callback; valid only inside el0_context_resume().
+// Internal assembly callback; active was selected by the foreground caller.
 exception_frame_t *el0_context_enter(exception_frame_t *kernel) {
-  if (info.state == EL0_CONTEXT_READY) {
-    expected_daif = kernel->spsr & 0x3c0U;
-    saved.spsr |= expected_daif;
+  el0_slot_t *ctx = active;
+  if (ctx->info.state == EL0_CONTEXT_READY) {
+    ctx->expected_daif = kernel->spsr & 0x3c0U;
+    ctx->saved.spsr |= ctx->expected_daif;
   }
   kernel_return = kernel;
-  info.state = EL0_CONTEXT_RUNNING;
-  info.resumptions++;
-  return &saved;
+  ctx->info.state = EL0_CONTEXT_RUNNING;
+  ctx->info.resumptions++;
+  return &ctx->saved;
 }
 
 bool el0_context_handle_exception(exception_frame_t *frame) {
-  if (info.state != EL0_CONTEXT_RUNNING || !kernel_return ||
+  el0_slot_t *ctx = active;
+  if (!ctx || ctx->info.state != EL0_CONTEXT_RUNNING || !kernel_return ||
       frame->vector != 8U || (frame->spsr & 0x1fU) != 0U)
     return false;
 
@@ -122,136 +154,151 @@ bool el0_context_handle_exception(exception_frame_t *frame) {
   bool service = (yield || exit) && (frame->elr & 3U) == 0 &&
       frame->elr >= (uintptr_t)el0_context_program &&
       frame->elr < (uintptr_t)el0_context_program_end;
-  saved = *frame;
+  ctx->saved = *frame;
   if (service) {
-    info.state = yield ? EL0_CONTEXT_YIELDED : EL0_CONTEXT_EXITED;
+    ctx->info.state = yield ? EL0_CONTEXT_YIELDED : EL0_CONTEXT_EXITED;
     if (yield)
-      info.yields++;
-    info.result = frame->x[0];
+      ctx->info.yields++;
+    ctx->info.result = frame->x[0];
   } else {
     // Ownership is established by RUNNING + live kernel continuation +
     // vector 8 + saved EL0t, not by the user PC, SP, or an expected site.
     // Keep the faulting PC unchanged for diagnosis; never return to it.
-    info.state = EL0_CONTEXT_FAULTED;
+    ctx->info.state = EL0_CONTEXT_FAULTED;
   }
   // The EL1 PC, mode, GPRs and original SP_EL0 come only from trusted
   // storage for this switch. Never retain that stack pointer after return.
   *frame = *kernel_return;
   kernel_return = NULL;
+  active = NULL;
   return true;
 }
 
-static uint64_t check_frame(void) {
+static uint64_t check_frame(el0_slot_t *ctx) {
   uint64_t failures = 0;
   for (unsigned int i = 0; i < 31U; i++) {
-    uint64_t expected = i == 0U ? info.resumptions * 7U :
-        i == 1U ? info.resumptions : pattern(i);
-    if (saved.x[i] != expected)
+    uint64_t expected = i == 0U ? ctx->info.resumptions * 7U :
+        i == 1U ? ctx->info.resumptions : pattern(ctx, i);
+    if (ctx->saved.x[i] != expected)
       failures |= 1ULL << i;
   }
-  uintptr_t stack = (uintptr_t)__el0_stack_top - EL0_CONTEXT_STACK_BYTES;
-  if (saved.sp != stack || saved.sp_el0 != stack)
+  uintptr_t stack = frame_base(ctx);
+  if (ctx->saved.sp != stack || ctx->saved.sp_el0 != stack)
     failures |= 1ULL << 31;
-  if ((saved.spsr & 0xf000001fULL) != 0xa0000000ULL)
+  if ((ctx->saved.spsr & 0xf000001fULL) != 0xa0000000ULL)
     failures |= 1ULL << 32;
-  if ((saved.spsr & 0x3c0U) != expected_daif)
+  if ((ctx->saved.spsr & 0x3c0U) != ctx->expected_daif)
     failures |= 1ULL << 33;
-  const char *pc = info.state == EL0_CONTEXT_YIELDED ?
+  const char *pc = ctx->info.state == EL0_CONTEXT_YIELDED ?
       el0_context_program_resume : el0_context_exit_resume;
-  if (saved.elr != (uintptr_t)pc)
+  if (ctx->saved.elr != (uintptr_t)pc)
     failures |= 1ULL << 34;
-  if (info.resumptions > EL0_CONTEXT_SLICES ||
-      (info.resumptions < EL0_CONTEXT_SLICES &&
-       info.state != EL0_CONTEXT_YIELDED) ||
-      (info.resumptions == EL0_CONTEXT_SLICES &&
-       info.state != EL0_CONTEXT_EXITED))
+  if (ctx->info.resumptions > EL0_CONTEXT_SLICES ||
+      (ctx->info.resumptions < EL0_CONTEXT_SLICES &&
+       ctx->info.state != EL0_CONTEXT_YIELDED) ||
+      (ctx->info.resumptions == EL0_CONTEXT_SLICES &&
+       ctx->info.state != EL0_CONTEXT_EXITED))
     failures |= 1ULL << 35;
   return failures;
 }
 
-static void check_fault_test(const exception_frame_t *previous) {
+static void check_fault_test(el0_slot_t *ctx,
+                            const exception_frame_t *previous) {
   // Site/syndrome checks decide only whether this deliberate test PASSED.
   // They do not grant authority to resume an instruction after an abort.
-  bool expected = info.fault_test && info.resumptions == 2U &&
-      info.yields == 1U && info.result == 7U &&
-      saved.elr == (uintptr_t)el0_context_fault_read &&
-      (saved.esr & 0xfe0007ffULL) == 0x9200000fULL &&
-      fault_far_valid(saved.esr) &&
-      saved.far == (uintptr_t)&el0_test_kernel_canary;
+  bool expected = ctx->info.fault_test && ctx->info.resumptions == 2U &&
+      ctx->info.yields == 1U && ctx->info.result == 7U &&
+      ctx->saved.elr == (uintptr_t)el0_context_fault_read &&
+      (ctx->saved.esr & 0xfe0007ffULL) == 0x9200000fULL &&
+      fault_far_valid(ctx->saved.esr) &&
+      ctx->saved.far == (uintptr_t)&el0_test_kernel_canary;
   if (!expected)
     return;
 
   uint64_t failures = 0;
   for (unsigned int i = 0; i < 31U; i++) {
     uint64_t expected_reg = i == 0U ? 7U : i == 1U ? 1U :
-        i == 3U ? (uintptr_t)&el0_test_kernel_canary : pattern(i);
-    if (saved.x[i] != expected_reg)
+        i == 3U ? (uintptr_t)&el0_test_kernel_canary : pattern(ctx, i);
+    if (ctx->saved.x[i] != expected_reg)
       failures |= 1ULL << i;
   }
-  uintptr_t base = (uintptr_t)__el0_stack_top - EL0_CONTEXT_STACK_BYTES;
-  if (saved.sp != base || saved.sp_el0 != base)
+  uintptr_t base = frame_base(ctx);
+  if (ctx->saved.sp != base || ctx->saved.sp_el0 != base)
     failures |= 1ULL << 31;
-  if ((saved.spsr & 0xf000001fULL) != 0xa0000000ULL)
+  if ((ctx->saved.spsr & 0xf000001fULL) != 0xa0000000ULL)
     failures |= 1ULL << 32;
-  if ((saved.spsr & 0x3c0U) != expected_daif)
+  if ((ctx->saved.spsr & 0x3c0U) != ctx->expected_daif)
     failures |= 1ULL << 33;
-  info.context_failures |= failures;
+  ctx->info.context_failures |= failures;
   // Read only fixed, kernel-accessible diagnostic storage after confirming
   // the known test site. Never follow pointers from an arbitrary fault.
   const volatile uint64_t *stack = (const volatile uint64_t *)base;
   for (unsigned int i = 0; i < 31U; i++) {
     if (stack[i] != previous->x[i])
-      info.context_failures |= 1ULL << i;
+      ctx->info.context_failures |= 1ULL << i;
   }
   if (stack[31] != (previous->spsr & 0xf0000000ULL))
-    info.context_failures |= 1ULL << 32;
+    ctx->info.context_failures |= 1ULL << 32;
   if (stack[32] != previous->sp_el0)
-    info.context_failures |= 1ULL << 31;
+    ctx->info.context_failures |= 1ULL << 31;
   if (stack[EL0_CONTEXT_PROGRESS_OFFSET / 8] != 7U ||
-      stack[EL0_CONTEXT_GUARD_OFFSET / 8] != pattern(2) ||
+      stack[EL0_CONTEXT_GUARD_OFFSET / 8] != pattern(ctx, 2) ||
+      stack[EL0_CONTEXT_PATTERN_OFFSET / 8] != pattern(ctx, 3) ||
       stack[EL0_CONTEXT_VARIANT_OFFSET / 8] != 1U ||
       el0_test_kernel_canary != EL0_TEST_KERNEL_CANARY)
-    info.stack_ok = false;
-  info.fault_test_passed = info.context_failures == 0 &&
-      info.kernel_failures == 0 && info.stack_ok;
+    ctx->info.stack_ok = false;
+  ctx->info.fault_test_passed = ctx->info.context_failures == 0 &&
+      ctx->info.kernel_failures == 0 && ctx->info.stack_ok;
 }
 
-bool el0_context_resume(void) {
-  if ((info.state != EL0_CONTEXT_READY && info.state != EL0_CONTEXT_YIELDED) ||
-      info.context_failures || info.kernel_failures || !info.stack_ok)
+bool el0_context_resume(unsigned int id) {
+  if (id >= EL0_CONTEXT_COUNT || active)
+    return false;
+  el0_slot_t *ctx = &contexts[id];
+  if ((ctx->info.state != EL0_CONTEXT_READY &&
+       ctx->info.state != EL0_CONTEXT_YIELDED) ||
+      ctx->info.context_failures || ctx->info.kernel_failures ||
+      !ctx->info.stack_ok)
     return false;
 
   // The previous yield is the expected state at the very first resumed
   // instruction. The EL0 payload snapshots it before touching scratch GPRs.
-  exception_frame_t previous = saved;
-  bool resuming = info.state == EL0_CONTEXT_YIELDED;
-  info.kernel_failures |= el0_context_switch();
-  if (info.state == EL0_CONTEXT_FAULTED) {
+  exception_frame_t previous = ctx->saved;
+  bool resuming = ctx->info.state == EL0_CONTEXT_YIELDED;
+  active = ctx;
+  ctx->info.kernel_failures |= el0_context_switch();
+  // The handler clears these before ERET; also bound their lifetime to
+  // this call boundary if the return probe reports a transition failure.
+  kernel_return = NULL;
+  active = NULL;
+  if (ctx->info.state == EL0_CONTEXT_FAULTED) {
     // A generic fault may precede stack initialisation or carry an invalid
     // SP. Return without reading any EL0 memory. The fixed test alone has
     // a separate verifier for its known site and established stack.
-    check_fault_test(&previous);
+    check_fault_test(ctx, &previous);
     return true;
   }
-  info.context_failures |= check_frame();
-  const volatile uint64_t *stack = (const volatile uint64_t *)
-      ((uintptr_t)__el0_stack_top - EL0_CONTEXT_STACK_BYTES);
+  ctx->info.context_failures |= check_frame(ctx);
+  const volatile uint64_t *stack =
+      (const volatile uint64_t *)frame_base(ctx);
   if (resuming) {
     for (unsigned int i = 0; i < 31U; i++) {
       if (stack[i] != previous.x[i])
-        info.context_failures |= 1ULL << i;
+        ctx->info.context_failures |= 1ULL << i;
     }
     if (stack[31] != (previous.spsr & 0xf0000000ULL))
-      info.context_failures |= 1ULL << 32;
+      ctx->info.context_failures |= 1ULL << 32;
     if (stack[32] != previous.sp_el0)
-      info.context_failures |= 1ULL << 31;
+      ctx->info.context_failures |= 1ULL << 31;
   }
-  if (stack[EL0_CONTEXT_PROGRESS_OFFSET / 8] != info.result ||
-      stack[EL0_CONTEXT_GUARD_OFFSET / 8] != pattern(2))
-    info.stack_ok = false;
-  info.passed = !info.fault_test && info.state == EL0_CONTEXT_EXITED &&
-      info.resumptions == EL0_CONTEXT_SLICES && info.yields == 5U &&
-      info.result == 42U && info.stack_ok &&
-      info.context_failures == 0U && info.kernel_failures == 0U;
+  if (stack[EL0_CONTEXT_PROGRESS_OFFSET / 8] != ctx->info.result ||
+      stack[EL0_CONTEXT_GUARD_OFFSET / 8] != pattern(ctx, 2) ||
+      stack[EL0_CONTEXT_PATTERN_OFFSET / 8] != pattern(ctx, 3))
+    ctx->info.stack_ok = false;
+  ctx->info.passed = !ctx->info.fault_test &&
+      ctx->info.state == EL0_CONTEXT_EXITED &&
+      ctx->info.resumptions == EL0_CONTEXT_SLICES && ctx->info.yields == 5U &&
+      ctx->info.result == 42U && ctx->info.stack_ok &&
+      ctx->info.context_failures == 0U && ctx->info.kernel_failures == 0U;
   return true;
 }

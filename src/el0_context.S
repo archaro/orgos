@@ -41,6 +41,7 @@ el0_context_switch:
 el0_context_program:
   sub sp, sp, #EL0_CONTEXT_STACK_BYTES
   stp x0, x2, [sp, #EL0_CONTEXT_PROGRESS_OFFSET]
+  str x3, [sp, #EL0_CONTEXT_PATTERN_OFFSET]
   str xzr, [sp, #EL0_CONTEXT_VARIANT_OFFSET]
   b el0_context_step
 
@@ -48,12 +49,10 @@ el0_context_program:
 el0_context_fault_program:
   sub sp, sp, #EL0_CONTEXT_STACK_BYTES
   stp x0, x2, [sp, #EL0_CONTEXT_PROGRESS_OFFSET]
+  str x3, [sp, #EL0_CONTEXT_PATTERN_OFFSET]
   mov x3, #1
   str x3, [sp, #EL0_CONTEXT_VARIANT_OFFSET]
-  movz x3, #0x103
-  movk x3, #0x1234, lsl #16
-  movk x3, #0x5678, lsl #32
-  movk x3, #0x9abc, lsl #48
+  ldr x3, [sp, #EL0_CONTEXT_PATTERN_OFFSET]
   b el0_context_step
 
 el0_context_step:
@@ -65,10 +64,7 @@ el0_context_step:
   b.eq el0_context_exit
   mov x3, #0xa0000000
   msr nzcv, x3
-  movz x3, #0x103
-  movk x3, #0x1234, lsl #16
-  movk x3, #0x5678, lsl #32
-  movk x3, #0x9abc, lsl #48
+  ldr x3, [sp, #EL0_CONTEXT_PATTERN_OFFSET]
   svc #EL0_CONTEXT_YIELD_SVC
 .global el0_context_program_resume
 el0_context_program_resume:
@@ -111,10 +107,7 @@ el0_context_fault_read:
 el0_context_exit:
   mov x3, #0xa0000000
   msr nzcv, x3
-  movz x3, #0x103
-  movk x3, #0x1234, lsl #16
-  movk x3, #0x5678, lsl #32
-  movk x3, #0x9abc, lsl #48
+  ldr x3, [sp, #EL0_CONTEXT_PATTERN_OFFSET]
   svc #EL0_CONTEXT_EXIT_SVC
 .global el0_context_exit_resume
 el0_context_exit_resume:

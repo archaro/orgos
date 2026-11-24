@@ -5,6 +5,7 @@
 
 extern char __el0_text_start[], __el0_text_end[];
 extern char __el0_stack_bottom[], __el0_stack_top[];
+extern char __el0_stack1_bottom[], __el0_stack1_top[];
 extern const char el0_test_check_resume[], el0_test_privileged[];
 extern const char el0_test_fault_resume[], el0_test_exit_resume[];
 extern uint64_t el0_test_enter(void);
@@ -28,7 +29,7 @@ static enum test_stage stage;
 static exception_frame_t *kernel_context;
 static el0_test_result_t report;
 
-// Verify the installed mappings before entering EL0. The two linker-owned
+// Verify the installed mappings before entering EL0. The three linker-owned
 // pages must be identity mapped, cacheable, shareable, and have exact AP/XN
 // permissions. Scan the rest of the low region for accidental EL0 access.
 bool el0_test_mappings_ready(void) {
@@ -37,7 +38,10 @@ bool el0_test_mappings_ready(void) {
 
   uintptr_t code = (uintptr_t)__el0_text_start;
   uintptr_t stack = (uintptr_t)__el0_stack_bottom;
-  if (code >= 0x200000U || stack >= 0x200000U ||
+  uintptr_t stack1 = (uintptr_t)__el0_stack1_bottom;
+  if (code >= 0x200000U || stack >= 0x200000U || stack1 >= 0x200000U ||
+      (stack1 & 4095U) || stack1 == code || stack1 == stack ||
+      (uintptr_t)__el0_stack1_top - stack1 != 4096U ||
       (code & 4095U) || (stack & 4095U) || code == stack ||
       (uintptr_t)__el0_text_end - code != 4096U ||
       (uintptr_t)__el0_stack_top - stack != 4096U)
@@ -48,7 +52,7 @@ bool el0_test_mappings_ready(void) {
     if (!mmu_inspect(address, &info) || info.kind != MMU_DESC_PAGE ||
         !info.access_flag || info.physical_address != address)
       return false;
-    if (address == code || address == stack) {
+    if (address == code || address == stack || address == stack1) {
       bool text = address == code;
       if (info.access_permissions != (text ? 3U : 1U) ||
           !info.pxn || info.uxn != !text || info.attr_index != 2U ||
@@ -212,7 +216,7 @@ bool el0_test_active(void) {
 }
 
 bool el0_test_run(el0_test_result_t *result) {
-  if (!result || stage != TEST_IDLE || el0_context_owns_stack())
+  if (!result || stage != TEST_IDLE || el0_context_owns_stack(0))
     return false;
 
   report = (el0_test_result_t){0};

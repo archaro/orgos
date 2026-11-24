@@ -25,7 +25,8 @@ application source, and modifying `main.c` appropriately.
 
 - [Recoverable exceptions and EL1 trap test](docs/exceptions.md)
 - [First EL0 program and privilege-fault test](docs/el0-testing.md)
-- [One resumable EL0 context and Pi procedure](docs/el0-context.md)
+- [Two explicit EL0 contexts, lifecycle and Pi procedure](docs/el0-two-contexts.md)
+- [Original single-context diagnostic](docs/el0-context.md)
 - [Application MIDI API and GNU17 examples](docs/midi-api.md)
 - [Implemented MIDI architecture and ownership](docs/midi-architecture.md)
 - [Host tests, receive verifier and physical test procedure](docs/midi-testing.md)

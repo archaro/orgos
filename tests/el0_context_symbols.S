@@ -5,6 +5,10 @@
 .set __el0_stack_bottom, 0x101000
 .global __el0_stack_top
 .set __el0_stack_top, 0x102000
+.global __el0_stack1_bottom
+.set __el0_stack1_bottom, 0x102000
+.global __el0_stack1_top
+.set __el0_stack1_top, 0x103000
 .global el0_context_program
 .set el0_context_program, 0x100000
 .global el0_context_fault_program
