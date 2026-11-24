@@ -11,6 +11,7 @@
 #include "uart.h"
 #include "irq.h"
 #include "exceptions.h"
+#include "el0_test.h"
 #include "mmu.h"
 
 #define CONSOLE_LINE_SIZE 256
@@ -112,6 +113,30 @@ static void cmd_svc(const char *args) {
   }
 }
 
+static void cmd_el0(const char *args) {
+  if (!console_arg_end(args)) {
+    console_puts("Usage: el0\n");
+    return;
+  }
+
+  el0_test_result_t result = {0};
+  bool passed = el0_test_run(&result);
+  console_puts("EL0 execution test: ");
+  console_puts(passed ? "PASS\n" : "FAIL\n");
+  console_printf("  Dedicated mappings : %s\n", result.mappings ? "OK" : "FAIL");
+  console_printf("  Calculation result : %llu (expected 42)\n",
+      (unsigned long long)result.result);
+  console_printf("  SVC round trip     : %s\n",
+      result.svc_roundtrip ? "OK" : "FAIL");
+  console_printf("  EL1 register fault : %s\n",
+      result.privileged_fault ? "EXPECTED" : "MISSING");
+  console_puts("  Context mismatches : 0x");
+  console_puthex64(result.failures);
+  console_puts("\n  Kernel mismatches  : 0x");
+  console_puthex64(result.kernel_failures);
+  console_putc('\n');
+}
+
 static void cmd_help(const char *args);
 
 typedef struct {
@@ -202,6 +227,7 @@ static const console_command_t commands[] = {
   { "memory", cmd_memory, "Inspect firmware mailbox and ARM memory" },
   { "irq", cmd_irq, "Display interrupt statistics" },
   { "svc", cmd_svc, "Test recoverable synchronous exception at EL1" },
+  { "el0", cmd_el0, "Test unprivileged execution and an expected fault" },
   { "fdt", cmd_fdt, "Inspect firmware Device Tree, memory and DMA" },
   { "physmem", cmd_physmem, "Display physical RAM and reservations" },
   { "cache", cmd_cache, "Display CPU cache configuration" },

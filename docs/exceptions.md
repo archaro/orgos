@@ -1,27 +1,29 @@
-# Recoverable synchronous exceptions (H2.1a)
+# Recoverable exceptions (H2.1a and H2.1b)
 
 The kernel can return from its deliberately limited EL1 `SVC` diagnostic.
-This establishes the mechanism for preserving an interrupted context. It
-introduces neither EL0 execution nor a syscall interface or protection
-boundary.
+This establishes the mechanism for preserving an interrupted context.
+H2.1b adds the [bounded EL0 diagnostic](el0-testing.md), using the same
+frame for lower-EL synchronous exceptions and IRQs. There is no general
+syscall interface or program loader.
 
 ## Saved frame and return contract
 
 `src/exceptions.h` defines `exception_frame_t` and the assembly offsets;
-C static assertions check the layout. Both current-EL SP_EL1 synchronous
-entry (vector 4) and IRQ entry (vector 5) allocate this same 304-byte frame
-on the EL1 stack, keeping SP aligned to 16 bytes.
+C static assertions check the layout. Current-EL SP_EL1 synchronous and
+IRQ entry (vectors 4 and 5), and lower-EL AArch64 synchronous and IRQ entry
+(vectors 8 and 9), allocate this same 304-byte frame on the EL1 stack,
+keeping SP aligned to 16 bytes.
 
 | Offset | Contents |
 | --- | --- |
 | 0..240 | x0..x30, eight bytes each |
-| 248 | Interrupted EL1h SP (read-only snapshot) |
+| 248 | Interrupted EL1h or EL0 SP (read-only snapshot) |
 | 256 | ELR_EL1 (return PC) |
 | 264 | SPSR_EL1 (return processor state) |
 | 272 | ESR_EL1 (entry syndrome) |
 | 280 | FAR_EL1 (not meaningful for every exception) |
 | 288 | Vector number |
-| 296 | Reserved, zero |
+| 296 | SP_EL0 (restored on return) |
 
 Entry saves every GPR before using scratch registers or calling C. The
 frame belongs to the assembly entry stub and is valid only until dispatch
@@ -30,14 +32,15 @@ accepts the same frame but does not inspect it.
 
 The common return path writes ELR_EL1 and SPSR_EL1 from the frame, restores
 x0..x30, releases the frame, and executes `ERET`. SP is restored by releasing
-the frame, rather than loading its diagnostic snapshot. Handlers must not
+the frame, rather than loading its diagnostic snapshot. SP_EL0 is saved
+and restored separately, including during EL1 IRQs. Handlers must not
 unmask exceptions. FP/SIMD state is outside this contract; reachable C code
-must retain the build's `-mgeneral-regs-only` constraint. Return to EL1t or
-EL0 is not implemented.
+must retain the build's `-mgeneral-regs-only` constraint. Return supports
+EL1h and AArch64 EL0t; EL1t is not implemented.
 
 ## Dispatch and fatal diagnostics
 
-Recovery requires all of:
+The existing EL1 diagnostic requires all of:
 
 - Vector 4 (current EL using SP_EL1).
 - An AArch64 SVC syndrome with immediate `0x21`.
@@ -47,10 +50,12 @@ Recovery requires all of:
 
 The dispatcher leaves the frame unchanged. SVC already saves the address
 of the following instruction, so advancing ELR would skip an instruction.
-Any other synchronous exception, including another SVC site or immediate,
-a BRK, an undefined instruction or an abort, calls `exception_panic` with
-the saved entry registers. Other unsupported vectors retain their direct
-fatal path. The existing vector, exception class, ESR, ELR, FAR and SPSR
+The active EL0 harness owns only its exact SVC and privilege-fault sites,
+with the expected vector, mode, syndrome and test stage. Any synchronous
+exception outside these two diagnostics, including another SVC site or
+immediate, a BRK, an undefined instruction or an abort, calls
+`exception_panic` with the saved entry registers. Other unsupported
+vectors retain their direct fatal path. The existing vector, exception class, ESR, ELR, FAR and SPSR
 diagnostics and masked halt remain intact.
 
 ## Validation
@@ -83,5 +88,5 @@ Expect a vector 4 panic reporting SVC and ESR `0x56000022`, followed by
 This confirms the live fatal path; the host test only mocks its endpoint.
 
 The cross-build and host tests cannot establish successful trap return on
-hardware. Physical execution of this procedure remains required; no EL0
-or lower-privilege boundary is tested here.
+hardware. The `svc` command tests EL1 only. Use the separate `el0` procedure to
+exercise the lower-privilege boundary.

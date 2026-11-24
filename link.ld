@@ -14,6 +14,7 @@ ENTRY(_start)
 PHDRS
 {
   text   PT_LOAD FLAGS(5);  /* Read + execute */
+  el0    PT_LOAD FLAGS(5);  /* EL0 read + execute, separate pages */
   rodata PT_LOAD FLAGS(4);  /* Read only */
   data   PT_LOAD FLAGS(6);  /* Read + write */
 }
@@ -38,6 +39,14 @@ SECTIONS
     . = ALIGN(4096);
     __text_end = .;
   } :text
+
+  .el0_text : ALIGN(4096)
+  {
+    __el0_text_start = .;
+    KEEP(*(.el0.text))
+    . = ALIGN(4096);
+    __el0_text_end = .;
+  } :el0
 
   .rodata : ALIGN(4096)
   {
@@ -70,8 +79,17 @@ SECTIONS
     . += 16384;
     __stack_top = .;
   } :data
+  .el0_stack (NOLOAD) : ALIGN(4096)
+  {
+    __el0_stack_bottom = .;
+    . += 4096;
+    __el0_stack_top = .;
+  } :data
   . = ALIGN(4096);
   __kernel_end = .;
+
+  ASSERT(__el0_text_end - __el0_text_start == 4096,
+         "EL0 diagnostic must occupy exactly one code page")
 
   /*
    * The initial kernel page table covers

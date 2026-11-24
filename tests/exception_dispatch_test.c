@@ -4,8 +4,13 @@
 #include <string.h>
 
 #include "exceptions.h"
+#include "el0_test.h"
 
 const char exception_test_resume[1] = {0};
+bool el0_test_handle_exception(exception_frame_t *frame) {
+  (void)frame;
+  return false;
+}
 static jmp_buf panic_return;
 static uint64_t panic_args[5];
 

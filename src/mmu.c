@@ -122,6 +122,7 @@ uint64_t mmu_ram_mapped_bytes(void) {
 //   EL1 read-only
 //   EL0 no access
 #define DESC_AP_RO (2ULL << 6)
+#define DESC_AP_EL0 (1ULL << 6)
 
 // A 36-bit virtual address space provides 64
 // level-1 regions, each covering 1 GiB.
@@ -188,6 +189,10 @@ extern char __kernel_start[];
 extern char __kernel_end[];
 extern char __text_start[];
 extern char __text_end[];
+extern char __el0_text_start[];
+extern char __el0_text_end[];
+extern char __el0_stack_bottom[];
+extern char __el0_stack_top[];
 extern char __rodata_start[];
 extern char __rodata_end[];
 extern char __data_start[];
@@ -219,13 +224,19 @@ static bool protect_kernel_pages(void) {
   uint64_t stack_start = (uint64_t)(uintptr_t)__stack_bottom;
   uint64_t stack_end = (uint64_t)(uintptr_t)__stack_top;
 
+  uint64_t el0_text_start = (uintptr_t)__el0_text_start;
+  uint64_t el0_text_end = (uintptr_t)__el0_text_end;
+  uint64_t el0_stack_start = (uintptr_t)__el0_stack_bottom;
+  uint64_t el0_stack_end = (uintptr_t)__el0_stack_top;
+
   // All section boundaries must be page-aligned.
   const uint64_t boundaries[] = {
     text_start, text_end,
     rodata_start, rodata_end,
     data_start, data_end,
     bss_start, bss_end,
-    stack_start, stack_end
+    stack_start, stack_end,
+    el0_text_start, el0_text_end, el0_stack_start, el0_stack_end
   };
 
   for (unsigned int i = 0;
@@ -239,19 +250,23 @@ static bool protect_kernel_pages(void) {
   // our first 2 MiB page table.
   if (text_start < 0x80000ULL ||
       text_end > MMU_BLOCK_SIZE ||
-      stack_end > MMU_BLOCK_SIZE)
+      el0_stack_end > MMU_BLOCK_SIZE)
     return false;
 
   // Validate the section ordering.
   if (text_start > text_end ||
-      text_end > rodata_start ||
+      text_end > el0_text_start ||
+      el0_text_end - el0_text_start != MMU_PAGE_SIZE ||
+      el0_text_end > rodata_start ||
       rodata_start > rodata_end ||
       rodata_end > data_start ||
       data_start > data_end ||
       data_end > bss_start ||
       bss_start > bss_end ||
       bss_end > stack_start ||
-      stack_start > stack_end)
+      stack_start > stack_end ||
+      stack_end > el0_stack_start ||
+      el0_stack_end - el0_stack_start != MMU_PAGE_SIZE)
     return false;
 
   // Populate every page in the first 2 MiB.
@@ -267,7 +282,16 @@ static bool protect_kernel_pages(void) {
     } else if (address_in_range(address, rodata_start, rodata_end)) {
       read_only = true;
     }
-    l3_kernel[i] = page_descriptor(address, read_only, executable);
+    uint64_t descriptor = page_descriptor(address, read_only, executable);
+    // Only these two linker-owned pages are accessible at EL0. They are
+    // installed before enabling translation; no live PTE/TLB changes.
+    if (address_in_range(address, el0_text_start, el0_text_end)) {
+      descriptor = page_descriptor(address, true, false) | DESC_AP_EL0;
+      descriptor &= ~DESC_UXN; // EL0 RX, EL1 RO/XN (AP=11, PXN=1).
+    } else if (address_in_range(address, el0_stack_start, el0_stack_end)) {
+      descriptor |= DESC_AP_EL0; // EL0/EL1 RW, both XN (AP=01).
+    }
+    l3_kernel[i] = descriptor;
   }
   // Replace the first 2 MiB block descriptor
   // with a level-2 table descriptor.

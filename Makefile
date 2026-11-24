@@ -72,6 +72,10 @@ clean:
 	rm -rf $(OBJ_DIR) $(TARGET)
 
 check: | $(OBJ_DIR)
+	$(HOSTCC) $(HOSTCFLAGS) -fno-pie -no-pie -iquote $(SRC_DIR) \
+		tests/el0_test.c $(SRC_DIR)/exception_dispatch.c \
+		-o $(OBJ_DIR)/el0_test
+	$(OBJ_DIR)/el0_test
 	$(HOSTCC) $(HOSTCFLAGS) -iquote $(SRC_DIR) \
 		tests/exception_dispatch_test.c $(SRC_DIR)/exception_dispatch.c \
 		-o $(OBJ_DIR)/exception_dispatch_test

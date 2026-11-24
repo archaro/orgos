@@ -1,10 +1,14 @@
 #include "exceptions.h"
+#include "el0_test.h"
 
-// The only recoverable synchronous trap in H2.1a is this exact EL1 test
-// site. In particular, an arbitrary SVC is not a kernel service ABI.
+// The EL1 diagnostic remains restricted to this exact test site.
+// An arbitrary SVC is not a kernel service ABI.
 extern const char exception_test_resume[];
 
 void exception_dispatch(exception_frame_t *frame) {
+  if (el0_test_handle_exception(frame))
+    return;
+
   if (frame->vector == 4U &&
       frame->esr == ((0x15ULL << 26) | (1ULL << 25) |
                      EXCEPTION_TEST_SVC) &&

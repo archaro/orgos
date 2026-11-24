@@ -8,6 +8,7 @@
 #define EXCEPTION_FRAME_ESR     272
 #define EXCEPTION_FRAME_FAR     280
 #define EXCEPTION_FRAME_VECTOR  288
+#define EXCEPTION_FRAME_SP_EL0  296
 #define EXCEPTION_FRAME_SIZE    304
 #define EXCEPTION_TEST_SVC      0x21
 
@@ -16,11 +17,11 @@
 #include <stdint.h>
 
 // Owned by the entry stub on the EL1 stack, valid only during dispatch.
-// sp is the interrupted EL1h SP, recorded for diagnostics (read-only).
-// x[], elr and spsr are restored by the common return path. ESR/FAR and
-// vector describe entry and are not restored. No FP/SIMD state is saved;
-// all reachable handlers must be built with -mgeneral-regs-only.
-// This frame currently supports returning to EL1h only, not EL0/EL1t.
+// sp is the interrupted SP (EL1h or EL0), a read-only entry snapshot.
+// x[], elr, spsr and sp_el0 are restored by the common return path.
+// ESR/FAR and vector describe entry and are not restored. No FP/SIMD
+// state is saved; reachable handlers must use -mgeneral-regs-only.
+// Return supports EL1h and AArch64 EL0t, not EL1t.
 typedef struct {
   uint64_t x[31];
   uint64_t sp;
@@ -29,7 +30,7 @@ typedef struct {
   uint64_t esr;
   uint64_t far;
   uint64_t vector;
-  uint64_t reserved;
+  uint64_t sp_el0;
 } exception_frame_t;
 
 #define CHECK_FRAME(field, offset) \
@@ -43,6 +44,7 @@ CHECK_FRAME(spsr, EXCEPTION_FRAME_SPSR);
 CHECK_FRAME(esr, EXCEPTION_FRAME_ESR);
 CHECK_FRAME(far, EXCEPTION_FRAME_FAR);
 CHECK_FRAME(vector, EXCEPTION_FRAME_VECTOR);
+CHECK_FRAME(sp_el0, EXCEPTION_FRAME_SP_EL0);
 #undef CHECK_FRAME
 _Static_assert(sizeof(exception_frame_t) == EXCEPTION_FRAME_SIZE,
                "exception frame size");
