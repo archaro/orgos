@@ -36,6 +36,8 @@ el0_test_enter:
   eret
 
 // The final SVC replaces its frame with the saved EL1 continuation.
+.global el0_kernel_context_return
+el0_kernel_context_return:
 el0_test_kernel_resume:
   // Snapshot the resumed kernel GPRs before using scratch registers. The
   // expected continuation is still immediately above this new frame.

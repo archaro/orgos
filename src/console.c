@@ -12,6 +12,7 @@
 #include "irq.h"
 #include "exceptions.h"
 #include "el0_test.h"
+#include "el0_context.h"
 #include "mmu.h"
 
 #define CONSOLE_LINE_SIZE 256
@@ -130,6 +131,10 @@ static void cmd_el0(const char *args) {
     return;
   }
 
+  if (el0_context_owns_stack()) {
+    console_puts("EL0 stack is owned by el0ctx; exit or reset it first.\n");
+    return;
+  }
   el0_test_result_t result = {0};
   bool passed = el0_test_run(&result);
   console_puts("EL0 execution test: ");
@@ -251,6 +256,7 @@ static const console_command_t commands[] = {
   { "irq", cmd_irq, "Display interrupt statistics" },
   { "svc", cmd_svc, "Test recoverable synchronous exception at EL1" },
   { "el0", cmd_el0, "Test unprivileged execution and an expected fault" },
+  { "el0ctx", cmd_el0ctx, "Start, resume or inspect one EL0 context" },
   { "fdt", cmd_fdt, "Inspect firmware Device Tree, memory and DMA" },
   { "physmem", cmd_physmem, "Display physical RAM and reservations" },
   { "cache", cmd_cache, "Display CPU cache configuration" },

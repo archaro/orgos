@@ -16,7 +16,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-// Owned by the entry stub on the EL1 stack, valid only during dispatch.
+// A live entry frame belongs to the EL1 stub, valid during dispatch.
+// Copies may persist in kernel-owned execution-context storage.
 // sp is the interrupted SP (EL1h or EL0), a read-only entry snapshot.
 // x[], elr, spsr and sp_el0 are restored by the common return path.
 // ESR/FAR and vector describe entry and are not restored. No FP/SIMD

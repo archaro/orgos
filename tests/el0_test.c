@@ -13,6 +13,13 @@ __asm__(".global __el0_text_start\n.set __el0_text_start, 0x100000\n"
 #include "../src/el0_test.c"
 #undef memset
 
+bool el0_context_handle_exception(exception_frame_t *frame) {
+  (void)frame;
+  return false;
+}
+static bool context_owns_stack;
+bool el0_context_owns_stack(void) { return context_owns_stack; }
+
 const char exception_test_resume[1] = {0};
 const char el0_test_check_resume[1] = {0};
 const char el0_test_privileged[1] = {0};
@@ -330,6 +337,9 @@ int main(void) {
   el0_test_result_t result;
   expect_panic(checkpoint()); // No active diagnostic.
   assert(!el0_test_run(NULL));
+  context_owns_stack = true;
+  assert(!el0_test_run(&result) && enters == 0U);
+  context_owns_stack = false;
   enabled = false;
   assert(!el0_test_run(&result) && !result.mappings && enters == 0U);
   enabled = true;

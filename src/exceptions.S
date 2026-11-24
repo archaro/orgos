@@ -74,6 +74,9 @@ lower_irq_entry:
 
 // Recoverable paths restore PC/status from their own frame, not relying
 // on system registers surviving the C handler. Do not unmask in handlers.
+// Assembly-only tail entry: SP points to a complete saved frame.
+.global exception_frame_return
+exception_frame_return:
 exception_return:
   ldr x0, [sp, #EXCEPTION_FRAME_SP_EL0]
   msr sp_el0, x0

@@ -1,4 +1,5 @@
 #include "el0_test.h"
+#include "el0_context.h"
 #include "mmu.h"
 #include "string.h"
 
@@ -30,7 +31,7 @@ static el0_test_result_t report;
 // Verify the installed mappings before entering EL0. The two linker-owned
 // pages must be identity mapped, cacheable, shareable, and have exact AP/XN
 // permissions. Scan the rest of the low region for accidental EL0 access.
-static bool mappings_ready(void) {
+bool el0_test_mappings_ready(void) {
   if (!mmu_enabled())
     return false;
 
@@ -206,12 +207,16 @@ bool el0_test_handle_exception(exception_frame_t *frame) {
   return false;
 }
 
+bool el0_test_active(void) {
+  return stage != TEST_IDLE;
+}
+
 bool el0_test_run(el0_test_result_t *result) {
-  if (!result || stage != TEST_IDLE)
+  if (!result || stage != TEST_IDLE || el0_context_owns_stack())
     return false;
 
   report = (el0_test_result_t){0};
-  report.mappings = mappings_ready();
+  report.mappings = el0_test_mappings_ready();
   if (report.mappings) {
     // This NOLOAD page is reserved with the kernel, not allocated or
     // shared with drivers. Clear it on every serial diagnostic run.

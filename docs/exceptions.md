@@ -90,3 +90,10 @@ This confirms the live fatal path; the host test only mocks its endpoint.
 The cross-build and host tests cannot establish successful trap return on
 hardware. The `svc` command tests EL1 only. Use the separate `el0` procedure to
 exercise the lower-privilege boundary.
+
+H2.2 adds the [single resumable context](el0-context.md). Its SVC hook owns
+only yield/exit calls from the running fixed program. It keeps a copy of
+the EL0 frame in kernel storage between foreground returns; each live
+exception frame still has the lifetime described above. The shared return
+assembly also restores a copied context frame on explicit resume. No new
+fault-recovery cases are added.

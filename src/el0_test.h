@@ -46,6 +46,9 @@ typedef struct {
 
 // Serial foreground diagnostic only; not a program loader or syscall ABI.
 bool el0_test_run(el0_test_result_t *result);
+// Shared stack admission checks for the two serial EL0 diagnostics.
+bool el0_test_active(void);
+bool el0_test_mappings_ready(void);
 // Internal exception-dispatch hook. False means this trap is not owned.
 bool el0_test_handle_exception(exception_frame_t *frame);
 #endif

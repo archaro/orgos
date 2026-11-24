@@ -6,6 +6,10 @@
 #include "exceptions.h"
 #include "el0_test.h"
 
+bool el0_context_handle_exception(exception_frame_t *frame) {
+  (void)frame;
+  return false;
+}
 const char exception_test_resume[1] = {0};
 bool el0_test_handle_exception(exception_frame_t *frame) {
   (void)frame;
