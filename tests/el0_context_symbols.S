@@ -7,6 +7,10 @@
 .set __el0_stack_top, 0x102000
 .global el0_context_program
 .set el0_context_program, 0x100000
+.global el0_context_fault_program
+.set el0_context_fault_program, 0x100010
+.global el0_context_fault_read
+.set el0_context_fault_read, 0x100090
 .global el0_context_program_resume
 .set el0_context_program_resume, 0x100080
 .global el0_context_exit_resume

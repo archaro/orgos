@@ -41,6 +41,19 @@ el0_context_switch:
 el0_context_program:
   sub sp, sp, #EL0_CONTEXT_STACK_BYTES
   stp x0, x2, [sp, #EL0_CONTEXT_PROGRESS_OFFSET]
+  str xzr, [sp, #EL0_CONTEXT_VARIANT_OFFSET]
+  b el0_context_step
+
+.global el0_context_fault_program
+el0_context_fault_program:
+  sub sp, sp, #EL0_CONTEXT_STACK_BYTES
+  stp x0, x2, [sp, #EL0_CONTEXT_PROGRESS_OFFSET]
+  mov x3, #1
+  str x3, [sp, #EL0_CONTEXT_VARIANT_OFFSET]
+  movz x3, #0x103
+  movk x3, #0x1234, lsl #16
+  movk x3, #0x5678, lsl #32
+  movk x3, #0x9abc, lsl #48
   b el0_context_step
 
 el0_context_step:
@@ -80,9 +93,20 @@ el0_context_program_resume:
   str x3, [sp, #248]
   mov x3, sp
   str x3, [sp, #256]
+  ldr x3, [sp, #EL0_CONTEXT_VARIANT_OFFSET]
+  cbnz x3, el0_context_fault_access
   ldr x3, [sp, #24]
-
   b el0_context_step
+
+el0_context_fault_access:
+  adrp x3, el0_test_kernel_canary
+  add x3, x3, :lo12:el0_test_kernel_canary
+.global el0_context_fault_read
+el0_context_fault_read:
+  ldr x3, [x3]
+  // If the forbidden read unexpectedly succeeds, exit without reporting
+  // a contained fault. The fault diagnostic must fail, not loop or hang.
+  b el0_context_exit
 
 el0_context_exit:
   mov x3, #0xa0000000
