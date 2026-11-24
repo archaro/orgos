@@ -7,8 +7,21 @@ extern char __el0_stack_bottom[], __el0_stack_top[];
 extern const char el0_test_check_resume[], el0_test_privileged[];
 extern const char el0_test_fault_resume[], el0_test_exit_resume[];
 extern uint64_t el0_test_enter(void);
+extern void el0_test_prepare_stack(void *stack);
+extern const char el0_test_memory_begin_resume[], el0_test_read_done_resume[];
+extern const char el0_test_write_done_resume[], el0_test_exec_resume[];
+extern const char el0_test_kernel_read[], el0_test_kernel_read_resume[];
+extern const char el0_test_code_write[], el0_test_code_write_resume[];
+// The latter symbol is supplied by assembly in the EL0 executable page.
+extern volatile uint64_t el0_test_code_canary;
+volatile uint64_t el0_test_kernel_canary = EL0_TEST_KERNEL_CANARY;
 
-enum test_stage { TEST_IDLE, TEST_ENTERED, TEST_CHECKED, TEST_FAULTED };
+enum test_stage {
+  TEST_IDLE, TEST_ENTERED, TEST_CHECKED, TEST_FAULTED,
+  TEST_READ_ARMED, TEST_READ_FAULTED,
+  TEST_WRITE_ARMED, TEST_WRITE_FAULTED,
+  TEST_EXEC_ARMED, TEST_EXEC_FAULTED
+};
 static enum test_stage stage;
 // Points to the live continuation on the EL1 stack, never into EL0 memory.
 static exception_frame_t *kernel_context;
@@ -71,6 +84,37 @@ static uint64_t context_failures(const exception_frame_t *frame) {
   return failures;
 }
 
+static bool svc_at(const exception_frame_t *frame, unsigned int immediate,
+                   const char *resume) {
+  return frame->esr == ((0x15ULL << 26) | (1ULL << 25) | immediate) &&
+      frame->elr == (uintptr_t)resume;
+}
+
+// This is a diagnostic whitelist, not a general data-abort recovery path.
+// All targets are in existing L3 pages: require permission fault level 3,
+// the lower-EL EC, AArch64 IL, WnR, valid FAR, and no EA/CM/S1PTW.
+// ISV and its optional instruction-syndrome fields are not required.
+static bool memory_fault(exception_frame_t *frame,
+    el0_test_memory_fault_t test, const char *site, const char *resume,
+    uintptr_t target, bool write, bool execute) {
+  uint64_t expected_esr = ((execute ? 0x20ULL : 0x24ULL) << 26) |
+      (1ULL << 25) | (write ? 1ULL << 6 : 0) | 0xfU;
+  if ((frame->esr & 0xfe0007ffULL) != expected_esr ||
+      frame->far != target || frame->elr != (uintptr_t)site ||
+      frame->x[10] != target ||
+      (execute && frame->x[12] != (uintptr_t)resume))
+    return false;
+
+  // The address/continuation scratch registers were checked above.
+  uint64_t scratch = (1ULL << 10) | (execute ? 1ULL << 12 : 0);
+  report.failures |= context_failures(frame) & ~scratch;
+  report.memory_faults[test] = (el0_test_fault_t){
+    .observed = true, .esr = frame->esr, .far = frame->far
+  };
+  frame->elr = (uintptr_t)resume;
+  return true;
+}
+
 bool el0_test_handle_exception(exception_frame_t *frame) {
   if (stage == TEST_IDLE || !kernel_context || frame->vector != 8U ||
       (frame->spsr & 0x1fU) != 0U)
@@ -84,6 +128,7 @@ bool el0_test_handle_exception(exception_frame_t *frame) {
   if (stage == TEST_ENTERED && frame->esr == check_esr &&
       frame->elr == (uintptr_t)el0_test_check_resume) {
     report.failures |= context_failures(frame);
+    report.stack_read = frame->x[0] == EL0_TEST_RESULT;
     stage = TEST_CHECKED;
     // Preserve all EL0 registers, flags and stack across this SVC.
     return true;
@@ -100,6 +145,48 @@ bool el0_test_handle_exception(exception_frame_t *frame) {
   }
 
   if ((stage == TEST_CHECKED || stage == TEST_FAULTED) &&
+      svc_at(frame, EL0_TEST_MEMORY_BEGIN_SVC, el0_test_memory_begin_resume)) {
+    report.failures |= context_failures(frame);
+    stage = TEST_READ_ARMED;
+    return true;
+  }
+
+  if (stage == TEST_READ_ARMED && memory_fault(frame, EL0_TEST_KERNEL_READ,
+      el0_test_kernel_read, el0_test_kernel_read_resume,
+      (uintptr_t)&el0_test_kernel_canary, false, false)) {
+    stage = TEST_READ_FAULTED;
+    return true;
+  }
+  if ((stage == TEST_READ_ARMED || stage == TEST_READ_FAULTED) &&
+      svc_at(frame, EL0_TEST_READ_DONE_SVC, el0_test_read_done_resume)) {
+    report.failures |= context_failures(frame);
+    stage = TEST_WRITE_ARMED;
+    return true;
+  }
+
+  if (stage == TEST_WRITE_ARMED && memory_fault(frame, EL0_TEST_CODE_WRITE,
+      el0_test_code_write, el0_test_code_write_resume,
+      (uintptr_t)&el0_test_code_canary, true, false)) {
+    stage = TEST_WRITE_FAULTED;
+    return true;
+  }
+  if ((stage == TEST_WRITE_ARMED || stage == TEST_WRITE_FAULTED) &&
+      svc_at(frame, EL0_TEST_WRITE_DONE_SVC, el0_test_write_done_resume)) {
+    report.failures |= context_failures(frame);
+    stage = TEST_EXEC_ARMED;
+    return true;
+  }
+
+  // For an instruction abort, ELR identifies the faulting fetch target,
+  // not the BR instruction. Only this prepared stack address is owned.
+  if (stage == TEST_EXEC_ARMED && memory_fault(frame, EL0_TEST_STACK_EXEC,
+      __el0_stack_bottom, el0_test_exec_resume,
+      (uintptr_t)__el0_stack_bottom, false, true)) {
+    stage = TEST_EXEC_FAULTED;
+    return true;
+  }
+
+  if ((stage == TEST_EXEC_ARMED || stage == TEST_EXEC_FAULTED) &&
       frame->esr == exit_esr &&
       frame->elr == (uintptr_t)el0_test_exit_resume) {
     report.failures |= context_failures(frame);
@@ -129,11 +216,21 @@ bool el0_test_run(el0_test_result_t *result) {
     // This NOLOAD page is reserved with the kernel, not allocated or
     // shared with drivers. Clear it on every serial diagnostic run.
     memset(__el0_stack_bottom, 0, 4096U);
+    el0_test_prepare_stack(__el0_stack_bottom);
     report.kernel_failures = el0_test_enter();
+    // Only dedicated diagnostic sentinels are checked: IRQ-driven kernel
+    // state is expected to change normally while the test is running.
+    report.kernel_memory_unchanged =
+        el0_test_kernel_canary == EL0_TEST_KERNEL_CANARY;
+    report.code_unchanged = el0_test_code_canary == EL0_TEST_CODE_CANARY;
   }
   *result = report;
   return report.mappings && report.completed && report.svc_roundtrip &&
       report.privileged_fault && report.failures == 0U &&
-      report.kernel_failures == 0U &&
+      report.kernel_failures == 0U && report.stack_read &&
+      report.kernel_memory_unchanged && report.code_unchanged &&
+      report.memory_faults[EL0_TEST_KERNEL_READ].observed &&
+      report.memory_faults[EL0_TEST_CODE_WRITE].observed &&
+      report.memory_faults[EL0_TEST_STACK_EXEC].observed &&
       report.result == EL0_TEST_RESULT;
 }

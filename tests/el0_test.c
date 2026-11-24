@@ -18,10 +18,21 @@ const char el0_test_check_resume[1] = {0};
 const char el0_test_privileged[1] = {0};
 const char el0_test_fault_resume[1] = {0};
 const char el0_test_exit_resume[1] = {0};
+const char el0_test_memory_begin_resume[1] = {0};
+const char el0_test_read_done_resume[1] = {0};
+const char el0_test_write_done_resume[1] = {0};
+const char el0_test_exec_resume[1] = {0};
+const char el0_test_kernel_read[1] = {0};
+const char el0_test_kernel_read_resume[1] = {0};
+const char el0_test_code_write[1] = {0};
+const char el0_test_code_write_resume[1] = {0};
+volatile uint64_t el0_test_code_canary = EL0_TEST_CODE_CANARY;
 
 static jmp_buf panic_return;
 static uint64_t panic_args[5];
-static unsigned int enters, clears;
+static unsigned int enters, clears, prepares;
+static int omit_memory = -1;
+static bool change_kernel, change_code, syndrome_valid;
 static bool enabled = true;
 static int corrupt_register = -1;
 static bool omit_fault, reject_traps;
@@ -60,6 +71,12 @@ void *test_memset(void *destination, int value, size_t length) {
   assert(value == 0);
   clears++;
   return destination;
+}
+
+void el0_test_prepare_stack(void *stack) {
+  assert((uintptr_t)stack == 0x101000U);
+  assert(prepares < clears);
+  prepares++;
 }
 
 bool mmu_enabled(void) { return enabled; }
@@ -111,6 +128,100 @@ static exception_frame_t checkpoint(void) {
   frame.esr = (0x15ULL << 26) | (1ULL << 25) | EL0_TEST_CHECK_SVC;
   frame.elr = (uintptr_t)el0_test_check_resume;
   return frame;
+}
+
+static void checkpoint_svc(unsigned int immediate, const char *resume) {
+  exception_frame_t frame = user_frame();
+  frame.esr = (0x15ULL << 26) | (1ULL << 25) | immediate;
+  frame.elr = (uintptr_t)resume;
+  exception_frame_t before = frame;
+  exception_dispatch(&frame);
+  assert(memcmp(&before, &frame, sizeof(frame)) == 0);
+}
+
+static exception_frame_t memory_frame(unsigned int test) {
+  exception_frame_t frame = user_frame();
+  bool execute = test == EL0_TEST_STACK_EXEC;
+  frame.esr = ((execute ? 0x20ULL : 0x24ULL) << 26) | (1ULL << 25) |
+      (test == EL0_TEST_CODE_WRITE ? 1ULL << 6 : 0) | 0xfU;
+  frame.far = test == EL0_TEST_KERNEL_READ ?
+      (uintptr_t)&el0_test_kernel_canary : test == EL0_TEST_CODE_WRITE ?
+      (uintptr_t)&el0_test_code_canary : (uintptr_t)__el0_stack_bottom;
+  frame.elr = test == EL0_TEST_KERNEL_READ ?
+      (uintptr_t)el0_test_kernel_read : test == EL0_TEST_CODE_WRITE ?
+      (uintptr_t)el0_test_code_write : (uintptr_t)__el0_stack_bottom;
+  frame.x[10] = frame.far;
+  if (execute)
+    frame.x[12] = (uintptr_t)el0_test_exec_resume;
+  return frame;
+}
+
+static void reject_memory_variants(exception_frame_t frame) {
+  // Change one classifier field at a time. Neither frame nor harness
+  // state may change when the production dispatcher rejects the trap.
+  const uint64_t changes[] = {
+    1ULL << 26, // Same-EL instead of lower-EL abort.
+    1ULL << 25, // Wrong instruction length.
+    1ULL << 10, // FAR not valid.
+    1ULL << 9,  // External abort.
+    1ULL << 8,  // Cache maintenance, not the diagnostic load/store.
+    1ULL << 7,  // Fault during stage-1 table walk.
+    1ULL << 6,  // Wrong access direction (or reserved bit for IAbort).
+    1ULL,      // Permission fault at the wrong translation level.
+    1ULL << 3, // Translation fault rather than permission fault.
+  };
+  for (unsigned int i = 0; i < sizeof(changes) / sizeof(changes[0]); i++) {
+    exception_frame_t bad = frame;
+    bad.esr ^= changes[i];
+    expect_panic(bad);
+  }
+  exception_frame_t bad = frame;
+  bad.far += 8;
+  expect_panic(bad);
+  bad = frame;
+  bad.elr += 4;
+  expect_panic(bad);
+  bad = frame;
+  bad.x[10] += 8;
+  expect_panic(bad);
+  bad = frame;
+  bad.vector = 4;
+  expect_panic(bad);
+  bad = frame;
+  bad.spsr |= 5;
+  expect_panic(bad);
+  if ((frame.esr >> 26) == 0x20U) {
+    bad = frame;
+    bad.x[12] += 4;
+    expect_panic(bad);
+  }
+}
+
+static void run_memory_fault(unsigned int test) {
+  exception_frame_t frame = memory_frame(test);
+  if (reject_traps) {
+    reject_memory_variants(frame);
+    // Another diagnostic's otherwise valid abort is not owned here.
+    expect_panic(memory_frame((test + 1U) % EL0_TEST_MEMORY_FAULT_COUNT));
+  }
+  if ((int)test == omit_memory)
+    return;
+  if (syndrome_valid && test != EL0_TEST_STACK_EXEC) {
+    // Optional valid instruction syndrome fields do not change DFSC/WnR.
+    frame.esr |= (1ULL << 24) | (3ULL << 22) | (11ULL << 16) |
+        (1ULL << 15);
+  }
+  exception_frame_t before = frame;
+  before.elr = test == EL0_TEST_KERNEL_READ ?
+      (uintptr_t)el0_test_kernel_read_resume : test == EL0_TEST_CODE_WRITE ?
+      (uintptr_t)el0_test_code_write_resume : (uintptr_t)el0_test_exec_resume;
+  exception_dispatch(&frame);
+  assert(memcmp(&before, &frame, sizeof(frame)) == 0);
+  assert(report.memory_faults[test].observed);
+  assert(report.memory_faults[test].esr == frame.esr);
+  assert(report.memory_faults[test].far == frame.far);
+  if (reject_traps)
+    expect_panic(memory_frame(test)); // Already consumed this fault.
 }
 
 uint64_t el0_test_enter(void) {
@@ -187,6 +298,24 @@ uint64_t el0_test_enter(void) {
     assert(memcmp(&before, &frame, sizeof(frame)) == 0);
   }
 
+  if (reject_traps) {
+    expect_panic(memory_frame(EL0_TEST_KERNEL_READ)); // Not armed yet.
+    frame = user_frame();
+    frame.esr = (0x15ULL << 26) | (1ULL << 25) | EL0_TEST_EXIT_SVC;
+    frame.elr = (uintptr_t)el0_test_exit_resume;
+    expect_panic(frame); // No skipping the memory tests.
+  }
+  checkpoint_svc(EL0_TEST_MEMORY_BEGIN_SVC, el0_test_memory_begin_resume);
+  run_memory_fault(EL0_TEST_KERNEL_READ);
+  checkpoint_svc(EL0_TEST_READ_DONE_SVC, el0_test_read_done_resume);
+  run_memory_fault(EL0_TEST_CODE_WRITE);
+  checkpoint_svc(EL0_TEST_WRITE_DONE_SVC, el0_test_write_done_resume);
+  run_memory_fault(EL0_TEST_STACK_EXEC);
+  if (change_kernel)
+    el0_test_kernel_canary ^= 1U;
+  if (change_code)
+    el0_test_code_canary = 0;
+
   frame = user_frame();
   frame.esr = (0x15ULL << 26) | (1ULL << 25) | EL0_TEST_EXIT_SVC;
   frame.elr = (uintptr_t)el0_test_exit_resume;
@@ -221,7 +350,11 @@ int main(void) {
   reject_traps = true;
   assert(el0_test_run(&result));
   assert(result.mappings && result.completed && result.svc_roundtrip);
-  assert(result.privileged_fault && result.result == 42U);
+  assert(result.privileged_fault && result.result == 42U && result.stack_read);
+  assert(result.kernel_memory_unchanged && result.code_unchanged);
+  assert(result.memory_faults[EL0_TEST_KERNEL_READ].observed);
+  assert(result.memory_faults[EL0_TEST_CODE_WRITE].observed);
+  assert(result.memory_faults[EL0_TEST_STACK_EXEC].observed);
   assert(result.failures == 0U && clears == 1U);
   expect_panic(checkpoint()); // The finished diagnostic is disarmed.
   reject_traps = false;
@@ -243,6 +376,28 @@ int main(void) {
   assert(!result.privileged_fault && result.failures == (1ULL << 34));
   omit_fault = false;
   assert(el0_test_run(&result));
+  syndrome_valid = true;
+  assert(el0_test_run(&result));
+  syndrome_valid = false;
+  for (omit_memory = 0; omit_memory < EL0_TEST_MEMORY_FAULT_COUNT;
+       omit_memory++) {
+    assert(!el0_test_run(&result));
+    assert(!result.memory_faults[omit_memory].observed);
+    assert(result.completed && result.result == 42U);
+  }
+  omit_memory = -1;
+  change_kernel = true;
+  assert(!el0_test_run(&result) && !result.kernel_memory_unchanged);
+  change_kernel = false;
+  el0_test_kernel_canary = EL0_TEST_KERNEL_CANARY;
+  change_code = true;
+  assert(!el0_test_run(&result) && !result.code_unchanged);
+  change_code = false;
+  el0_test_code_canary = EL0_TEST_CODE_CANARY;
+  assert(el0_test_run(&result));
+  // Exact memory faults remain fatal after disarming.
+  for (unsigned int i = 0; i < EL0_TEST_MEMORY_FAULT_COUNT; i++)
+    expect_panic(memory_frame(i));
   kernel_mismatch = 1ULL << 19;
   assert(!el0_test_run(&result));
   assert(result.kernel_failures == kernel_mismatch);

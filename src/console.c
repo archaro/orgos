@@ -113,6 +113,17 @@ static void cmd_svc(const char *args) {
   }
 }
 
+static void print_el0_memory_fault(const char *name,
+                                  const el0_test_fault_t *fault) {
+  console_printf("  %s: %s\n", name,
+      fault->observed ? "PERMISSION FAULT (verified)" : "MISSING");
+  console_puts("    ESR_EL1: 0x");
+  console_puthex64(fault->esr);
+  console_puts("  FAR_EL1: 0x");
+  console_puthex64(fault->far);
+  console_putc('\n');
+}
+
 static void cmd_el0(const char *args) {
   if (!console_arg_end(args)) {
     console_puts("Usage: el0\n");
@@ -130,6 +141,18 @@ static void cmd_el0(const char *args) {
       result.svc_roundtrip ? "OK" : "FAIL");
   console_printf("  EL1 register fault : %s\n",
       result.privileged_fault ? "EXPECTED" : "MISSING");
+  console_printf("  EL0 stack read     : %s\n",
+      result.stack_read ? "OK" : "FAIL");
+  print_el0_memory_fault("Kernel data read   ",
+      &result.memory_faults[EL0_TEST_KERNEL_READ]);
+  print_el0_memory_fault("EL0 code write     ",
+      &result.memory_faults[EL0_TEST_CODE_WRITE]);
+  print_el0_memory_fault("EL0 stack execute  ",
+      &result.memory_faults[EL0_TEST_STACK_EXEC]);
+  console_printf("  Kernel data intact : %s\n",
+      result.kernel_memory_unchanged ? "OK" : "FAIL");
+  console_printf("  EL0 code intact    : %s\n",
+      result.code_unchanged ? "OK" : "FAIL");
   console_puts("  Context mismatches : 0x");
   console_puthex64(result.failures);
   console_puts("\n  Kernel mismatches  : 0x");

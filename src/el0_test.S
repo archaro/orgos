@@ -96,6 +96,25 @@ el0_test_kernel_resume:
 .size el0_test_enter, . - el0_test_enter
 .ltorg
 
+// A bounded fallback if stack execution were unexpectedly permitted.
+// The page stays XN. Synchronise this one aligned instruction so a stale
+// I-cache line cannot obscure a missing execute permission fault.
+.global el0_test_prepare_stack
+.type el0_test_prepare_stack, %function
+el0_test_prepare_stack:
+  adr x1, el0_test_stack_instruction
+  ldr w1, [x1]
+  str w1, [x0]
+  dc cvau, x0
+  dsb ish
+  ic ivau, x0
+  dsb ish
+  isb
+  ret
+el0_test_stack_instruction:
+  br x12
+.size el0_test_prepare_stack, . - el0_test_prepare_stack
+
 .section ".el0.text", "ax"
 .macro SEED reg, low
   movz \reg, #\low
@@ -107,7 +126,7 @@ el0_test_kernel_resume:
 .global el0_test_entry
 .type el0_test_entry, %function
 el0_test_entry:
-  // No kernel data references, literal pools or C runtime dependencies.
+  // Fixed diagnostic addresses only; no C runtime dependencies.
   SEED x0, 256
   SEED x1, 257
   SEED x2, 258
@@ -156,8 +175,48 @@ el0_test_privileged:
   mrs x9, sctlr_el1
 .global el0_test_fault_resume
 el0_test_fault_resume:
+  svc #EL0_TEST_MEMORY_BEGIN_SVC
+.global el0_test_memory_begin_resume
+el0_test_memory_begin_resume:
+  adrp x10, el0_test_kernel_canary
+  add x10, x10, :lo12:el0_test_kernel_canary
+.global el0_test_kernel_read
+el0_test_kernel_read:
+  ldr x11, [x10]
+.global el0_test_kernel_read_resume
+el0_test_kernel_read_resume:
+  SEED x10, 266
+  SEED x11, 267
+  svc #EL0_TEST_READ_DONE_SVC
+.global el0_test_read_done_resume
+el0_test_read_done_resume:
+  adr x10, el0_test_code_canary
+.global el0_test_code_write
+el0_test_code_write:
+  str xzr, [x10]
+.global el0_test_code_write_resume
+el0_test_code_write_resume:
+  SEED x10, 266
+  svc #EL0_TEST_WRITE_DONE_SVC
+.global el0_test_write_done_resume
+el0_test_write_done_resume:
+  adrp x10, __el0_stack_bottom
+  add x10, x10, :lo12:__el0_stack_bottom
+  adr x12, el0_test_exec_resume
+  br x10
+.global el0_test_exec_resume
+el0_test_exec_resume:
+  SEED x10, 266
+  SEED x12, 268
   svc #EL0_TEST_EXIT_SVC
 .global el0_test_exit_resume
 el0_test_exit_resume:
   brk #0 // A successful exit never returns here at EL0.
 .size el0_test_entry, . - el0_test_entry
+
+// An inert aligned write target in the executable page. If protection is
+// broken, the attempted zero store cannot overwrite running instructions.
+.balign 8
+.global el0_test_code_canary
+el0_test_code_canary:
+  .quad EL0_TEST_CODE_CANARY
