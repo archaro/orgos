@@ -10,6 +10,7 @@
 #include "timer.h"
 #include "uart.h"
 #include "irq.h"
+#include "exceptions.h"
 #include "mmu.h"
 
 #define CONSOLE_LINE_SIZE 256
@@ -92,6 +93,23 @@ static void cmd_irq(const char *args) {
   console_puts("UART RX overruns : ");
   console_putu32(uart_rx_overruns());
   console_putc('\n');
+}
+
+// Deliberately narrow EL1 trap test; no EL0 or syscall interface.
+static void cmd_svc(const char *args) {
+  if (!console_arg_end(args)) {
+    console_puts("Usage: svc\n");
+    return;
+  }
+
+  uint64_t failures = exception_test();
+  if (failures == 0U) {
+    console_puts("EL1 SVC context test: PASS (x0-x30, SP, NZCV, DAIF)\n");
+  } else {
+    console_puts("EL1 SVC context test: FAIL, mismatch mask 0x");
+    console_puthex64(failures);
+    console_putc('\n');
+  }
 }
 
 static void cmd_help(const char *args);
@@ -183,6 +201,7 @@ static const console_command_t commands[] = {
   { "help",   cmd_help,   "List available commands" },
   { "memory", cmd_memory, "Inspect firmware mailbox and ARM memory" },
   { "irq", cmd_irq, "Display interrupt statistics" },
+  { "svc", cmd_svc, "Test recoverable synchronous exception at EL1" },
   { "fdt", cmd_fdt, "Inspect firmware Device Tree, memory and DMA" },
   { "physmem", cmd_physmem, "Display physical RAM and reservations" },
   { "cache", cmd_cache, "Display CPU cache configuration" },

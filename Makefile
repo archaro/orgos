@@ -73,6 +73,10 @@ clean:
 
 check: | $(OBJ_DIR)
 	$(HOSTCC) $(HOSTCFLAGS) -iquote $(SRC_DIR) \
+		tests/exception_dispatch_test.c $(SRC_DIR)/exception_dispatch.c \
+		-o $(OBJ_DIR)/exception_dispatch_test
+	$(OBJ_DIR)/exception_dispatch_test
+	$(HOSTCC) $(HOSTCFLAGS) -iquote $(SRC_DIR) \
 		tests/dma_test.c -o $(OBJ_DIR)/dma_test
 	$(OBJ_DIR)/dma_test
 	$(HOSTCC) $(HOSTCFLAGS) -iquote $(SRC_DIR) \

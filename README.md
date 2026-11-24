@@ -23,6 +23,7 @@ A largely complete MIDI API is found in `src/midi.h`. Building a MIDI applicatio
 into the kernel should just be a matter of including that file in the new
 application source, and modifying `main.c` appropriately.
 
+- [Recoverable EL1 exceptions and trap test](docs/exceptions.md)
 - [Application MIDI API and GNU17 examples](docs/midi-api.md)
 - [Implemented MIDI architecture and ownership](docs/midi-architecture.md)
 - [Host tests, receive verifier and physical test procedure](docs/midi-testing.md)

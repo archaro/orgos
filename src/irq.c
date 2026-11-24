@@ -34,7 +34,8 @@ uint32_t irq_pcie_msi_count(void) {
   return pcie_msi_irqs;
 }
 
-void irq_dispatch(void) {
+void irq_dispatch(exception_frame_t *frame) {
+  (void)frame;
   // Read GICC_IAR to acknowledge the highest-priority
   // pending interrupt.
   // Bits [9:0] contain the interrupt identifier.
