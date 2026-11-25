@@ -35,6 +35,9 @@ static void show_fault(unsigned int id, const el0_context_info_t *info) {
     fault_register("FAR_EL1            ", fault.frame.far);
   else
     console_puts("  FAR_EL1            : unavailable for this exception\n");
+  if (info->cross_stack_test)
+    console_printf("EL0 cross-stack protection test: %s\n",
+        info->fault_test_passed ? "PASS" : "FAIL");
   if (info->fault_test)
     console_printf("EL0 fault containment test: %s\n",
         info->fault_test_passed ? "PASS" : "FAIL");
@@ -47,6 +50,14 @@ static void show_context(unsigned int id) {
   console_printf("EL0 context %u: %s\n", id, state_name(info.state));
   if (info.state == EL0_CONTEXT_EMPTY)
     return;
+  fault_register("Address-space root ", info.address_space_root);
+  if (info.resumptions) {
+    fault_register("Entry TTBR0        ", info.entered_root);
+    fault_register("Trap TTBR0         ", info.trapped_root);
+    fault_register("Kernel TTBR0       ", info.restored_root);
+    console_printf("  Address switching  : %s\n",
+        info.address_space_ok ? "OK" : "FAIL");
+  }
   console_printf("  Resumptions        : %llu\n",
       (unsigned long long)info.resumptions);
   console_printf("  Yields             : %llu\n",
@@ -104,16 +115,18 @@ void cmd_el0ctx(const char *args) {
   }
   if (console_arg_word(&args, "start")) {
     unsigned int id = 0;
-    bool fault = console_arg_word(&args, "fault"); // Legacy: start fault.
-    if (!fault && !console_arg_end(args)) {
+    bool cross = console_arg_word(&args, "cross");
+    bool fault = !cross && console_arg_word(&args, "fault");
+    if (!fault && !cross && !console_arg_end(args)) {
       if (!parse_id(&args, &id))
         return;
-      fault = console_arg_word(&args, "fault");
+      cross = console_arg_word(&args, "cross");
+      fault = !cross && console_arg_word(&args, "fault");
     }
     if (!console_arg_end(args))
       goto usage;
-    bool started = fault ? el0_context_start_fault_test(id) :
-        el0_context_start(id);
+    bool started = cross ? el0_context_start_stack_fault_test(id) :
+        fault ? el0_context_start_fault_test(id) : el0_context_start(id);
     if (!started) {
       console_puts("Cannot start EL0 context: "
           "stack busy or mappings invalid.\n");
@@ -146,6 +159,6 @@ void cmd_el0ctx(const char *args) {
     return;
   }
 usage:
-  console_puts("Usage: el0ctx [start [0|1] [fault] | "
+  console_puts("Usage: el0ctx [start [0|1] [fault|cross] | "
       "resume [0|1] | status [0|1] | reset [0|1]]\n");
 }

@@ -194,6 +194,8 @@ bool el0_test_handle_exception(exception_frame_t *frame) {
   if ((stage == TEST_EXEC_ARMED || stage == TEST_EXEC_FAULTED) &&
       frame->esr == exit_esr &&
       frame->elr == (uintptr_t)el0_test_exit_resume) {
+    if (!mmu_restore_kernel_space())
+      return false;
     report.failures |= context_failures(frame);
     if (!report.privileged_fault)
       report.failures |= 1ULL << 34;
@@ -221,12 +223,17 @@ bool el0_test_run(el0_test_result_t *result) {
 
   report = (el0_test_result_t){0};
   report.mappings = el0_test_mappings_ready();
+  if (report.mappings &&
+      !mmu_activate_address_space(mmu_context_address_space(0)))
+    report.mappings = false;
   if (report.mappings) {
     // This NOLOAD page is reserved with the kernel, not allocated or
     // shared with drivers. Clear it on every serial diagnostic run.
     memset(__el0_stack_bottom, 0, 4096U);
     el0_test_prepare_stack(__el0_stack_bottom);
     report.kernel_failures = el0_test_enter();
+    if (!mmu_restore_kernel_space())
+      exception_panic(4, 0, (uintptr_t)el0_test_run, 0, 5);
     // Only dedicated diagnostic sentinels are checked: IRQ-driven kernel
     // state is expected to change normally while the test is running.
     report.kernel_memory_unchanged =

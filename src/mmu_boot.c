@@ -81,7 +81,7 @@ static mmu_mapping_attrs_t ram_attrs(void) {
 }
 
 static mmu_mapping_attrs_t low_page_attrs(vaddr_t address,
-    const mmu_boot_layout_t *layout) {
+    const mmu_boot_layout_t *layout, int owner) {
   mmu_mapping_attrs_t attrs = ram_attrs();
   if (in_range(address, layout->text)) {
     attrs.ap = 2;
@@ -93,15 +93,16 @@ static mmu_mapping_attrs_t low_page_attrs(vaddr_t address,
     attrs.uxn = false;
   } else if (in_range(address, layout->el0_stack[0]) ||
              in_range(address, layout->el0_stack[1])) {
-    attrs.ap = 1;
+    if (owner < 0 || in_range(address, layout->el0_stack[owner]))
+      attrs.ap = 1;
   }
   return attrs;
 }
 
-bool mmu_boot_build(mmu_address_space_t *space,
+static bool build(mmu_address_space_t *space,
     const mmu_table_ref_t tables[MMU_BOOT_TABLE_COUNT],
     const physmem_map_t *memory, const mmu_boot_layout_t *layout,
-    uint64_t *mapped_ram_bytes) {
+    uint64_t *mapped_ram_bytes, int owner) {
   uint64_t total;
   if (!space || !tables || !mapped_ram_bytes || !layout_valid(layout) ||
       !memory_valid(memory, &total) ||
@@ -141,7 +142,7 @@ bool mmu_boot_build(mmu_address_space_t *space,
   for (vaddr_t address = 0; address < MMU_BLOCK_SIZE;
        address += MMU_PAGE_SIZE) {
     if (!mmu_space_map(space, address, address, MMU_PAGE_SIZE, MMU_DESC_PAGE,
-                       low_page_attrs(address, layout)))
+                       low_page_attrs(address, layout, owner)))
       return false;
   }
   mmu_mapping_attrs_t device = normal;
@@ -154,5 +155,87 @@ bool mmu_boot_build(mmu_address_space_t *space,
                      MMU_DESC_BLOCK, device) || !mmu_space_seal(space))
     return false;
   *mapped_ram_bytes = total;
+  return true;
+}
+
+bool mmu_boot_build(mmu_address_space_t *space,
+    const mmu_table_ref_t tables[MMU_BOOT_TABLE_COUNT],
+    const physmem_map_t *memory, const mmu_boot_layout_t *layout,
+    uint64_t *mapped_ram_bytes) {
+  return build(space, tables, memory, layout, mapped_ram_bytes, -1);
+}
+
+bool mmu_context_build(mmu_address_space_t *space,
+    const mmu_table_ref_t tables[MMU_BOOT_TABLE_COUNT],
+    const physmem_map_t *memory, const mmu_boot_layout_t *layout,
+    unsigned int owner) {
+  uint64_t mapped;
+  return owner < 2U &&
+      build(space, tables, memory, layout, &mapped, (int)owner);
+}
+
+static bool configuration_valid(const mmu_address_space_t *space) {
+  return space && space->tables &&
+      space->table_count == MMU_BOOT_TABLE_COUNT &&
+      (space->state == MMU_SPACE_SEALED || space->state == MMU_SPACE_ACTIVE) &&
+      space->geometry.va_bits == 36U && space->geometry.pa_bits == 36U &&
+      space->geometry.granule_shift == 12U &&
+      space->geometry.start_level == 1U &&
+      space->mair == MMU_MAIR_DEVICE_NC_WB && space->tcr == MMU_TCR_4K_36BIT &&
+      space->root_physical == space->tables[0].physical;
+}
+
+// The reference is the immutable, successfully constructed boot hierarchy.
+// Compare every entry, allowing only the peer stack's EL0 AP bit to differ.
+// This covers the whole image (PC, vectors, EL1 stack, data and tables),
+// physical RAM and Device windows, not just the next instruction address.
+bool mmu_boot_compatible(const mmu_address_space_t *kernel,
+    const mmu_address_space_t *space, const mmu_boot_layout_t *layout,
+    int owner) {
+  if (!configuration_valid(kernel) || !configuration_valid(space) ||
+      !layout_valid(layout) || owner < -1 || owner > 1)
+    return false;
+  for (unsigned int t = 0; t < MMU_BOOT_TABLE_COUNT; t++) {
+    unsigned int level = t == 0U ? 1U : t == 10U ? 3U : 2U;
+    const mmu_table_ref_t *ref = &space->tables[t];
+    const mmu_table_ref_t *base = &kernel->tables[t];
+    uint64_t descriptor;
+    if (!ref->entries || !base->entries || ref->level != level ||
+        base->level != level || ((uintptr_t)ref->entries & 4095U) ||
+        ((uintptr_t)base->entries & 4095U) ||
+        !mmu_table_descriptor(ref->physical, &descriptor) ||
+        !mmu_table_descriptor(base->physical, &descriptor) ||
+        ref->physical < layout->bss.start ||
+        ref->physical + MMU_PAGE_SIZE > layout->bss.end ||
+        base->physical < layout->bss.start ||
+        base->physical + MMU_PAGE_SIZE > layout->bss.end)
+      return false;
+    for (unsigned int i = 0; i < MMU_TABLE_ENTRIES; i++) {
+      uint64_t expected = base->entries[i];
+      if (t == 0U) {
+        unsigned int child = i < 8U ? i + 1U : i == 24U ? 9U : 0U;
+        uint64_t original = child ? kernel->tables[child].physical | 3U : 0;
+        if (expected != original)
+          return false;
+        expected = child ? space->tables[child].physical | 3U : 0;
+      } else if (t == 1U && i == 0U) {
+        if (expected != (kernel->tables[10].physical | 3U))
+          return false;
+        expected = space->tables[10].physical | 3U;
+      } else if (t == 10U) {
+        vaddr_t va = (vaddr_t)i * MMU_PAGE_SIZE;
+        uint64_t original;
+        if (!mmu_leaf_descriptor(va, MMU_DESC_PAGE,
+                                  low_page_attrs(va, layout, -1), &original) ||
+            expected != original ||
+            !mmu_leaf_descriptor(va, MMU_DESC_PAGE,
+                                  low_page_attrs(va, layout, owner),
+                                  &expected))
+          return false;
+      }
+      if (ref->entries[i] != expected)
+        return false;
+    }
+  }
   return true;
 }

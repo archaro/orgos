@@ -3,6 +3,7 @@
 
 #include "mmu.h"
 #include "mmu_boot.h"
+#include "mmu_activation.h"
 #include "cache.h"
 
 // Read the AArch64 memory-model feature register.
@@ -94,6 +95,12 @@ static uint64_t l2_pcie[MMU_TABLE_ENTRIES] __attribute__((aligned(4096)));
 static uint64_t l3_kernel[MMU_TABLE_ENTRIES] __attribute__((aligned(4096)));
 static mmu_table_ref_t boot_tables[MMU_BOOT_TABLE_COUNT];
 static mmu_address_space_t kernel_space;
+static uint64_t context_pages[2][MMU_BOOT_TABLE_COUNT][MMU_TABLE_ENTRIES]
+    __attribute__((aligned(4096)));
+static mmu_table_ref_t context_tables[2][MMU_BOOT_TABLE_COUNT];
+static mmu_address_space_t context_spaces[2];
+static mmu_activation_t environments;
+static mmu_boot_layout_t kernel_layout;
 
 extern void mmu_enable_el1(paddr_t root, uint64_t mair, uint64_t tcr);
 extern char __kernel_start[];
@@ -126,7 +133,7 @@ static bool build_initial_tables(const physmem_map_t *memory) {
     };
   boot_tables[9] = (mmu_table_ref_t){l2_pcie, (uintptr_t)l2_pcie, 2};
   boot_tables[10] = (mmu_table_ref_t){l3_kernel, (uintptr_t)l3_kernel, 3};
-  mmu_boot_layout_t layout = {
+  kernel_layout = (mmu_boot_layout_t){
     .kernel = linker_range(__kernel_start, __kernel_end),
     .text = linker_range(__text_start, __text_end),
     .el0_text = linker_range(__el0_text_start, __el0_text_end),
@@ -139,8 +146,21 @@ static bool build_initial_tables(const physmem_map_t *memory) {
       linker_range(__el0_stack1_bottom, __el0_stack1_top)
     }
   };
-  return mmu_boot_build(&kernel_space, boot_tables, memory, &layout,
-                        &mapped_ram_bytes);
+  if (!mmu_boot_build(&kernel_space, boot_tables, memory, &kernel_layout,
+                       &mapped_ram_bytes))
+    return false;
+  for (unsigned int id = 0; id < 2U; id++) {
+    for (unsigned int t = 0; t < MMU_BOOT_TABLE_COUNT; t++) {
+      uint64_t *entries = context_pages[id][t];
+      context_tables[id][t] = (mmu_table_ref_t){
+        entries, (uintptr_t)entries, t == 0U ? 1U : t == 10U ? 3U : 2U
+      };
+    }
+    if (!mmu_context_build(&context_spaces[id], context_tables[id], memory,
+                            &kernel_layout, id))
+      return false;
+  }
+  return true;
 }
 
 // Ask the AArch64 MMU to translate a virtual
@@ -216,7 +236,8 @@ bool mmu_translate_write(uint64_t address, mmu_translation_t *result) {
 // Compatible active-regime diagnostic. The underlying walker accepts an
 // explicit space and resolves table PAs through its registered CPU pointers.
 bool mmu_inspect(uint64_t address, mmu_descriptor_info_t *info) {
-  return mmu_enabled() && mmu_space_inspect(&kernel_space, address, info);
+  return mmu_enabled() && environments.active &&
+      mmu_space_inspect(environments.active, address, info);
 }
 
 bool mmu_init(const physmem_map_t *memory) {
@@ -271,5 +292,65 @@ bool mmu_init(const physmem_map_t *memory) {
   if (!mmu_enabled())
     return false;
   kernel_space.state = MMU_SPACE_ACTIVE;
-  return true;
+  return mmu_activation_init(&environments, &kernel_space, &context_spaces[0],
+                              &context_spaces[1], &kernel_layout);
+}
+
+uint64_t mmu_activation_lock(void) {
+  uint64_t daif;
+  __asm__ volatile("mrs %0, daif\nmsr daifset, #0xf"
+                   : "=r"(daif) : : "memory");
+  return daif;
+}
+
+void mmu_activation_unlock(uint64_t daif) {
+  __asm__ volatile("msr daif, %0" : : "r"(daif) : "memory");
+}
+
+paddr_t mmu_current_root(void) {
+  uint64_t ttbr;
+  __asm__ volatile("mrs %0, ttbr0_el1" : "=r"(ttbr));
+  return ttbr; // ASID and CnP must both remain zero in this experiment.
+}
+
+bool mmu_activation_hw_matches(paddr_t root) {
+  mmu_info_t info;
+  mmu_get_info(&info);
+  const uint64_t required = 1ULL | 4ULL | (1ULL << 12) | (1ULL << 19);
+  uint64_t sp, pc, vectors;
+  __asm__ volatile("mov %0, sp\nadr %1, .\nmrs %2, vbar_el1"
+                   : "=r"(sp), "=r"(pc), "=r"(vectors));
+  // This experiment admits only the linked kernel's EL1 stack and code.
+  // Compatibility validation covers every page of this image, including
+  // all static data/tables; check the actual execution anchors as well.
+  return info.ttbr0 == root && info.mair == MMU_MAIR_DEVICE_NC_WB &&
+      info.tcr == MMU_TCR_4K_36BIT && (info.sctlr & required) == required &&
+      sp >= (uintptr_t)__stack_bottom && sp <= (uintptr_t)__stack_top &&
+      !(sp & 15U) && pc >= (uintptr_t)__text_start &&
+      pc < (uintptr_t)__text_end && !(vectors & 2047U) &&
+      vectors >= (uintptr_t)__text_start &&
+      vectors <= (uintptr_t)__text_end - 2048U;
+}
+
+const mmu_address_space_t *mmu_kernel_address_space(void) {
+  return environments.active ? &kernel_space : NULL;
+}
+
+const mmu_address_space_t *mmu_context_address_space(unsigned int id) {
+  return environments.active && id < 2U ? &context_spaces[id] : NULL;
+}
+
+bool mmu_activate_address_space(const mmu_address_space_t *space) {
+  // Reject unregistered objects before dereferencing them.
+  for (unsigned int i = 0; i < MMU_ENVIRONMENT_COUNT; i++) {
+    if (space && space == environments.spaces[i])
+      return mmu_activation_select(&environments, environments.spaces[i]);
+  }
+  return false;
+}
+
+bool mmu_restore_kernel_space(void) {
+  if (environments.active == &kernel_space)
+    return mmu_activation_hw_matches(kernel_space.root_physical);
+  return mmu_activate_address_space(&kernel_space);
 }

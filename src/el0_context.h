@@ -38,6 +38,12 @@ typedef struct {
   bool passed;
   bool fault_test;
   bool fault_test_passed;
+  bool cross_stack_test;
+  bool address_space_ok;
+  uint64_t address_space_root;
+  uint64_t entered_root;  // Actual TTBR0 read at the assembly entry callback.
+  uint64_t trapped_root; // Actual TTBR0 on the owned synchronous exception.
+  uint64_t restored_root; // Actual TTBR0 read before the trusted EL1 return.
 } el0_context_info_t;
 
 typedef struct {
@@ -52,10 +58,11 @@ typedef struct {
 // and its retained fault record; the peer and its stack remain unchanged.
 // FAULTED requires reset before starting again. No allocation occurs.
 // Invalid IDs are rejected. No mutation is allowed during another switch.
-// Both stacks are EL0-accessible in the same address space: no mutual
-// memory isolation is claimed. State and ownership are independent.
+// Each context selects its own sealed TTBR0 hierarchy. Only its own stack
+// is writable at EL0; diagnostic code is shared RO. EL1 mappings are shared.
 bool el0_context_start(unsigned int id);
 bool el0_context_start_fault_test(unsigned int id);
+bool el0_context_start_stack_fault_test(unsigned int id);
 bool el0_context_resume(unsigned int id);
 bool el0_context_reset(unsigned int id);
 bool el0_context_get_info(unsigned int id, el0_context_info_t *info);

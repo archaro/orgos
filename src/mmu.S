@@ -103,3 +103,24 @@ mmu_enable_el1:
 
 .size mmu_enable_el1, . - mmu_enable_el1
 
+
+// Private live-root replacement for the admitted, compatible hierarchies.
+// Preconditions: EL1h, DAIF masked by activation controller, MMU enabled;
+// identical EL1 physical outputs/cacheability/execution in old/new roots.
+// All tables are complete and immutable. No MAIR/TCR/SCTLR change.
+// Arm 101811, TLBs and Changing translations:
+// https://developer.arm.com/documentation/101811/latest
+// Publish table stores, synchronise the root before invalidation, then
+// complete local EL1/EL0 invalidation (including global translations).
+// Only core 0 runs; no ASIDs, broadcast or I-cache maintenance is needed.
+.global mmu_replace_ttbr0
+.type mmu_replace_ttbr0, %function
+mmu_replace_ttbr0:
+  dsb sy
+  msr ttbr0_el1, x0
+  isb
+  tlbi vmalle1
+  dsb sy
+  isb
+  ret
+.size mmu_replace_ttbr0, . - mmu_replace_ttbr0

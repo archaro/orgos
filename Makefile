@@ -73,6 +73,11 @@ clean:
 
 check: | $(OBJ_DIR)
 	$(HOSTCC) $(HOSTCFLAGS) -iquote $(SRC_DIR) \
+		tests/mmu_activation_test.c $(SRC_DIR)/mmu_activation.c \
+		$(SRC_DIR)/mmu_tables.c $(SRC_DIR)/mmu_boot.c \
+		-o $(OBJ_DIR)/mmu_activation_test
+	$(OBJ_DIR)/mmu_activation_test
+	$(HOSTCC) $(HOSTCFLAGS) -iquote $(SRC_DIR) \
 		tests/mmu_tables_test.c $(SRC_DIR)/mmu_tables.c $(SRC_DIR)/mmu_boot.c \
 		-o $(OBJ_DIR)/mmu_tables_test
 	$(OBJ_DIR)/mmu_tables_test

@@ -13,6 +13,10 @@
 .set el0_context_program, 0x100000
 .global el0_context_fault_program
 .set el0_context_fault_program, 0x100010
+.global el0_context_stack_fault_program
+.set el0_context_stack_fault_program, 0x100020
+.global el0_context_stack_read
+.set el0_context_stack_read, 0x100098
 .global el0_context_fault_read
 .set el0_context_fault_read, 0x100090
 .global el0_context_program_resume

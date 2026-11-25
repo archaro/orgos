@@ -91,6 +91,24 @@ void el0_test_prepare_stack(void *stack) {
   prepares++;
 }
 
+static mmu_address_space_t private_space = {.root_physical = 0x180000};
+static bool private_active, activation_failed;
+const mmu_address_space_t *mmu_context_address_space(unsigned int id) {
+  assert(id == 0U);
+  return &private_space;
+}
+bool mmu_activate_address_space(const mmu_address_space_t *space) {
+  assert(space == &private_space && !private_active);
+  if (activation_failed)
+    return false;
+  private_active = true;
+  return true;
+}
+bool mmu_restore_kernel_space(void) {
+  private_active = false;
+  return true;
+}
+
 bool mmu_enabled(void) { return enabled; }
 
 bool mmu_inspect(uint64_t address, mmu_descriptor_info_t *info) {
@@ -237,6 +255,7 @@ static void run_memory_fault(unsigned int test) {
 }
 
 uint64_t el0_test_enter(void) {
+  assert(private_active);
   enters++;
   // A trusted EL1 continuation, distinct from all EL0 register values.
   exception_frame_t kernel = {
@@ -418,6 +437,11 @@ int main(void) {
   kernel_mismatch = 1ULL << 19;
   assert(!el0_test_run(&result));
   assert(result.kernel_failures == kernel_mismatch);
+  assert(!private_active);
+  activation_failed = true;
+  unsigned int old_enters = enters;
+  assert(!el0_test_run(&result) && !result.mappings);
+  assert(enters == old_enters && !private_active);
   puts("EL0 harness tests: PASS");
   return 0;
 }

@@ -55,6 +55,16 @@ el0_context_fault_program:
   ldr x3, [sp, #EL0_CONTEXT_PATTERN_OFFSET]
   b el0_context_step
 
+.global el0_context_stack_fault_program
+el0_context_stack_fault_program:
+  sub sp, sp, #EL0_CONTEXT_STACK_BYTES
+  stp x0, x2, [sp, #EL0_CONTEXT_PROGRESS_OFFSET]
+  str x3, [sp, #EL0_CONTEXT_PATTERN_OFFSET]
+  mov x3, #2
+  str x3, [sp, #EL0_CONTEXT_VARIANT_OFFSET]
+  ldr x3, [sp, #EL0_CONTEXT_PATTERN_OFFSET]
+  b el0_context_step
+
 el0_context_step:
   ldr x0, [sp, #EL0_CONTEXT_PROGRESS_OFFSET]
   add x0, x0, #7
@@ -95,6 +105,7 @@ el0_context_program_resume:
   b el0_context_step
 
 el0_context_fault_access:
+  tbnz x3, #1, el0_context_stack_access
   adrp x3, el0_test_kernel_canary
   add x3, x3, :lo12:el0_test_kernel_canary
 .global el0_context_fault_read
@@ -102,6 +113,26 @@ el0_context_fault_read:
   ldr x3, [x3]
   // If the forbidden read unexpectedly succeeds, exit without reporting
   // a contained fault. The fault diagnostic must fail, not loop or hang.
+  b el0_context_exit
+
+el0_context_stack_access:
+  // Derive the peer's fixed page from our SP, using only scratch x3.
+  adrp x3, __el0_stack1_bottom
+  add x3, x3, :lo12:__el0_stack1_bottom
+  cmp sp, x3
+  b.lo 1f
+  adrp x3, __el0_stack_bottom
+  add x3, x3, :lo12:__el0_stack_bottom
+1:
+  // CMP changed NZCV. Restore the diagnostic flags and scratch x4
+  // from the snapshot taken immediately after the previous yield.
+  mov x4, #0xa0000000
+  msr nzcv, x4
+  ldr x4, [sp, #32]
+.global el0_context_stack_read
+el0_context_stack_read:
+  ldr x3, [x3]
+  // A missing fault must terminate and fail the diagnostic, never spin.
   b el0_context_exit
 
 el0_context_exit:
