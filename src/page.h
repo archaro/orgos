@@ -4,10 +4,9 @@
 #include <stdint.h>
 
 #include "physmem.h"
+#include "address.h"
 
 #define PAGE_SIZE 4096U
-
-typedef uint64_t paddr_t;
 
 typedef struct {
   uint64_t total_pages;

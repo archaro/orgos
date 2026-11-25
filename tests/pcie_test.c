@@ -7,15 +7,30 @@
 #include <stdio.h>
 #include <string.h>
 
+// Consume the real pragma-once header before redirecting driver calls.
+// Unused target inlines are never emitted by the host compiler.
+#include "../src/pcie_io.h"
+
 // Exercise the complete production driver with an instrumented MMIO boundary.
-#define ORGOS_PCIE_IO_H
-static uint32_t pcie_read32(uintptr_t address);
-static uint16_t pcie_read16(uintptr_t address);
-static void pcie_write32(uintptr_t address, uint32_t value);
-static void pcie_write16(uintptr_t address, uint16_t value);
-static void pcie_barrier(void) {}
-static void pcie_instruction_sync(void) {}
+static uint32_t test_pcie_read32(uintptr_t address);
+static uint16_t test_pcie_read16(uintptr_t address);
+static void test_pcie_write32(uintptr_t address, uint32_t value);
+static void test_pcie_write16(uintptr_t address, uint16_t value);
+static void test_pcie_barrier(void) {}
+static void test_pcie_instruction_sync(void) {}
+#define pcie_read32 test_pcie_read32
+#define pcie_read16 test_pcie_read16
+#define pcie_write32 test_pcie_write32
+#define pcie_write16 test_pcie_write16
+#define pcie_barrier test_pcie_barrier
+#define pcie_instruction_sync test_pcie_instruction_sync
 #include "../src/pcie.c"
+#undef pcie_read32
+#undef pcie_read16
+#undef pcie_write32
+#undef pcie_write16
+#undef pcie_barrier
+#undef pcie_instruction_sync
 
 typedef struct {
   unsigned int offset;
@@ -62,7 +77,7 @@ static bool endpoint_access(unsigned int offset) {
   return true;
 }
 
-static uint32_t pcie_read32(uintptr_t address) {
+static uint32_t test_pcie_read32(uintptr_t address) {
   unsigned int offset = offset_of(address);
   assert((offset & 3U) == 0);
   if (endpoint_access(offset)) {
@@ -84,7 +99,7 @@ static uint32_t pcie_read32(uintptr_t address) {
   return registers[offset / 4];
 }
 
-static uint16_t pcie_read16(uintptr_t address) {
+static uint16_t test_pcie_read16(uintptr_t address) {
   unsigned int offset = offset_of(address);
   assert((offset & 1U) == 0);
   if (endpoint_access(offset)) {
@@ -103,7 +118,7 @@ static void record(unsigned int offset, uint32_t value, unsigned int width) {
   };
 }
 
-static void pcie_write32(uintptr_t address, uint32_t value) {
+static void test_pcie_write32(uintptr_t address, uint32_t value) {
   unsigned int offset = offset_of(address);
   assert((offset & 3U) == 0);
   record(offset, value, 32);
@@ -134,7 +149,7 @@ static void pcie_write32(uintptr_t address, uint32_t value) {
     registers[offset / 4] = value;
 }
 
-static void pcie_write16(uintptr_t address, uint16_t value) {
+static void test_pcie_write16(uintptr_t address, uint16_t value) {
   unsigned int offset = offset_of(address);
   assert((offset & 1U) == 0);
   record(offset, value, 16);

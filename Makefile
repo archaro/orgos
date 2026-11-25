@@ -72,6 +72,10 @@ clean:
 	rm -rf $(OBJ_DIR) $(TARGET)
 
 check: | $(OBJ_DIR)
+	$(HOSTCC) $(HOSTCFLAGS) -iquote $(SRC_DIR) \
+		tests/mmu_tables_test.c $(SRC_DIR)/mmu_tables.c $(SRC_DIR)/mmu_boot.c \
+		-o $(OBJ_DIR)/mmu_tables_test
+	$(OBJ_DIR)/mmu_tables_test
 	$(HOSTCC) $(HOSTCFLAGS) -fno-pie -no-pie -iquote $(SRC_DIR) \
 		tests/el0_context_test.c tests/el0_context_symbols.S \
 		$(SRC_DIR)/exception_dispatch.c \

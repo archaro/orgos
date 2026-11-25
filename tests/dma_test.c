@@ -10,6 +10,7 @@
 #include "../src/page.c"
 #include "dma.h"
 #include "cache.h"
+#include "../src/dma_io.h"
 
 #define TEST_BYTES (16U * PAGE_SIZE)
 static const paddr_t bases[] = {
@@ -64,8 +65,10 @@ static void *test_zero(void *destination, int value, size_t length) {
   return memset(destination, value, length);
 }
 
-#define ORGOS_DMA_IO_H
-static void dma_barrier(void) { barriers++; }
+// Consume the real pragma-once header before redirecting driver calls.
+// The unused target inline is never emitted by the host compiler.
+static void test_dma_barrier(void) { barriers++; }
+#define dma_barrier test_dma_barrier
 #define page_claim_run test_claim
 #define page_alloc_run_below test_allocate
 #define page_free_run test_release
@@ -75,6 +78,7 @@ static void dma_barrier(void) { barriers++; }
 #undef page_free_run
 #undef page_alloc_run_below
 #undef page_claim_run
+#undef dma_barrier
 
 bool pcie_phys_to_dma(uint64_t physical, uint64_t length, uint64_t *bus) {
   translations++;
