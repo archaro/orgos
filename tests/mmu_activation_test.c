@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "mmu_activation.h"
+#include "mmu_high.h"
 
 static uint64_t pages[3][13][512] __attribute__((aligned(4096)));
 static uint64_t saved_pages[3][13][512];
@@ -175,6 +176,9 @@ static void invalid_activation(void) {
   spaces[1].geometry.va_bits = 48;
   reject(&spaces[1]);
   spaces[1].geometry.va_bits = 36;
+  spaces[1].geometry.region = MMU_REGION_TTBR1;
+  reject(&spaces[1]);
+  spaces[1].geometry.region = MMU_REGION_TTBR0;
   spaces[1].mair ^= 1;
   reject(&spaces[1]);
   spaces[1].mair ^= 1;
@@ -280,6 +284,16 @@ int main(void) {
   assert(mmu_activation_init(&control, &spaces[0], &spaces[1], &spaces[2],
                                &layout));
   assert(writes == 0 && control.active == &spaces[0]);
+  // A real sealed upper hierarchy is outside the admitted TTBR0 pool.
+  static uint64_t upper_pages[11][512] __attribute__((aligned(4096)));
+  mmu_table_ref_t upper_refs[11];
+  for (unsigned int t = 0; t < 11; t++)
+    upper_refs[t] = (mmu_table_ref_t){upper_pages[t], 0x140000 + t * 4096,
+      t == 0 ? 1 : t == 10 ? 3 : 2};
+  mmu_address_space_t upper = {0};
+  assert(mmu_high_build(&upper, upper_refs, &memory, &layout));
+  reject(&upper);
+  assert(upper.state == MMU_SPACE_SEALED && writes == 0);
   invalid_activation();
   // Repeatedly alternate, with a kernel restoration after every slice.
   for (unsigned int n = 0; n < 40; n++) {

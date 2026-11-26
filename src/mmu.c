@@ -3,6 +3,7 @@
 
 #include "mmu.h"
 #include "mmu_boot.h"
+#include "mmu_high.h"
 #include "mmu_activation.h"
 #include "cache.h"
 
@@ -101,6 +102,11 @@ static mmu_table_ref_t context_tables[2][MMU_CONTEXT_TABLE_COUNT];
 static mmu_address_space_t context_spaces[2];
 static mmu_activation_t environments;
 static mmu_boot_layout_t kernel_layout;
+// Independently owned, never registered with the TTBR0 controller.
+static uint64_t high_pages[MMU_BOOT_TABLE_COUNT][MMU_TABLE_ENTRIES]
+    __attribute__((aligned(4096)));
+static mmu_table_ref_t high_tables[MMU_BOOT_TABLE_COUNT];
+static mmu_address_space_t high_space;
 
 extern void mmu_enable_el1(paddr_t root, uint64_t mair, uint64_t tcr);
 extern char __kernel_start[];
@@ -161,7 +167,13 @@ static bool build_initial_tables(const physmem_map_t *memory) {
                             &kernel_layout, id))
       return false;
   }
-  return true;
+  for (unsigned int t = 0; t < MMU_BOOT_TABLE_COUNT; t++) {
+    uint64_t *entries = high_pages[t];
+    high_tables[t] = (mmu_table_ref_t){
+      entries, (uintptr_t)entries, t == 0U ? 1U : t == 10U ? 3U : 2U
+    };
+  }
+  return mmu_high_build(&high_space, high_tables, memory, &kernel_layout);
 }
 
 // Ask the AArch64 MMU to translate a virtual
@@ -377,4 +389,8 @@ bool mmu_translate_user(uint64_t address, bool write,
         (par & 0x000FFFFFFFFFF000ULL) | (address & 4095U)
   };
   return true;
+}
+
+const mmu_address_space_t *mmu_high_address_space(void) {
+  return high_space.state == MMU_SPACE_SEALED ? &high_space : NULL;
 }

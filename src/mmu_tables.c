@@ -8,8 +8,25 @@
 #define TABLE_ADDRESS_MASK (PHYSICAL_MASK & ~0xfffULL)
 
 static bool geometry_valid(mmu_geometry_t geometry) {
-  return geometry.va_bits == MMU_VA_BITS && geometry.pa_bits == MMU_PA_BITS &&
-      geometry.granule_shift == 12U && geometry.start_level == 1U;
+  return geometry.pa_bits == MMU_PA_BITS && geometry.granule_shift == 12U &&
+      geometry.start_level == 1U &&
+      ((geometry.region == MMU_REGION_TTBR0 && geometry.va_bits == 36U) ||
+       (geometry.region == MMU_REGION_TTBR1 && geometry.va_bits == 39U));
+}
+
+// Validate the entire canonical prefix before extracting table indices.
+// TBI is not supported. A lower VA cannot select an upper hierarchy or vice
+// versa. With 39-bit upper VA, L1 uses all nine bits [38:30].
+static bool virtual_offset(const mmu_address_space_t *space, vaddr_t address,
+                           uint64_t *offset) {
+  if (!space || !geometry_valid(space->geometry))
+    return false;
+  uint64_t mask = (1ULL << space->geometry.va_bits) - 1U;
+  uint64_t prefix = space->geometry.region == MMU_REGION_TTBR1 ? ~mask : 0;
+  if ((address & ~mask) != prefix)
+    return false;
+  *offset = address & mask;
+  return true;
 }
 
 static bool attrs_valid(mmu_mapping_attrs_t attrs) {
@@ -96,7 +113,8 @@ bool mmu_space_init(mmu_address_space_t *space, mmu_geometry_t geometry,
   }
   *space = (mmu_address_space_t){
     .geometry = geometry, .mair = MMU_MAIR_DEVICE_NC_WB,
-    .tcr = MMU_TCR_4K_36BIT,
+    .tcr = geometry.region == MMU_REGION_TTBR1 ? MMU_TCR_DUAL_4K :
+        MMU_TCR_4K_36BIT,
     .root_physical = root_physical, .tables = tables, .table_count = count,
     .state = MMU_SPACE_BUILDING
   };
@@ -132,6 +150,8 @@ static unsigned int index_at(vaddr_t address, unsigned int level) {
 
 static uint64_t *entry_at(const mmu_address_space_t *space, vaddr_t address,
     unsigned int target_level) {
+  if (!virtual_offset(space, address, &address))
+    return NULL;
   const mmu_table_ref_t *table = find_table(space, space->root_physical, 1);
   for (unsigned int level = 1; table && level < target_level; level++) {
     uint64_t descriptor = table->entries[index_at(address, level)];
@@ -142,8 +162,9 @@ static uint64_t *entry_at(const mmu_address_space_t *space, vaddr_t address,
 
 bool mmu_space_link_table(mmu_address_space_t *space, vaddr_t address,
     unsigned int parent_level, paddr_t child_physical) {
+  uint64_t offset;
   if (!space || space->state != MMU_SPACE_BUILDING ||
-      address >= (1ULL << MMU_VA_BITS) ||
+      !virtual_offset(space, address, &offset) ||
       (parent_level != 1U && parent_level != 2U))
     return false;
   uint64_t span = parent_level == 1U ? MMU_L1_SIZE : MMU_BLOCK_SIZE;
@@ -176,12 +197,12 @@ bool mmu_space_link_table(mmu_address_space_t *space, vaddr_t address,
 bool mmu_space_map(mmu_address_space_t *space, vaddr_t virtual_address,
     paddr_t physical_address, uint64_t size, mmu_descriptor_kind_t kind,
     mmu_mapping_attrs_t attrs) {
-  uint64_t unit = mapping_size(kind), bits;
+  uint64_t unit = mapping_size(kind), bits, va_offset;
   if (!space || space->state != MMU_SPACE_BUILDING || !unit || !size ||
       ((virtual_address | physical_address | size) & (unit - 1U)) ||
-      virtual_address >= (1ULL << MMU_VA_BITS) ||
+      !virtual_offset(space, virtual_address, &va_offset) ||
       physical_address >= (1ULL << MMU_PA_BITS) ||
-      size > (1ULL << MMU_VA_BITS) - virtual_address ||
+      size > (1ULL << space->geometry.va_bits) - va_offset ||
       size > (1ULL << MMU_PA_BITS) - physical_address ||
       !mmu_leaf_descriptor(0, kind, attrs, &bits))
     return false;
@@ -210,7 +231,8 @@ bool mmu_space_seal(mmu_address_space_t *space) {
 
 bool mmu_space_inspect(const mmu_address_space_t *space, vaddr_t address,
     mmu_descriptor_info_t *info) {
-  if (!space || !info || address >= (1ULL << MMU_VA_BITS))
+  uint64_t offset;
+  if (!info || !virtual_offset(space, address, &offset))
     return false;
   const mmu_table_ref_t *table = find_table(space, space->root_physical, 1);
   if (!table)
@@ -219,7 +241,7 @@ bool mmu_space_inspect(const mmu_address_space_t *space, vaddr_t address,
     .virtual_address = address, .kind = MMU_DESC_UNMAPPED
   };
   for (unsigned int level = 1; level <= 3U; level++) {
-    uint64_t descriptor = table->entries[index_at(address, level)];
+    uint64_t descriptor = table->entries[index_at(offset, level)];
     info->level = level;
     if (level == 1U)
       info->l1_descriptor = descriptor;

@@ -17,13 +17,25 @@
 #define MMU_TCR_4K_36BIT (28ULL | (1ULL << 8) | (1ULL << 10) | \
                         (3ULL << 12) | (1ULL << 23) | (1ULL << 32))
 
+// Metadata for an inactive proposal, never written by table construction.
+#define MMU_TCR_DUAL_4K \
+    ((MMU_TCR_4K_36BIT & ~(1ULL << 23)) | (25ULL << 16) | \
+    (1ULL << 24) | (1ULL << 26) | (3ULL << 28) | (2ULL << 30))
+#define MMU_TTBR1_BASE 0xffffff8000000000ULL
+
+typedef enum { MMU_REGION_TTBR0 = 0, MMU_REGION_TTBR1 = 1 } mmu_region_t;
+
 typedef struct {
   unsigned int va_bits;
   unsigned int pa_bits;
   unsigned int granule_shift;
   unsigned int start_level;
+  mmu_region_t region;
 } mmu_geometry_t;
-#define MMU_GEOMETRY_4K_36BIT ((mmu_geometry_t){36, 36, 12, 1})
+#define MMU_GEOMETRY_4K_36BIT \
+    ((mmu_geometry_t){36, 36, 12, 1, MMU_REGION_TTBR0})
+#define MMU_GEOMETRY_TTBR1_4K_39BIT \
+    ((mmu_geometry_t){39, 36, 12, 1, MMU_REGION_TTBR1})
 
 typedef enum {
   MMU_ATTR_DEVICE = 0,
@@ -90,7 +102,7 @@ typedef struct {
   mmu_space_state_t state;
 } mmu_address_space_t;
 
-// Only the existing 4 KiB, 36-bit, L1-start geometry is supported.
+// Supported: 4 KiB/L1, 36-bit PA, lower 36-bit or canonical upper 39-bit VA.
 // Output remains unchanged on invalid descriptor requests.
 bool mmu_table_descriptor(paddr_t physical, uint64_t *descriptor);
 bool mmu_leaf_descriptor(paddr_t physical, mmu_descriptor_kind_t kind,

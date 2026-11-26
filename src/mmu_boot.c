@@ -1,4 +1,5 @@
 #include "mmu_boot.h"
+#include "mmu_high.h"
 
 #define RAM_LIMIT (8ULL << 30)
 #define PERIPHERAL_START 0xfc000000ULL
@@ -111,7 +112,7 @@ static mmu_mapping_attrs_t low_page_attrs(vaddr_t address,
 static bool build(mmu_address_space_t *space,
     const mmu_table_ref_t *tables,
     const physmem_map_t *memory, const mmu_boot_layout_t *layout,
-    uint64_t *mapped_ram_bytes, int owner) {
+    uint64_t *mapped_ram_bytes, int owner, bool higher) {
   uint64_t total;
   if (!space || !tables || !mapped_ram_bytes || !layout_valid(layout) ||
       !memory_valid(memory, &total) ||
@@ -127,17 +128,20 @@ static bool build(mmu_address_space_t *space,
         !ram_contains(memory, tables[i].physical, MMU_PAGE_SIZE))
       return false;
   }
-  if (!mmu_space_init(space, MMU_GEOMETRY_4K_36BIT, tables,
+  mmu_geometry_t geometry = higher ? MMU_GEOMETRY_TTBR1_4K_39BIT :
+      MMU_GEOMETRY_4K_36BIT;
+  const vaddr_t base = higher ? MMU_TTBR1_BASE : 0;
+  if (!mmu_space_init(space, geometry, tables,
                       count, tables[0].physical))
     return false;
   // Preserve links to all eight RAM regions, including empty L2 tables.
   for (unsigned int region = 0; region < MMU_BOOT_RAM_REGIONS; region++) {
-    if (!mmu_space_link_table(space, (uint64_t)region << 30, 1,
+    if (!mmu_space_link_table(space, base + ((uint64_t)region << 30), 1,
                              tables[region + 1U].physical))
       return false;
   }
-  if (!mmu_space_link_table(space, PCIE_START, 1, tables[9].physical) ||
-      !mmu_space_link_table(space, 0, 2, tables[10].physical))
+  if (!mmu_space_link_table(space, base + PCIE_START, 1, tables[9].physical) ||
+      !mmu_space_link_table(space, base, 2, tables[10].physical))
     return false;
 
   mmu_mapping_attrs_t normal = ram_attrs();
@@ -147,23 +151,30 @@ static bool build(mmu_address_space_t *space,
       start += MMU_BLOCK_SIZE;
       size -= MMU_BLOCK_SIZE;
     }
-    if (size && !mmu_space_map(space, start, start, size,
+    if (size && !mmu_space_map(space, base + start, start, size,
                                 MMU_DESC_BLOCK, normal))
       return false;
   }
   for (vaddr_t address = 0; address < MMU_BLOCK_SIZE;
        address += MMU_PAGE_SIZE) {
-    if (!mmu_space_map(space, address, address, MMU_PAGE_SIZE, MMU_DESC_PAGE,
-                       low_page_attrs(address, layout, owner)))
+    mmu_mapping_attrs_t attrs = low_page_attrs(address, layout, owner);
+    // One protected direct-map VA per PA; no writable text alias.
+    if (higher) {
+      attrs.ap &= ~1U;
+      attrs.uxn = true;
+    }
+    if (!mmu_space_map(space, base + address, address, MMU_PAGE_SIZE,
+                        MMU_DESC_PAGE, attrs))
       return false;
   }
   mmu_mapping_attrs_t device = normal;
   device.attr_index = MMU_ATTR_DEVICE;
   device.shareability = 0;
-  if (!mmu_space_map(space, PERIPHERAL_START, PERIPHERAL_START,
+  if (!mmu_space_map(space, base + PERIPHERAL_START, PERIPHERAL_START,
                      PERIPHERAL_END - PERIPHERAL_START,
                      MMU_DESC_BLOCK, device) ||
-      !mmu_space_map(space, PCIE_START, PCIE_START, PCIE_END - PCIE_START,
+      !mmu_space_map(space, base + PCIE_START, PCIE_START,
+                     PCIE_END - PCIE_START,
                      MMU_DESC_BLOCK, device))
     return false;
   if (owner >= 0) {
@@ -185,7 +196,7 @@ bool mmu_boot_build(mmu_address_space_t *space,
     const mmu_table_ref_t tables[MMU_BOOT_TABLE_COUNT],
     const physmem_map_t *memory, const mmu_boot_layout_t *layout,
     uint64_t *mapped_ram_bytes) {
-  return build(space, tables, memory, layout, mapped_ram_bytes, -1);
+  return build(space, tables, memory, layout, mapped_ram_bytes, -1, false);
 }
 
 bool mmu_context_build(mmu_address_space_t *space,
@@ -194,7 +205,7 @@ bool mmu_context_build(mmu_address_space_t *space,
     unsigned int owner) {
   uint64_t mapped;
   return owner < 2U &&
-      build(space, tables, memory, layout, &mapped, (int)owner);
+      build(space, tables, memory, layout, &mapped, (int)owner, false);
 }
 
 static bool configuration_valid(const mmu_address_space_t *space,
@@ -202,6 +213,7 @@ static bool configuration_valid(const mmu_address_space_t *space,
   return space && space->tables &&
       space->table_count == count &&
       (space->state == MMU_SPACE_SEALED || space->state == MMU_SPACE_ACTIVE) &&
+      space->geometry.region == MMU_REGION_TTBR0 &&
       space->geometry.va_bits == 36U && space->geometry.pa_bits == 36U &&
       space->geometry.granule_shift == 12U &&
       space->geometry.start_level == 1U &&
@@ -279,4 +291,18 @@ bool mmu_boot_compatible(const mmu_address_space_t *kernel,
     }
   }
   return true;
+}
+
+bool mmu_high_address(paddr_t physical, vaddr_t *virtual_address) {
+  if (!virtual_address || physical >= (1ULL << MMU_PA_BITS))
+    return false;
+  *virtual_address = MMU_TTBR1_BASE + physical;
+  return true;
+}
+
+bool mmu_high_build(mmu_address_space_t *space,
+    const mmu_table_ref_t tables[MMU_BOOT_TABLE_COUNT],
+    const physmem_map_t *memory, const mmu_boot_layout_t *layout) {
+  uint64_t mapped;
+  return build(space, tables, memory, layout, &mapped, -1, true);
 }
