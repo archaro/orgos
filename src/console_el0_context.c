@@ -35,6 +35,9 @@ static void show_fault(unsigned int id, const el0_context_info_t *info) {
     fault_register("FAR_EL1            ", fault.frame.far);
   else
     console_puts("  FAR_EL1            : unavailable for this exception\n");
+  if (info->own_alias_test)
+    console_printf("EL0 physical-alias test: %s\n",
+        info->fault_test_passed ? "PASS" : "FAIL");
   if (info->cross_stack_test)
     console_printf("EL0 cross-stack protection test: %s\n",
         info->fault_test_passed ? "PASS" : "FAIL");
@@ -51,6 +54,16 @@ static void show_context(unsigned int id) {
   if (info.state == EL0_CONTEXT_EMPTY)
     return;
   fault_register("Address-space root ", info.address_space_root);
+  fault_register("Virtual stack base ", info.virtual_stack);
+  fault_register("Physical backing   ", info.physical_stack);
+  if (info.stack_mapping.checked) {
+    fault_register("EL0 read -> PA     ", info.stack_mapping.read_physical);
+    fault_register("EL0 write -> PA    ", info.stack_mapping.write_physical);
+    console_printf("  Stack mapping      : %s\n",
+        info.stack_mapping.valid ? "OK (RW/XN; aliases denied)" : "FAIL");
+  } else {
+    console_puts("  Stack mapping      : Not probed\n");
+  }
   if (info.resumptions) {
     fault_register("Entry TTBR0        ", info.entered_root);
     fault_register("Trap TTBR0         ", info.trapped_root);
@@ -115,17 +128,20 @@ void cmd_el0ctx(const char *args) {
   }
   if (console_arg_word(&args, "start")) {
     unsigned int id = 0;
-    bool cross = console_arg_word(&args, "cross");
-    bool fault = !cross && console_arg_word(&args, "fault");
-    if (!fault && !cross && !console_arg_end(args)) {
+    bool alias = console_arg_word(&args, "alias");
+    bool cross = !alias && console_arg_word(&args, "cross");
+    bool fault = !alias && !cross && console_arg_word(&args, "fault");
+    if (!fault && !cross && !alias && !console_arg_end(args)) {
       if (!parse_id(&args, &id))
         return;
-      cross = console_arg_word(&args, "cross");
-      fault = !cross && console_arg_word(&args, "fault");
+      alias = console_arg_word(&args, "alias");
+      cross = !alias && console_arg_word(&args, "cross");
+      fault = !alias && !cross && console_arg_word(&args, "fault");
     }
     if (!console_arg_end(args))
       goto usage;
-    bool started = cross ? el0_context_start_stack_fault_test(id) :
+    bool started = alias ? el0_context_start_alias_fault_test(id) :
+        cross ? el0_context_start_stack_fault_test(id) :
         fault ? el0_context_start_fault_test(id) : el0_context_start(id);
     if (!started) {
       console_puts("Cannot start EL0 context: "
@@ -159,6 +175,6 @@ void cmd_el0ctx(const char *args) {
     return;
   }
 usage:
-  console_puts("Usage: el0ctx [start [0|1] [fault|cross] | "
+  console_puts("Usage: el0ctx [start [0|1] [fault|cross|alias] | "
       "resume [0|1] | status [0|1] | reset [0|1]]\n");
 }

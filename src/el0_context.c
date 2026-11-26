@@ -1,6 +1,7 @@
 #include "el0_context.h"
 #include "el0_test.h"
 #include "mmu.h"
+#include "el0_stack.h"
 #include "string.h"
 
 extern char __el0_stack_bottom[], __el0_stack_top[];
@@ -26,16 +27,18 @@ static el0_slot_t contexts[EL0_CONTEXT_COUNT];
 static el0_slot_t *active;
 static exception_frame_t *kernel_return;
 
-static uintptr_t stack_top(unsigned int id) {
+static uintptr_t stack_kernel_top(unsigned int id) {
   return (uintptr_t)(id == 0U ? __el0_stack_top : __el0_stack1_top);
 }
 
-static uintptr_t stack_bottom(unsigned int id) {
+static uintptr_t stack_kernel_bottom(unsigned int id) {
   return (uintptr_t)(id == 0U ? __el0_stack_bottom : __el0_stack1_bottom);
 }
 
-static uintptr_t frame_base(const el0_slot_t *ctx) {
-  return stack_top((unsigned int)(ctx - contexts)) - EL0_CONTEXT_STACK_BYTES;
+// Trusted CPU alias into this slot's static backing, never its saved SP.
+static uintptr_t frame_kernel_base(const el0_slot_t *ctx) {
+  return stack_kernel_top((unsigned int)(ctx - contexts)) -
+      EL0_CONTEXT_STACK_BYTES;
 }
 
 static uint64_t pattern(const el0_slot_t *ctx, unsigned int reg) {
@@ -64,19 +67,27 @@ static bool start_context(unsigned int id, unsigned int variant) {
     return false;
   el0_slot_t *ctx = &contexts[id];
   ctx->space = space;
-  memset((void *)stack_bottom(id), 0, 4096U);
+  memset((void *)stack_kernel_bottom(id), 0, 4096U);
   ctx->expected_daif = 0;
   ctx->saved = (exception_frame_t){0};
   for (unsigned int i = 2; i < 31U; i++)
     ctx->saved.x[i] = pattern(ctx, i);
-  const char *program = variant == 2U ? el0_context_stack_fault_program :
+  const char *program = variant >= 2U ? el0_context_stack_fault_program :
       variant == 1U ? el0_context_fault_program : el0_context_program;
   ctx->saved.elr = (uintptr_t)program;
-  ctx->saved.sp = ctx->saved.sp_el0 = stack_top(id);
+  ctx->saved.sp = ctx->saved.sp_el0 = EL0_STACK_TOP;
+  if (variant >= 2U) {
+    uint64_t *kernel_frame = (uint64_t *)frame_kernel_base(ctx);
+    kernel_frame[EL0_CONTEXT_TARGET_OFFSET / 8] =
+        stack_kernel_bottom(variant == 2U ? 1U - id : id);
+  }
   ctx->saved.spsr = 0xa0000000ULL; // EL0t. DAIF added on first switch.
   ctx->info = (el0_context_info_t){
     .state = EL0_CONTEXT_READY, .stack_ok = true, .fault_test = variant != 0U,
-    .cross_stack_test = variant == 2U,
+    .cross_stack_test = variant == 2U, .own_alias_test = variant == 3U,
+    .virtual_stack = EL0_STACK_VA,
+    // Identity is retained only for this trusted kernel backing alias.
+    .physical_stack = (paddr_t)stack_kernel_bottom(id),
     .address_space_root = space->root_physical
   };
   return true;
@@ -92,6 +103,10 @@ bool el0_context_start_fault_test(unsigned int id) {
 
 bool el0_context_start_stack_fault_test(unsigned int id) {
   return start_context(id, 2);
+}
+
+bool el0_context_start_alias_fault_test(unsigned int id) {
+  return start_context(id, 3);
 }
 
 bool el0_context_reset(unsigned int id) {
@@ -216,7 +231,7 @@ static uint64_t check_frame(el0_slot_t *ctx) {
     if (ctx->saved.x[i] != expected)
       failures |= 1ULL << i;
   }
-  uintptr_t stack = frame_base(ctx);
+  vaddr_t stack = EL0_STACK_TOP - EL0_CONTEXT_STACK_BYTES;
   if (ctx->saved.sp != stack || ctx->saved.sp_el0 != stack)
     failures |= 1ULL << 31;
   if ((ctx->saved.spsr & 0xf000001fULL) != 0xa0000000ULL)
@@ -240,10 +255,12 @@ static void check_fault_test(el0_slot_t *ctx,
                             const exception_frame_t *previous) {
   // Site/syndrome checks decide only whether this deliberate test PASSED.
   // They do not grant authority to resume an instruction after an abort.
-  uintptr_t target = ctx->info.cross_stack_test ?
-      stack_bottom(1U - (unsigned int)(ctx - contexts)) :
+  unsigned int id = (unsigned int)(ctx - contexts);
+  bool alias = ctx->info.cross_stack_test || ctx->info.own_alias_test;
+  uintptr_t target = alias ? stack_kernel_bottom(
+      ctx->info.cross_stack_test ? 1U - id : id) :
       (uintptr_t)&el0_test_kernel_canary;
-  const char *site = ctx->info.cross_stack_test ?
+  const char *site = alias ?
       el0_context_stack_read : el0_context_fault_read;
   bool expected = ctx->info.fault_test && ctx->info.resumptions == 2U &&
       ctx->info.yields == 1U && ctx->info.result == 7U &&
@@ -261,8 +278,9 @@ static void check_fault_test(el0_slot_t *ctx,
     if (ctx->saved.x[i] != expected_reg)
       failures |= 1ULL << i;
   }
-  uintptr_t base = frame_base(ctx);
-  if (ctx->saved.sp != base || ctx->saved.sp_el0 != base)
+  uintptr_t base = frame_kernel_base(ctx);
+  if (ctx->saved.sp != EL0_STACK_TOP - EL0_CONTEXT_STACK_BYTES ||
+      ctx->saved.sp_el0 != EL0_STACK_TOP - EL0_CONTEXT_STACK_BYTES)
     failures |= 1ULL << 31;
   if ((ctx->saved.spsr & 0xf000001fULL) != 0xa0000000ULL)
     failures |= 1ULL << 32;
@@ -284,12 +302,13 @@ static void check_fault_test(el0_slot_t *ctx,
       stack[EL0_CONTEXT_GUARD_OFFSET / 8] != pattern(ctx, 2) ||
       stack[EL0_CONTEXT_PATTERN_OFFSET / 8] != pattern(ctx, 3) ||
       stack[EL0_CONTEXT_VARIANT_OFFSET / 8] !=
-          (ctx->info.cross_stack_test ? 2U : 1U) ||
+          (alias ? 2U : 1U) ||
+      (alias && stack[EL0_CONTEXT_TARGET_OFFSET / 8] != target) ||
       el0_test_kernel_canary != EL0_TEST_KERNEL_CANARY)
     ctx->info.stack_ok = false;
   ctx->info.fault_test_passed = ctx->info.context_failures == 0 &&
       ctx->info.kernel_failures == 0 && ctx->info.stack_ok &&
-      ctx->info.address_space_ok;
+      ctx->info.address_space_ok && ctx->info.stack_mapping.valid;
 }
 
 bool el0_context_resume(unsigned int id) {
@@ -309,6 +328,13 @@ bool el0_context_resume(unsigned int id) {
   if (ctx->space != mmu_context_address_space(id) ||
       !mmu_activate_address_space(ctx->space))
     return false;
+  if (!el0_stack_probe(ctx->info.physical_stack,
+                       (paddr_t)stack_kernel_bottom(1U - id),
+                       &ctx->info.stack_mapping)) {
+    if (!mmu_restore_kernel_space())
+      exception_panic(4, 0, ctx->saved.elr, 0, 5);
+    return false;
+  }
   active = ctx;
   ctx->info.kernel_failures |= el0_context_switch();
   // Defensive restoration also covers an assembly return probe failure.
@@ -327,7 +353,7 @@ bool el0_context_resume(unsigned int id) {
   }
   ctx->info.context_failures |= check_frame(ctx);
   const volatile uint64_t *stack =
-      (const volatile uint64_t *)frame_base(ctx);
+      (const volatile uint64_t *)frame_kernel_base(ctx);
   if (resuming) {
     for (unsigned int i = 0; i < 31U; i++) {
       if (stack[i] != previous.x[i])
@@ -347,6 +373,6 @@ bool el0_context_resume(unsigned int id) {
       ctx->info.resumptions == EL0_CONTEXT_SLICES && ctx->info.yields == 5U &&
       ctx->info.result == 42U && ctx->info.stack_ok &&
       ctx->info.context_failures == 0U && ctx->info.kernel_failures == 0U &&
-      ctx->info.address_space_ok;
+      ctx->info.address_space_ok && ctx->info.stack_mapping.valid;
   return true;
 }

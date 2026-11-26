@@ -3,9 +3,9 @@
 #include <string.h>
 #include "mmu_activation.h"
 
-static uint64_t pages[3][11][512] __attribute__((aligned(4096)));
-static uint64_t saved_pages[3][11][512];
-static mmu_table_ref_t tables[3][11];
+static uint64_t pages[3][13][512] __attribute__((aligned(4096)));
+static uint64_t saved_pages[3][13][512];
+static mmu_table_ref_t tables[3][13];
 static mmu_address_space_t spaces[3];
 static mmu_activation_t control;
 static paddr_t hardware_root;
@@ -52,10 +52,10 @@ void mmu_replace_ttbr0(paddr_t root) {
 static void build(void) {
   memset(spaces, 0, sizeof(spaces));
   for (unsigned int s = 0; s < 3; s++) {
-    for (unsigned int t = 0; t < 11; t++) {
+    for (unsigned int t = 0; t < (s ? 13U : 11U); t++) {
       tables[s][t] = (mmu_table_ref_t){
-        pages[s][t], 0x100000U + (s * 11U + t) * 4096U,
-        t == 0 ? 1 : t == 10 ? 3 : 2
+        pages[s][t], 0x100000U + (s * 13U + t) * 4096U,
+        t == 0 ? 1 : (t == 10 || t == 12) ? 3 : 2
       };
     }
     if (s == 0) {
@@ -88,7 +88,7 @@ static void policy(void) {
       bool code = va == layout.el0_text.start;
       bool stack0 = va == layout.el0_stack[0].start;
       bool stack1 = va == layout.el0_stack[1].start;
-      bool owned = s == 0 ? stack0 || stack1 : s == 1 ? stack0 : stack1;
+      bool owned = s == 0 && (stack0 || stack1);
       assert((info.access_permissions & 1U) == (code || owned));
       if (stack0 || stack1) {
         assert(info.access_permissions == (owned ? 1U : 0U));
@@ -101,6 +101,23 @@ static void policy(void) {
         assert(mmu_space_inspect(&spaces[0], va, &original));
         assert(info.leaf_descriptor == original.leaf_descriptor);
       }
+    }
+    mmu_descriptor_info_t stack;
+    assert(mmu_space_inspect(&spaces[s], EL0_STACK_VA, &stack));
+    if (!s) {
+      assert(stack.kind == MMU_DESC_UNMAPPED);
+    } else {
+      assert(stack.physical_address == layout.el0_stack[s - 1].start);
+      assert(stack.physical_address != EL0_STACK_VA);
+      assert(stack.access_permissions == 1 && stack.pxn && stack.uxn);
+      assert(stack.access_flag && stack.attr_index == 2);
+      assert(((stack.leaf_descriptor >> 8) & 3) == 3);
+      assert(mmu_space_inspect(&spaces[s], EL0_STACK_TOP - 1, &stack));
+      assert(stack.physical_address == layout.el0_stack[s - 1].end - 1);
+      assert(mmu_space_inspect(&spaces[s], EL0_STACK_VA - 1, &stack));
+      assert(stack.kind == MMU_DESC_UNMAPPED);
+      assert(mmu_space_inspect(&spaces[s], EL0_STACK_TOP, &stack));
+      assert(stack.kind == MMU_DESC_UNMAPPED);
     }
     const uint64_t addresses[] = {
       0x200000, 0x7ffffff, 0x100000000, 0xfc000000, 0xfd500000,
@@ -192,11 +209,29 @@ static void invalid_activation(void) {
   tables[1][9].physical = tables[0][9].physical; // Shared table ownership.
   pages[1][0][24] = tables[1][9].physical | 3;
   reject(&spaces[1]);
-  tables[1][9].physical = 0x100000U + (11 + 9) * 4096U;
+  tables[1][9].physical = 0x100000U + (13 + 9) * 4096U;
   pages[1][0][24] = tables[1][9].physical | 3;
   tables[1][10].entries = tables[0][10].entries;
   reject(&spaces[1]);
   tables[1][10].entries = pages[1][10];
+  // Reject wrong backing, permissions, XN, and extra user-range entries.
+  const uint64_t bad_stack_bits[] = {
+    4096, 1ULL << 6, 1ULL << 53, 1ULL << 54, 1ULL << 10, 1ULL << 8
+  };
+  for (unsigned int i = 0; i < 6; i++) {
+    pages[1][12][0] ^= bad_stack_bits[i];
+    reject(&spaces[1]);
+    pages[1][12][0] ^= bad_stack_bits[i];
+  }
+  pages[1][12][1] = pages[1][12][0]; // Extra writable alias.
+  reject(&spaces[1]);
+  pages[1][12][1] = 0;
+  pages[1][11][1] = tables[1][12].physical | 3;
+  reject(&spaces[1]);
+  pages[1][11][1] = 0;
+  pages[1][0][33] = tables[1][11].physical | 3;
+  reject(&spaces[1]);
+  pages[1][0][33] = 0;
   enabled = false;
   reject(&spaces[1]);
   enabled = true;
@@ -211,7 +246,35 @@ static void invalid_activation(void) {
   hardware_root ^= 4096;
 }
 
+static void new_range_conflicts(void) {
+  static uint64_t inactive[3][512] __attribute__((aligned(4096)));
+  static uint64_t before[3][512];
+  mmu_table_ref_t refs[] = {
+    {inactive[0], 0x130000, 1}, {inactive[1], 0x131000, 2},
+    {inactive[2], 0x132000, 3}
+  };
+  mmu_address_space_t space = {0};
+  mmu_mapping_attrs_t attrs = {2, 1, 3, true, true, true};
+  assert(mmu_space_init(&space, MMU_GEOMETRY_4K_36BIT, refs, 3,
+                         refs[0].physical));
+  assert(mmu_space_link_table(&space, EL0_STACK_VA, 1, refs[1].physical));
+  assert(mmu_space_link_table(&space, EL0_STACK_VA, 2, refs[2].physical));
+  assert(mmu_space_map(&space, EL0_STACK_TOP, layout.el0_stack[1].start,
+                        4096, MMU_DESC_PAGE, attrs));
+  memcpy(before, inactive, sizeof(before));
+  // First slot free, second conflicts: reject without writing the first.
+  assert(!mmu_space_map(&space, EL0_STACK_VA, layout.el0_stack[0].start,
+                         8192, MMU_DESC_PAGE, attrs));
+  assert(!mmu_space_map(&space, EL0_STACK_VA + 1,
+                         layout.el0_stack[0].start, 4096,
+                         MMU_DESC_PAGE, attrs));
+  assert(!mmu_space_map(&space, EL0_STACK_VA, 1ULL << 36,
+                         4096, MMU_DESC_PAGE, attrs));
+  assert(memcmp(before, inactive, sizeof(before)) == 0);
+}
+
 int main(void) {
+  new_range_conflicts();
   build();
   policy();
   assert(mmu_activation_init(&control, &spaces[0], &spaces[1], &spaces[2],

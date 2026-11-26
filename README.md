@@ -26,6 +26,7 @@ application source, and modifying `main.c` appropriately.
 - [Address-space machinery and MMU validation](docs/address-spaces.md)
 - [Recoverable exceptions and EL1 trap test](docs/exceptions.md)
 - [First EL0 program and privilege-fault test](docs/el0-testing.md)
+- [Common virtual stacks and non-identity Pi tests](docs/el0-virtual-stacks.md)
 - [Independent EL0 roots and cross-stack Pi tests](docs/el0-address-spaces.md)
 - [Two explicit EL0 contexts, lifecycle and Pi procedure](docs/el0-two-contexts.md)
 - [Original single-context diagnostic](docs/el0-context.md)

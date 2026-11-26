@@ -2,9 +2,11 @@
 
 #include "mmu_tables.h"
 #include "physmem.h"
+#include "el0_layout.h"
 
 #define MMU_BOOT_RAM_REGIONS 8U
 #define MMU_BOOT_TABLE_COUNT 11U
+#define MMU_CONTEXT_TABLE_COUNT 13U
 
 typedef struct { vaddr_t start, end; } mmu_boot_range_t;
 typedef struct {
@@ -20,10 +22,11 @@ bool mmu_boot_build(mmu_address_space_t *space,
     const physmem_map_t *memory, const mmu_boot_layout_t *layout,
     uint64_t *mapped_ram_bytes);
 
-// Same EL1 policy; only owner's stack is accessible at EL0. The other
-// remains privileged RW/XN. The executable page is shared read-only.
+// Same privileged identity map, with both physical stack aliases EL1-only.
+// Extra tables 11 (L2) and 12 (L3) map EL0_STACK_VA to owner's backing.
+// The executable page is shared read-only.
 bool mmu_context_build(mmu_address_space_t *space,
-    const mmu_table_ref_t tables[MMU_BOOT_TABLE_COUNT],
+    const mmu_table_ref_t tables[MMU_CONTEXT_TABLE_COUNT],
     const physmem_map_t *memory, const mmu_boot_layout_t *layout,
     unsigned int owner);
 // Cold-boot policy compatibility, including all table pages inside kernel

@@ -85,14 +85,15 @@ void *test_memset(void *destination, int value, size_t length) {
   return destination;
 }
 
-void el0_test_prepare_stack(void *stack) {
+void el0_test_prepare_stack(void *stack, vaddr_t execute_va) {
   assert((uintptr_t)stack == 0x101000U);
+  assert(execute_va == EL0_STACK_VA);
   assert(prepares < clears);
   prepares++;
 }
 
 static mmu_address_space_t private_space = {.root_physical = 0x180000};
-static bool private_active, activation_failed;
+static bool private_active, activation_failed, probe_failed;
 const mmu_address_space_t *mmu_context_address_space(unsigned int id) {
   assert(id == 0U);
   return &private_space;
@@ -113,9 +114,10 @@ bool mmu_enabled(void) { return enabled; }
 
 bool mmu_inspect(uint64_t address, mmu_descriptor_info_t *info) {
   bool code = address == 0x100000U;
-  bool stack = address == 0x101000U || address == 0x102000U;
+  bool stack = private_active ? address == EL0_STACK_VA :
+      address == 0x101000U || address == 0x102000U;
   *info = (mmu_descriptor_info_t){
-    .physical_address = address,
+    .physical_address = address == EL0_STACK_VA ? 0x101000U : address,
     .kind = MMU_DESC_PAGE,
     .access_flag = true,
     .access_permissions = code ? 3U : stack ? 1U : 0U,
@@ -140,10 +142,22 @@ bool mmu_inspect(uint64_t address, mmu_descriptor_info_t *info) {
   return true;
 }
 
+bool mmu_translate_user(uint64_t va, bool write, mmu_translation_t *out) {
+  (void)write;
+  assert(private_active);
+  if (probe_failed)
+    return false;
+  bool stack = va >= EL0_STACK_VA && va < EL0_STACK_TOP;
+  *out = (mmu_translation_t){.virtual_address = va, .fault = !stack,
+    .fault_status = stack ? 0 : 0xf,
+    .physical_address = stack ? 0x101000U + va - EL0_STACK_VA : 0};
+  return true;
+}
+
 static exception_frame_t user_frame(void) {
   exception_frame_t frame = {
-    .sp = 0x101ff0U,
-    .sp_el0 = 0x101ff0U,
+    .sp = EL0_STACK_TOP - 16U,
+    .sp_el0 = EL0_STACK_TOP - 16U,
     .spsr = 0xa0000340U,
     .vector = 8U,
     .far = 0xfeed1234U,
@@ -176,10 +190,10 @@ static exception_frame_t memory_frame(unsigned int test) {
       (test == EL0_TEST_CODE_WRITE ? 1ULL << 6 : 0) | 0xfU;
   frame.far = test == EL0_TEST_KERNEL_READ ?
       (uintptr_t)&el0_test_kernel_canary : test == EL0_TEST_CODE_WRITE ?
-      (uintptr_t)&el0_test_code_canary : (uintptr_t)__el0_stack_bottom;
+      (uintptr_t)&el0_test_code_canary : EL0_STACK_VA;
   frame.elr = test == EL0_TEST_KERNEL_READ ?
       (uintptr_t)el0_test_kernel_read : test == EL0_TEST_CODE_WRITE ?
-      (uintptr_t)el0_test_code_write : (uintptr_t)__el0_stack_bottom;
+      (uintptr_t)el0_test_code_write : EL0_STACK_VA;
   frame.x[10] = frame.far;
   if (execute)
     frame.x[12] = (uintptr_t)el0_test_exec_resume;
@@ -442,6 +456,11 @@ int main(void) {
   unsigned int old_enters = enters;
   assert(!el0_test_run(&result) && !result.mappings);
   assert(enters == old_enters && !private_active);
+  activation_failed = false;
+  probe_failed = true;
+  unsigned int old_clears = clears;
+  assert(!el0_test_run(&result) && !result.mappings);
+  assert(enters == old_enters && clears == old_clears && !private_active);
   puts("EL0 harness tests: PASS");
   return 0;
 }

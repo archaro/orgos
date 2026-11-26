@@ -11,11 +11,13 @@
 #define EL0_CONTEXT_GUARD_OFFSET 280
 #define EL0_CONTEXT_VARIANT_OFFSET 288
 #define EL0_CONTEXT_PATTERN_OFFSET 296
+#define EL0_CONTEXT_TARGET_OFFSET 264
 
 #ifndef __ASSEMBLER__
 #include <stdbool.h>
 #include <stdint.h>
 #include "exceptions.h"
+#include "el0_stack.h"
 
 typedef enum {
   EL0_CONTEXT_EMPTY,
@@ -39,6 +41,10 @@ typedef struct {
   bool fault_test;
   bool fault_test_passed;
   bool cross_stack_test;
+  bool own_alias_test;
+  vaddr_t virtual_stack;
+  paddr_t physical_stack;
+  el0_stack_probe_t stack_mapping;
   bool address_space_ok;
   uint64_t address_space_root;
   uint64_t entered_root;  // Actual TTBR0 read at the assembly entry callback.
@@ -63,6 +69,7 @@ typedef struct {
 bool el0_context_start(unsigned int id);
 bool el0_context_start_fault_test(unsigned int id);
 bool el0_context_start_stack_fault_test(unsigned int id);
+bool el0_context_start_alias_fault_test(unsigned int id);
 bool el0_context_resume(unsigned int id);
 bool el0_context_reset(unsigned int id);
 bool el0_context_get_info(unsigned int id, el0_context_info_t *info);

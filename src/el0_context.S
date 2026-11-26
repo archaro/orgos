@@ -116,19 +116,9 @@ el0_context_fault_read:
   b el0_context_exit
 
 el0_context_stack_access:
-  // Derive the peer's fixed page from our SP, using only scratch x3.
-  adrp x3, __el0_stack1_bottom
-  add x3, x3, :lo12:__el0_stack1_bottom
-  cmp sp, x3
-  b.lo 1f
-  adrp x3, __el0_stack_bottom
-  add x3, x3, :lo12:__el0_stack_bottom
-1:
-  // CMP changed NZCV. Restore the diagnostic flags and scratch x4
-  // from the snapshot taken immediately after the previous yield.
-  mov x4, #0xa0000000
-  msr nzcv, x4
-  ldr x4, [sp, #32]
+  // EL1 seeded this known target in our private backing before entry.
+  // SP is a common VA now: it must never be used to infer context identity.
+  ldr x3, [sp, #EL0_CONTEXT_TARGET_OFFSET]
 .global el0_context_stack_read
 el0_context_stack_read:
   ldr x3, [x3]

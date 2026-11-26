@@ -95,9 +95,9 @@ static uint64_t l2_pcie[MMU_TABLE_ENTRIES] __attribute__((aligned(4096)));
 static uint64_t l3_kernel[MMU_TABLE_ENTRIES] __attribute__((aligned(4096)));
 static mmu_table_ref_t boot_tables[MMU_BOOT_TABLE_COUNT];
 static mmu_address_space_t kernel_space;
-static uint64_t context_pages[2][MMU_BOOT_TABLE_COUNT][MMU_TABLE_ENTRIES]
+static uint64_t context_pages[2][MMU_CONTEXT_TABLE_COUNT][MMU_TABLE_ENTRIES]
     __attribute__((aligned(4096)));
-static mmu_table_ref_t context_tables[2][MMU_BOOT_TABLE_COUNT];
+static mmu_table_ref_t context_tables[2][MMU_CONTEXT_TABLE_COUNT];
 static mmu_address_space_t context_spaces[2];
 static mmu_activation_t environments;
 static mmu_boot_layout_t kernel_layout;
@@ -150,10 +150,11 @@ static bool build_initial_tables(const physmem_map_t *memory) {
                        &mapped_ram_bytes))
     return false;
   for (unsigned int id = 0; id < 2U; id++) {
-    for (unsigned int t = 0; t < MMU_BOOT_TABLE_COUNT; t++) {
+    for (unsigned int t = 0; t < MMU_CONTEXT_TABLE_COUNT; t++) {
       uint64_t *entries = context_pages[id][t];
       context_tables[id][t] = (mmu_table_ref_t){
-        entries, (uintptr_t)entries, t == 0U ? 1U : t == 10U ? 3U : 2U
+        entries, (uintptr_t)entries,
+        t == 0U ? 1U : (t == 10U || t == 12U) ? 3U : 2U
       };
     }
     if (!mmu_context_build(&context_spaces[id], context_tables[id], memory,
@@ -353,4 +354,27 @@ bool mmu_restore_kernel_space(void) {
   if (environments.active == &kernel_space)
     return mmu_activation_hw_matches(kernel_space.root_physical);
   return mmu_activate_address_space(&kernel_space);
+}
+
+// Query EL0 AP permissions under the actual selected root. AT does not
+// access target data. It deliberately returns numbers, never a CPU pointer.
+// Arm DDI0601: AT S1E0R/S1E0W and PAR_EL1 (see the H2.6c guide).
+bool mmu_translate_user(uint64_t address, bool write,
+    mmu_translation_t *result) {
+  if (!result || !mmu_enabled())
+    return false;
+  uint64_t par;
+  if (write)
+    __asm__ volatile("at s1e0w, %1\nisb\nmrs %0, par_el1"
+        : "=r"(par) : "r"(address) : "memory");
+  else
+    __asm__ volatile("at s1e0r, %1\nisb\nmrs %0, par_el1"
+        : "=r"(par) : "r"(address) : "memory");
+  *result = (mmu_translation_t){
+    .virtual_address = address, .par = par, .fault = (par & 1U) != 0,
+    .fault_status = (par & 1U) ? (uint8_t)((par >> 1) & 0x3fU) : 0,
+    .physical_address = (par & 1U) ? 0 :
+        (par & 0x000FFFFFFFFFF000ULL) | (address & 4095U)
+  };
+  return true;
 }

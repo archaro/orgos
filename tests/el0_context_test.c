@@ -51,6 +51,41 @@ bool mmu_restore_kernel_space(void) {
   return true;
 }
 
+static unsigned int bad_probe;
+static paddr_t current_backing(void) {
+  assert(selected_root != test_spaces[0].root_physical);
+  return selected_root == test_spaces[1].root_physical ? 0x101000 : 0x102000;
+}
+bool mmu_translate_user(uint64_t va, bool write, mmu_translation_t *out) {
+  if (bad_probe == 7)
+    return false;
+  bool stack = va >= EL0_STACK_VA && va < EL0_STACK_TOP;
+  *out = (mmu_translation_t){.virtual_address = va,
+    .fault = !stack, .fault_status = stack ? 0 : 0xf,
+    .physical_address = stack ? current_backing() + va - EL0_STACK_VA : 0};
+  if (bad_probe == 1 && stack)
+    out->physical_address += 4096;
+  if (bad_probe == 2 && stack && write)
+    out->fault = true;
+  if ((bad_probe == 3 && !stack) || (bad_probe == 8 && !stack && write))
+    out->fault = false;
+  if (bad_probe == 5 && !stack)
+    out->fault_status = 7;
+  if (bad_probe == 6 && va == EL0_STACK_TOP - 1)
+    out->physical_address--;
+  return true;
+}
+bool mmu_inspect(uint64_t va, mmu_descriptor_info_t *out) {
+  bool stack = va == EL0_STACK_VA;
+  *out = (mmu_descriptor_info_t){.kind = MMU_DESC_PAGE,
+    .physical_address = stack ? current_backing() : va,
+    .access_permissions = stack ? 1 : 0, .pxn = true, .uxn = true,
+    .access_flag = true, .attr_index = 2, .leaf_descriptor = 3ULL << 8};
+  if (bad_probe == 4)
+    out->uxn = false;
+  return true;
+}
+
 static char output[8192];
 static size_t output_length;
 
@@ -154,11 +189,12 @@ uint64_t el0_context_switch(void) {
     goto dispatch_frame;
   }
 
-  uintptr_t top = 0x102000U + id * 4096U;
+  uintptr_t top = EL0_STACK_TOP;
   uintptr_t sp = top - EL0_CONTEXT_STACK_BYTES;
-  uint64_t *stack = (uint64_t *)sp;
+  uint64_t *stack = (uint64_t *)(uintptr_t)(
+      0x102000U + id * 4096U - EL0_CONTEXT_STACK_BYTES);
   if (ctx->info.resumptions == 1U) {
-    assert(frame.elr == (ctx->info.cross_stack_test ? 0x100020U :
+    assert(frame.elr == ((ctx->info.cross_stack_test || ctx->info.own_alias_test) ? 0x100020U :
         ctx->info.fault_test ? 0x100010U : 0x100000U));
     assert(frame.sp_el0 == top);
     assert(frame.x[0] == 0 && frame.x[1] == 0);
@@ -169,7 +205,7 @@ uint64_t el0_context_switch(void) {
     for (unsigned int i = 2; i < 31; i++)
       assert(frame.x[i] == 0x9abc567812340100ULL +
           ((uint64_t)id << 32) + i);
-    stack[36] = ctx->info.cross_stack_test ? 2 : ctx->info.fault_test ? 1 : 0;
+    stack[36] = (ctx->info.cross_stack_test || ctx->info.own_alias_test) ? 2 : ctx->info.fault_test ? 1 : 0;
   } else {
     assert(frame.elr == 0x100080U && frame.sp_el0 == sp);
     assert(frame.x[0] == (ctx->info.resumptions - 1U) * 7U);
@@ -191,10 +227,14 @@ uint64_t el0_context_switch(void) {
       frame.esr = (0x15ULL << 26) | (1ULL << 25) | EL0_CONTEXT_EXIT_SVC;
       frame.elr = 0x100100U;
     } else {
-      uintptr_t target = ctx->info.cross_stack_test ?
-          0x101000U + (1U - id) * 4096U : (uintptr_t)&el0_test_kernel_canary;
+      bool alias = ctx->info.cross_stack_test || ctx->info.own_alias_test;
+      uintptr_t target = alias ? 0x101000U +
+          (ctx->info.cross_stack_test ? 1U - id : id) * 4096U :
+          (uintptr_t)&el0_test_kernel_canary;
+      if (alias)
+        assert(stack[EL0_CONTEXT_TARGET_OFFSET / 8] == target);
       frame.x[3] = target;
-      frame.elr = (ctx->info.cross_stack_test ? 0x100098U : 0x100090U) +
+      frame.elr = (alias ? 0x100098U : 0x100090U) +
           fault_pc_delta;
       frame.esr = 0x9200000fU ^ fault_esr_xor;
       frame.far = target + fault_far_delta;
@@ -333,7 +373,7 @@ static void run_two_context_tests(void) {
   check_operation(1, 2, false);
   check_operation(0, 0, false);
   check_operation(1, 0, false);
-  assert(contexts[0].saved.sp_el0 != contexts[1].saved.sp_el0);
+  assert(contexts[0].saved.sp_el0 == contexts[1].saved.sp_el0);
   assert(contexts[0].saved.x[2] != contexts[1].saved.x[2]);
   const unsigned int order[] = {0, 1, 1, 0, 0, 1, 1, 1, 0, 0, 1, 0};
   uint64_t counts[2] = {0};
@@ -349,7 +389,11 @@ static void run_two_context_tests(void) {
       assert(result.stack_ok && result.context_failures == 0);
       assert(result.kernel_failures == 0);
       if (counts[slot]) {
-        assert(result.address_space_ok);
+        assert(result.address_space_ok && result.stack_mapping.valid);
+        assert(result.virtual_stack == EL0_STACK_VA);
+        assert(result.physical_stack == 0x101000U + slot * 4096U);
+        assert(result.stack_mapping.read_physical == result.physical_stack);
+        assert(result.stack_mapping.write_physical == result.physical_stack);
         assert(result.entered_root == test_spaces[slot + 1].root_physical);
         assert(result.trapped_root == result.entered_root);
         assert(result.restored_root == test_spaces[0].root_physical);
@@ -391,7 +435,7 @@ static void run_two_context_tests(void) {
     assert(contexts[bad].info.fault_test_passed);
     el0_context_fault_t record;
     assert(el0_context_get_fault(bad, &record) && record.context_id == bad);
-    assert(record.frame.sp_el0 == 0x101ed0U + bad * 4096U);
+    assert(record.frame.sp_el0 == EL0_STACK_TOP - EL0_CONTEXT_STACK_BYTES);
     assert(!el0_context_get_fault(good, &record));
     assert(!el0_context_resume(bad) && !el0_context_start(bad));
     check_operation(good, 1, false);
@@ -782,17 +826,17 @@ int main(void) {
     assert(el0_context_resume(bad));
     check_operation(good, 1, false);
     unsigned char peer_stack[4096];
-    memcpy(peer_stack, (void *)(uintptr_t)stack_bottom(good), sizeof(peer_stack));
+    memcpy(peer_stack, (void *)(uintptr_t)stack_kernel_bottom(good), sizeof(peer_stack));
     el0_slot_t peer = contexts[good];
     assert(el0_context_resume(bad));
     assert(contexts[bad].info.fault_test_passed);
     assert(contexts[bad].info.state == EL0_CONTEXT_FAULTED);
-    assert(memcmp(peer_stack, (void *)(uintptr_t)stack_bottom(good),
+    assert(memcmp(peer_stack, (void *)(uintptr_t)stack_kernel_bottom(good),
                   sizeof(peer_stack)) == 0);
     assert(memcmp(&peer, &contexts[good], sizeof(peer)) == 0);
     el0_context_fault_t record;
     assert(el0_context_get_fault(bad, &record));
-    assert(record.frame.far == stack_bottom(good));
+    assert(record.frame.far == stack_kernel_bottom(good));
     assert(record.frame.elr == 0x100098U && record.frame.esr == 0x9200000fU);
     assert(!el0_context_resume(bad));
     command(bad ? "status 1" : "status 0");
@@ -825,6 +869,26 @@ int main(void) {
     command(bad ? "status 1" : "status 0");
     assert(strstr(output, "expected fault missing"));
   }
+  for (unsigned int id = 0; id < 2; id++) {
+    assert(el0_context_reset(id));
+    command(id ? "start 1 alias" : "start 0 alias");
+    assert(contexts[id].info.own_alias_test);
+    assert(el0_context_resume(id) && el0_context_resume(id));
+    assert(contexts[id].info.fault_test_passed);
+    assert(contexts[id].saved.far == 0x101000U + id * 4096U);
+    command(id ? "status 1" : "status 0");
+    assert(strstr(output, "EL0 physical-alias test: PASS"));
+  }
+  // Translation/permission probe failures restore K without launching EL0.
+  for (bad_probe = 1; bad_probe <= 8; bad_probe++) {
+    reset_start();
+    unsigned int old_switches = switches;
+    assert(!el0_context_resume(0));
+    assert(!contexts[0].info.stack_mapping.valid);
+    assert(contexts[0].info.state == EL0_CONTEXT_READY);
+    assert(switches == old_switches && selected_root == test_spaces[0].root_physical);
+  }
+  bad_probe = 0;
   run_two_context_tests();
   assert(munmap(stack_page, 8192U) == 0);
   puts("EL0 context tests: PASS");

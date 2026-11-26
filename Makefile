@@ -83,11 +83,12 @@ check: | $(OBJ_DIR)
 	$(OBJ_DIR)/mmu_tables_test
 	$(HOSTCC) $(HOSTCFLAGS) -fno-pie -no-pie -iquote $(SRC_DIR) \
 		tests/el0_context_test.c tests/el0_context_symbols.S \
+		$(SRC_DIR)/el0_stack.c \
 		$(SRC_DIR)/exception_dispatch.c \
 		-o $(OBJ_DIR)/el0_context_test
 	$(OBJ_DIR)/el0_context_test
 	$(HOSTCC) $(HOSTCFLAGS) -fno-pie -no-pie -iquote $(SRC_DIR) \
-		tests/el0_test.c $(SRC_DIR)/exception_dispatch.c \
+		tests/el0_test.c $(SRC_DIR)/exception_dispatch.c $(SRC_DIR)/el0_stack.c \
 		-o $(OBJ_DIR)/el0_test
 	$(OBJ_DIR)/el0_test
 	$(HOSTCC) $(HOSTCFLAGS) -iquote $(SRC_DIR) \

@@ -6,6 +6,15 @@
 #define PCIE_START 0x600000000ULL
 #define PCIE_END 0x604000000ULL
 
+_Static_assert((EL0_STACK_VA & (MMU_L1_SIZE - 1U)) == 0,
+               "Diagnostic stack starts a fresh L1 region");
+_Static_assert(EL0_STACK_VA >= RAM_LIMIT &&
+               EL0_STACK_TOP <= (1ULL << MMU_VA_BITS) &&
+               (EL0_STACK_VA >= PCIE_END || EL0_STACK_TOP <= PCIE_START),
+               "Diagnostic stack must be outside RAM and Device windows");
+_Static_assert(EL0_STACK_TOP == EL0_STACK_VA + MMU_PAGE_SIZE,
+               "Diagnostic stack is exactly one page");
+
 static bool range_valid(mmu_boot_range_t range) {
   return range.start <= range.end &&
       ((range.start | range.end) & (MMU_PAGE_SIZE - 1U)) == 0;
@@ -93,14 +102,14 @@ static mmu_mapping_attrs_t low_page_attrs(vaddr_t address,
     attrs.uxn = false;
   } else if (in_range(address, layout->el0_stack[0]) ||
              in_range(address, layout->el0_stack[1])) {
-    if (owner < 0 || in_range(address, layout->el0_stack[owner]))
+    if (owner < 0)
       attrs.ap = 1;
   }
   return attrs;
 }
 
 static bool build(mmu_address_space_t *space,
-    const mmu_table_ref_t tables[MMU_BOOT_TABLE_COUNT],
+    const mmu_table_ref_t *tables,
     const physmem_map_t *memory, const mmu_boot_layout_t *layout,
     uint64_t *mapped_ram_bytes, int owner) {
   uint64_t total;
@@ -109,14 +118,17 @@ static bool build(mmu_address_space_t *space,
       !ram_contains(memory, layout->kernel.start,
                     layout->kernel.end - layout->kernel.start))
     return false;
-  for (unsigned int i = 0; i < MMU_BOOT_TABLE_COUNT; i++) {
-    unsigned int expected_level = i == 0U ? 1U : i == 10U ? 3U : 2U;
+  unsigned int count = owner < 0 ? MMU_BOOT_TABLE_COUNT :
+      MMU_CONTEXT_TABLE_COUNT;
+  for (unsigned int i = 0; i < count; i++) {
+    unsigned int expected_level = i == 0U ? 1U :
+        (i == 10U || i == 12U) ? 3U : 2U;
     if (tables[i].level != expected_level ||
         !ram_contains(memory, tables[i].physical, MMU_PAGE_SIZE))
       return false;
   }
   if (!mmu_space_init(space, MMU_GEOMETRY_4K_36BIT, tables,
-                      MMU_BOOT_TABLE_COUNT, tables[0].physical))
+                      count, tables[0].physical))
     return false;
   // Preserve links to all eight RAM regions, including empty L2 tables.
   for (unsigned int region = 0; region < MMU_BOOT_RAM_REGIONS; region++) {
@@ -152,7 +164,18 @@ static bool build(mmu_address_space_t *space,
                      PERIPHERAL_END - PERIPHERAL_START,
                      MMU_DESC_BLOCK, device) ||
       !mmu_space_map(space, PCIE_START, PCIE_START, PCIE_END - PCIE_START,
-                     MMU_DESC_BLOCK, device) || !mmu_space_seal(space))
+                     MMU_DESC_BLOCK, device))
+    return false;
+  if (owner >= 0) {
+    mmu_mapping_attrs_t user_stack = normal;
+    user_stack.ap = 1;
+    if (!mmu_space_link_table(space, EL0_STACK_VA, 1, tables[11].physical) ||
+        !mmu_space_link_table(space, EL0_STACK_VA, 2, tables[12].physical) ||
+        !mmu_space_map(space, EL0_STACK_VA, layout->el0_stack[owner].start,
+                        MMU_PAGE_SIZE, MMU_DESC_PAGE, user_stack))
+      return false;
+  }
+  if (!mmu_space_seal(space))
     return false;
   *mapped_ram_bytes = total;
   return true;
@@ -166,7 +189,7 @@ bool mmu_boot_build(mmu_address_space_t *space,
 }
 
 bool mmu_context_build(mmu_address_space_t *space,
-    const mmu_table_ref_t tables[MMU_BOOT_TABLE_COUNT],
+    const mmu_table_ref_t tables[MMU_CONTEXT_TABLE_COUNT],
     const physmem_map_t *memory, const mmu_boot_layout_t *layout,
     unsigned int owner) {
   uint64_t mapped;
@@ -174,9 +197,10 @@ bool mmu_context_build(mmu_address_space_t *space,
       build(space, tables, memory, layout, &mapped, (int)owner);
 }
 
-static bool configuration_valid(const mmu_address_space_t *space) {
+static bool configuration_valid(const mmu_address_space_t *space,
+                                unsigned int count) {
   return space && space->tables &&
-      space->table_count == MMU_BOOT_TABLE_COUNT &&
+      space->table_count == count &&
       (space->state == MMU_SPACE_SEALED || space->state == MMU_SPACE_ACTIVE) &&
       space->geometry.va_bits == 36U && space->geometry.pa_bits == 36U &&
       space->geometry.granule_shift == 12U &&
@@ -186,22 +210,29 @@ static bool configuration_valid(const mmu_address_space_t *space) {
 }
 
 // The reference is the immutable, successfully constructed boot hierarchy.
-// Compare every entry, allowing only the peer stack's EL0 AP bit to differ.
+// Compare every entry, allowing only the two privileged stack aliases
+// and the exact, owner-specific non-identity stack mapping to differ.
 // This covers the whole image (PC, vectors, EL1 stack, data and tables),
 // physical RAM and Device windows, not just the next instruction address.
 bool mmu_boot_compatible(const mmu_address_space_t *kernel,
     const mmu_address_space_t *space, const mmu_boot_layout_t *layout,
     int owner) {
-  if (!configuration_valid(kernel) || !configuration_valid(space) ||
-      !layout_valid(layout) || owner < -1 || owner > 1)
+  unsigned int count = owner < 0 ? MMU_BOOT_TABLE_COUNT :
+      MMU_CONTEXT_TABLE_COUNT;
+  if (owner < -1 || owner > 1 ||
+      !configuration_valid(kernel, MMU_BOOT_TABLE_COUNT) ||
+      !configuration_valid(space, count) || !layout_valid(layout))
     return false;
-  for (unsigned int t = 0; t < MMU_BOOT_TABLE_COUNT; t++) {
-    unsigned int level = t == 0U ? 1U : t == 10U ? 3U : 2U;
+  for (unsigned int t = 0; t < count; t++) {
+    unsigned int level = t == 0U ? 1U :
+        (t == 10U || t == 12U) ? 3U : 2U;
     const mmu_table_ref_t *ref = &space->tables[t];
-    const mmu_table_ref_t *base = &kernel->tables[t];
+    const mmu_table_ref_t *base = &kernel->tables[
+        t < MMU_BOOT_TABLE_COUNT ? t : 0];
     uint64_t descriptor;
     if (!ref->entries || !base->entries || ref->level != level ||
-        base->level != level || ((uintptr_t)ref->entries & 4095U) ||
+        (t < MMU_BOOT_TABLE_COUNT && base->level != level) ||
+        ((uintptr_t)ref->entries & 4095U) ||
         ((uintptr_t)base->entries & 4095U) ||
         !mmu_table_descriptor(ref->physical, &descriptor) ||
         !mmu_table_descriptor(base->physical, &descriptor) ||
@@ -211,12 +242,14 @@ bool mmu_boot_compatible(const mmu_address_space_t *kernel,
         base->physical + MMU_PAGE_SIZE > layout->bss.end)
       return false;
     for (unsigned int i = 0; i < MMU_TABLE_ENTRIES; i++) {
-      uint64_t expected = base->entries[i];
+      uint64_t expected = t < MMU_BOOT_TABLE_COUNT ? base->entries[i] : 0;
       if (t == 0U) {
         unsigned int child = i < 8U ? i + 1U : i == 24U ? 9U : 0U;
         uint64_t original = child ? kernel->tables[child].physical | 3U : 0;
         if (expected != original)
           return false;
+        if (owner >= 0 && i == (EL0_STACK_VA >> 30))
+          child = 11U;
         expected = child ? space->tables[child].physical | 3U : 0;
       } else if (t == 1U && i == 0U) {
         if (expected != (kernel->tables[10].physical | 3U))
@@ -231,6 +264,14 @@ bool mmu_boot_compatible(const mmu_address_space_t *kernel,
             !mmu_leaf_descriptor(va, MMU_DESC_PAGE,
                                   low_page_attrs(va, layout, owner),
                                   &expected))
+          return false;
+      } else if (t == 11U && i == 0U) {
+        expected = space->tables[12].physical | 3U;
+      } else if (t == 12U && i == 0U) {
+        mmu_mapping_attrs_t attrs = ram_attrs();
+        attrs.ap = 1;
+        if (!mmu_leaf_descriptor(layout->el0_stack[owner].start,
+                                  MMU_DESC_PAGE, attrs, &expected))
           return false;
       }
       if (ref->entries[i] != expected)

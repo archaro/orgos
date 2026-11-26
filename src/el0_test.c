@@ -9,7 +9,7 @@ extern char __el0_stack1_bottom[], __el0_stack1_top[];
 extern const char el0_test_check_resume[], el0_test_privileged[];
 extern const char el0_test_fault_resume[], el0_test_exit_resume[];
 extern uint64_t el0_test_enter(void);
-extern void el0_test_prepare_stack(void *stack);
+extern void el0_test_prepare_stack(void *kernel_alias, vaddr_t execute_va);
 extern const char el0_test_memory_begin_resume[], el0_test_read_done_resume[];
 extern const char el0_test_write_done_resume[], el0_test_exec_resume[];
 extern const char el0_test_kernel_read[], el0_test_kernel_read_resume[];
@@ -29,7 +29,8 @@ static enum test_stage stage;
 static exception_frame_t *kernel_context;
 static el0_test_result_t report;
 
-// Verify the installed mappings before entering EL0. The three linker-owned
+// Verify the original kernel environment before selecting a user root.
+// Its compatibility mappings remain unchanged. The three linker-owned
 // pages must be identity mapped, cacheable, shareable, and have exact AP/XN
 // permissions. Scan the rest of the low region for accidental EL0 access.
 bool el0_test_mappings_ready(void) {
@@ -79,7 +80,7 @@ static uint64_t context_failures(const exception_frame_t *frame) {
     if (frame->x[i] != expected)
       failures |= 1ULL << i;
   }
-  uint64_t expected_sp = (uintptr_t)__el0_stack_top - 16U;
+  uint64_t expected_sp = EL0_STACK_TOP - 16U;
   if (frame->sp != expected_sp || frame->sp_el0 != expected_sp)
     failures |= 1ULL << 31;
   if ((frame->spsr & 0xf000001fULL) != 0xa0000000ULL)
@@ -100,12 +101,12 @@ static bool svc_at(const exception_frame_t *frame, unsigned int immediate,
 // the lower-EL EC, AArch64 IL, WnR, valid FAR, and no EA/CM/S1PTW.
 // ISV and its optional instruction-syndrome fields are not required.
 static bool memory_fault(exception_frame_t *frame,
-    el0_test_memory_fault_t test, const char *site, const char *resume,
-    uintptr_t target, bool write, bool execute) {
+    el0_test_memory_fault_t test, vaddr_t site, const char *resume,
+    vaddr_t target, bool write, bool execute) {
   uint64_t expected_esr = ((execute ? 0x20ULL : 0x24ULL) << 26) |
       (1ULL << 25) | (write ? 1ULL << 6 : 0) | 0xfU;
   if ((frame->esr & 0xfe0007ffULL) != expected_esr ||
-      frame->far != target || frame->elr != (uintptr_t)site ||
+      frame->far != target || frame->elr != site ||
       frame->x[10] != target ||
       (execute && frame->x[12] != (uintptr_t)resume))
     return false;
@@ -157,7 +158,7 @@ bool el0_test_handle_exception(exception_frame_t *frame) {
   }
 
   if (stage == TEST_READ_ARMED && memory_fault(frame, EL0_TEST_KERNEL_READ,
-      el0_test_kernel_read, el0_test_kernel_read_resume,
+      (uintptr_t)el0_test_kernel_read, el0_test_kernel_read_resume,
       (uintptr_t)&el0_test_kernel_canary, false, false)) {
     stage = TEST_READ_FAULTED;
     return true;
@@ -170,7 +171,7 @@ bool el0_test_handle_exception(exception_frame_t *frame) {
   }
 
   if (stage == TEST_WRITE_ARMED && memory_fault(frame, EL0_TEST_CODE_WRITE,
-      el0_test_code_write, el0_test_code_write_resume,
+      (uintptr_t)el0_test_code_write, el0_test_code_write_resume,
       (uintptr_t)&el0_test_code_canary, true, false)) {
     stage = TEST_WRITE_FAULTED;
     return true;
@@ -185,8 +186,8 @@ bool el0_test_handle_exception(exception_frame_t *frame) {
   // For an instruction abort, ELR identifies the faulting fetch target,
   // not the BR instruction. Only this prepared stack address is owned.
   if (stage == TEST_EXEC_ARMED && memory_fault(frame, EL0_TEST_STACK_EXEC,
-      __el0_stack_bottom, el0_test_exec_resume,
-      (uintptr_t)__el0_stack_bottom, false, true)) {
+      EL0_STACK_VA, el0_test_exec_resume,
+      EL0_STACK_VA, false, true)) {
     stage = TEST_EXEC_FAULTED;
     return true;
   }
@@ -226,11 +227,18 @@ bool el0_test_run(el0_test_result_t *result) {
   if (report.mappings &&
       !mmu_activate_address_space(mmu_context_address_space(0)))
     report.mappings = false;
+  el0_stack_probe_t probe;
+  if (report.mappings && !el0_stack_probe((uintptr_t)__el0_stack_bottom,
+      (uintptr_t)__el0_stack1_bottom, &probe)) {
+    if (!mmu_restore_kernel_space())
+      exception_panic(4, 0, (uintptr_t)el0_test_run, 0, 5);
+    report.mappings = false;
+  }
   if (report.mappings) {
     // This NOLOAD page is reserved with the kernel, not allocated or
     // shared with drivers. Clear it on every serial diagnostic run.
     memset(__el0_stack_bottom, 0, 4096U);
-    el0_test_prepare_stack(__el0_stack_bottom);
+    el0_test_prepare_stack(__el0_stack_bottom, EL0_STACK_VA);
     report.kernel_failures = el0_test_enter();
     if (!mmu_restore_kernel_space())
       exception_panic(4, 0, (uintptr_t)el0_test_run, 0, 5);

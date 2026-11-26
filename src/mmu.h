@@ -47,3 +47,8 @@ bool mmu_activate_address_space(const mmu_address_space_t *space);
 bool mmu_restore_kernel_space(void);
 // Actual TTBR0_EL1, including any unexpected ASID/CnP bits for diagnosis.
 paddr_t mmu_current_root(void);
+
+// Hardware stage-1 EL0 read/write probe in the currently selected space.
+// No target load/store and no conversion of the PA result to a pointer.
+bool mmu_translate_user(uint64_t address, bool write,
+    mmu_translation_t *result);

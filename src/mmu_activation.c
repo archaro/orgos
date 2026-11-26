@@ -11,8 +11,8 @@ static bool metadata_valid(const mmu_activation_t *control, unsigned int i) {
 static bool ownership_distinct(mmu_address_space_t *const spaces[3]) {
   for (unsigned int a = 0; a < 3U; a++) {
     for (unsigned int b = a; b < 3U; b++) {
-      for (unsigned int i = 0; i < MMU_BOOT_TABLE_COUNT; i++) {
-        for (unsigned int j = 0; j < MMU_BOOT_TABLE_COUNT; j++) {
+      for (unsigned int i = 0; i < spaces[a]->table_count; i++) {
+        for (unsigned int j = 0; j < spaces[b]->table_count; j++) {
           if (a == b && i == j)
             continue;
           const mmu_table_ref_t *x = &spaces[a]->tables[i];

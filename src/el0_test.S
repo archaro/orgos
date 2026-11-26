@@ -1,5 +1,6 @@
 // The kernel wrapper and EL0 payload deliberately occupy different pages.
 #include "el0_test.h"
+#include "el0_layout.h"
 #include "exceptions.h"
 #include "exception_frame.inc"
 
@@ -24,7 +25,7 @@ el0_test_enter:
   // Protect ELR/SPSR setup: an IRQ here would overwrite the pending
   // exception-return state. ERET restores the original masks at EL0.
   msr daifset, #0xf
-  ldr x0, =__el0_stack_top
+  ldr x0, =EL0_STACK_TOP
   msr sp_el0, x0
   ldr x0, =el0_test_entry
   msr elr_el1, x0
@@ -104,12 +105,15 @@ el0_test_kernel_resume:
 .global el0_test_prepare_stack
 .type el0_test_prepare_stack, %function
 el0_test_prepare_stack:
-  adr x1, el0_test_stack_instruction
-  ldr w1, [x1]
-  str w1, [x0]
+  // x0 is the trusted kernel alias; x1 is the fixed execution VA.
+  // Arm DDI0601 DC CVAU/IC IVAU: clean via the write alias and invalidate
+  // via the execution VA. The root already maps both to the same PA.
+  adr x2, el0_test_stack_instruction
+  ldr w2, [x2]
+  str w2, [x0]
   dc cvau, x0
   dsb ish
-  ic ivau, x0
+  ic ivau, x1
   dsb ish
   isb
   ret
@@ -202,8 +206,7 @@ el0_test_code_write_resume:
   svc #EL0_TEST_WRITE_DONE_SVC
 .global el0_test_write_done_resume
 el0_test_write_done_resume:
-  adrp x10, __el0_stack_bottom
-  add x10, x10, :lo12:__el0_stack_bottom
+  ldr x10, =EL0_STACK_VA
   adr x12, el0_test_exec_resume
   br x10
 .global el0_test_exec_resume
