@@ -11,6 +11,7 @@ bool mmu_high_address(paddr_t physical, vaddr_t *virtual_address);
 bool mmu_high_build(mmu_address_space_t *space,
     const mmu_table_ref_t tables[MMU_BOOT_TABLE_COUNT],
     const physmem_map_t *memory, const mmu_boot_layout_t *layout);
-// Borrowed static hierarchy for software inspection only. Always SEALED;
-// absent if construction has not completed. Not admitted for activation.
+// Borrowed static hierarchy for inspection while SEALED. Absent before
+// construction or during the explicit temporary higher-half experiment.
+// Never admitted to the TTBR0 activation controller.
 const mmu_address_space_t *mmu_high_address_space(void);

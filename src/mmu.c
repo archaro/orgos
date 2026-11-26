@@ -4,6 +4,7 @@
 #include "mmu.h"
 #include "mmu_boot.h"
 #include "mmu_high.h"
+#include "mmu_high_test.h"
 #include "mmu_activation.h"
 #include "cache.h"
 
@@ -107,6 +108,9 @@ static uint64_t high_pages[MMU_BOOT_TABLE_COUNT][MMU_TABLE_ENTRIES]
     __attribute__((aligned(4096)));
 static mmu_table_ref_t high_tables[MMU_BOOT_TABLE_COUNT];
 static mmu_address_space_t high_space;
+static mmu_high_test_control_t high_experiment;
+extern char mmu_high_probe[], mmu_high_probe_site[], mmu_high_probe_end[];
+extern char mmu_high_call_return[];
 
 extern void mmu_enable_el1(paddr_t root, uint64_t mair, uint64_t tcr);
 extern char __kernel_start[];
@@ -173,7 +177,13 @@ static bool build_initial_tables(const physmem_map_t *memory) {
       entries, (uintptr_t)entries, t == 0U ? 1U : t == 10U ? 3U : 2U
     };
   }
-  return mmu_high_build(&high_space, high_tables, memory, &kernel_layout);
+  if (!mmu_high_build(&high_space, high_tables, memory, &kernel_layout))
+    return false;
+  mmu_high_code_t probe = {(uintptr_t)mmu_high_probe,
+    (uintptr_t)mmu_high_probe_site, (uintptr_t)mmu_high_probe_end,
+    (uintptr_t)mmu_high_call_return};
+  return mmu_high_test_admit(&high_experiment, &kernel_space, &high_space,
+                             &kernel_layout, probe);
 }
 
 // Ask the AArch64 MMU to translate a virtual
@@ -393,4 +403,8 @@ bool mmu_translate_user(uint64_t address, bool write,
 
 const mmu_address_space_t *mmu_high_address_space(void) {
   return high_space.state == MMU_SPACE_SEALED ? &high_space : NULL;
+}
+
+bool mmu_high_test(mmu_high_test_result_t *result) {
+  return mmu_high_test_run(&high_experiment, result);
 }

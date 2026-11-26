@@ -43,6 +43,15 @@ __asm__(".global high_test_text_start\n.set high_test_text_start, 0x80000\n"
 static char output[8192];
 static size_t written;
 static unsigned int register_reads;
+static unsigned int execution_requests;
+bool mmu_high_test(mmu_high_test_result_t *r) {
+  execution_requests++;
+  *r = (mmu_high_test_result_t){.passed = true, .validated = true,
+    .activated = true, .restored = true, .masks_restored = true,
+    .physical_verified = true, .observed_physical = 0x8100c, .status = "PASS",
+    .high = {.result = 42, .observed_pc = MMU_TTBR1_BASE + 0x8100c}};
+  return true;
+}
 const mmu_address_space_t *mmu_high_address_space(void) { return &spaces[1]; }
 void mmu_get_info(mmu_info_t *info) {
   register_reads++;
@@ -230,6 +239,16 @@ int main(void) {
   cmd_kmap("activate");
   assert(strstr(output, "Usage: kmap") && register_reads == 4);
   assert(spaces[1].state == MMU_SPACE_SEALED);
+  assert(execution_requests == 0);
+  written = 0;
+  cmd_kmap("test extra");
+  assert(strstr(output, "Usage: kmap") && execution_requests == 0);
+  written = 0;
+  cmd_kmap("test");
+  assert(execution_requests == 1 && register_reads == 4);
+  assert(strstr(output, "Higher-half execution test: PASS"));
+  assert(strstr(output, "Calculation: 42 (expected 42)"));
+  assert(strstr(output, "Translation environment: RESTORED"));
   puts("Higher-half inactive geometry, policy and inspection: PASS");
   return 0;
 }

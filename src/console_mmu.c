@@ -3,6 +3,7 @@
 #include "console_commands.h"
 #include "mmu.h"
 #include "mmu_high.h"
+#include "mmu_high_test.h"
 
 extern char __text_start[], __rodata_start[], __data_start[], __bss_start[];
 extern char __stack_bottom[], exception_vectors[];
@@ -35,9 +36,57 @@ static bool sample(const mmu_address_space_t *space, const char *name,
       ((info.leaf_descriptor >> 8) & 3U) == (attribute == 0U ? 0U : 3U);
 }
 
+static void run_high_test(void) {
+  mmu_high_test_result_t r;
+  bool pass = mmu_high_test(&r);
+  console_printf("Higher-half execution test: %s\n", pass ? "PASS" : "FAIL");
+  console_printf("  Status: %s\n", r.status);
+  console_printf("  Hierarchy validation: %s\n", r.validated ? "PASS" : "FAIL");
+  hex_value("Original TCR_EL1", r.before.tcr);
+  hex_value("Original TTBR0_EL1", r.before.ttbr0);
+  hex_value("Original TTBR1_EL1", r.before.ttbr1);
+  hex_value("TTBR1 root PA", r.root);
+  hex_value("High entry VA", r.high_entry);
+  hex_value("Expected observed VA", r.high_site);
+  hex_value("Expected code PA", r.expected_physical);
+  if (r.validated) {
+    hex_value("Low baseline PC", r.low.observed_pc);
+    hex_value("Low baseline failures", r.low.failures);
+  }
+  if (r.activated) {
+    hex_value("Enabled TCR_EL1", r.enabled.tcr);
+    hex_value("Observed high PC", r.high.observed_pc);
+    if (r.physical_verified)
+      hex_value("Observed code PA", r.observed_physical);
+    else
+      console_puts("  Observed code PA: NOT VERIFIED\n");
+    console_printf("  Calculation: %llu (expected 42)\n",
+        (unsigned long long)r.high.result);
+    hex_value("Probe SP", r.high.observed_sp);
+    hex_value("Low return PC", r.high.low_return);
+    hex_value("Register/stack failures", r.high.failures);
+    hex_value("Restored TCR_EL1", r.after.tcr);
+    hex_value("Restored TTBR0_EL1", r.after.ttbr0);
+    hex_value("Restored TTBR1_EL1", r.after.ttbr1);
+  }
+  console_printf("  Translation environment: %s\n", !r.activated ?
+      "NOT CHANGED" : r.restored ? "RESTORED" : "NOT RESTORED");
+  hex_value("Original DAIF", r.original_daif);
+  hex_value("Final DAIF", r.final_daif);
+  console_printf("  Exception masks restored: %s\n",
+      r.masks_restored ? "YES" : "NO");
+}
+
 void cmd_kmap(const char *args) {
+  if (console_arg_word(&args, "test")) {
+    if (console_arg_end(args))
+      run_high_test();
+    else
+      console_puts("Usage: kmap [test]\n");
+    return;
+  }
   if (!console_arg_end(args)) {
-    console_puts("Usage: kmap\n");
+    console_puts("Usage: kmap [test]\n");
     return;
   }
   const mmu_address_space_t *space = mmu_high_address_space();
