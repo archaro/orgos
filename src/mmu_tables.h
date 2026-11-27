@@ -17,7 +17,7 @@
 #define MMU_TCR_4K_36BIT (28ULL | (1ULL << 8) | (1ULL << 10) | \
                         (3ULL << 12) | (1ULL << 23) | (1ULL << 32))
 
-// Metadata for an inactive proposal, never written by table construction.
+// Dual-region runtime configuration. Table construction never writes it.
 #define MMU_TCR_DUAL_4K \
     ((MMU_TCR_4K_36BIT & ~(1ULL << 23)) | (25ULL << 16) | \
     (1ULL << 24) | (1ULL << 26) | (3ULL << 28) | (2ULL << 30))
@@ -95,6 +95,9 @@ typedef enum {
 typedef struct {
   mmu_geometry_t geometry;
   uint64_t mair;
+  // Construction profile: lower-only base for TTBR0 objects, dual TCR
+  // for the upper object. Live activation layers the pinned TTBR1 fields
+  // over the lower profile; selecting TTBR0 never writes this register.
   uint64_t tcr;
   paddr_t root_physical;
   const mmu_table_ref_t *tables;

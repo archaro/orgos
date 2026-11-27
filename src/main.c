@@ -399,7 +399,7 @@ void main(void) {
   console_puts("Initialising MMU... ");
   if (!memory_ok || !mmu_init(physmem_get_map()))
     boot_halt("memory information or MMU");
-  console_puts("OK.\n");
+  console_puts("OK (persistent TTBR1; kernel executes low).\n");
 
   // Now we have the physical memory map and the MMU is configured,
   // it is time to initialise the physical page allocator.

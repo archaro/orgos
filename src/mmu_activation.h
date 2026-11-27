@@ -15,7 +15,8 @@ typedef struct {
   mmu_address_space_t *active;
 } mmu_activation_t;
 
-// Kernel is already enabled/ACTIVE; contexts must be SEALED. Rejects
+// Kernel and persistent TTBR1 are already enabled; contexts are SEALED.
+// The hardware boundary checks the exact pinned dual regime. Rejects
 // overlapping ownership. No hardware writes or table edits on admission.
 bool mmu_activation_init(mmu_activation_t *activation,
     mmu_address_space_t *kernel, mmu_address_space_t *context0,
@@ -32,3 +33,5 @@ uint64_t mmu_activation_lock(void);
 void mmu_activation_unlock(uint64_t daif);
 bool mmu_activation_hw_matches(paddr_t root);
 void mmu_replace_ttbr0(paddr_t root);
+// A changed regime after a root write cannot return as a rejected request.
+__attribute__((noreturn)) void mmu_activation_fatal(void);

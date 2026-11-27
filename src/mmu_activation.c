@@ -75,6 +75,8 @@ bool mmu_activation_select(mmu_activation_t *control,
   valid = valid && ownership_distinct(control->spaces);
   if (valid) {
     mmu_replace_ttbr0(control->roots[target]);
+    if (!mmu_activation_hw_matches(control->roots[target]))
+      mmu_activation_fatal();
     control->active->state = MMU_SPACE_SEALED;
     space->state = MMU_SPACE_ACTIVE;
     control->active = space;

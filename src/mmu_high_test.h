@@ -19,7 +19,7 @@ typedef struct {
 
 typedef struct {
   bool validated, activated, restored, masks_restored, passed;
-  bool physical_verified;
+  bool physical_verified, persistent, already_active, preserved;
   const char *status;
   paddr_t root, expected_physical, observed_physical;
   vaddr_t high_entry, high_site;
@@ -28,12 +28,13 @@ typedef struct {
   mmu_high_probe_result_t low, high;
 } mmu_high_test_result_t;
 
-// A single static experiment, not an address-space activation service.
+// One static higher-half owner, shared by boot activation and diagnostics.
 // The 44 KiB exact snapshot belongs in BSS, never on the 16 KiB EL1 stack.
 // Supply a zero-initialised, exclusive controller disjoint from the table
 // pages and metadata. All referenced objects must outlive the controller.
 typedef struct {
-  bool admitted, busy;
+  bool admitted, busy, persistent;
+  uint64_t live_sctlr, live_vbar;
   const mmu_address_space_t *kernel;
   mmu_address_space_t *higher;
   const mmu_table_ref_t *registry;
@@ -50,10 +51,18 @@ bool mmu_high_test_admit(mmu_high_test_control_t *control,
     const mmu_boot_layout_t *layout, mmu_high_code_t code);
 bool mmu_high_test_run(mmu_high_test_control_t *control,
                        mmu_high_test_result_t *result);
+// Boot-only persistent enablement, including the execution proof. An
+// already-active owner is revalidated/probed without register writes.
+// No teardown API: tables and registrations have kernel lifetime.
+bool mmu_high_enable(mmu_high_test_control_t *control);
+// Pure live-regime check used by TTBR0 preflight and post-write checks.
+// Accepts a context TTBR0; the lower controller validates that root.
+bool mmu_high_persistent_matches(const mmu_high_test_control_t *control,
+    const mmu_high_hw_state_t *state);
 // Runtime wrapper bound to the one statically owned hierarchy.
 bool mmu_high_test(mmu_high_test_result_t *result);
 
-// Private instrumentable hardware boundary, used only by this experiment.
+// Private instrumentable hardware boundary for this static upper owner.
 typedef enum {
   MMU_HIGH_DSB, MMU_HIGH_ISB, MMU_HIGH_TLBI,
   MMU_HIGH_WRITE_TTBR1, MMU_HIGH_WRITE_TCR

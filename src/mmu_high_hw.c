@@ -31,7 +31,7 @@ void mmu_high_hw_read(mmu_high_hw_state_t *s) {
 }
 
 // Arm A72 TRM 4.3.41/4.3.46 and Arm 101811, TLBs and Changing translations.
-// Operation order is owned by the tested, experiment-only controller.
+// Operation order is owned by the tested higher-half owner.
 // No TTBR0/MAIR/SCTLR/VBAR writes and no instruction-cache invalidations.
 void mmu_high_hw_operation(mmu_high_operation_t operation, uint64_t value) {
   switch (operation) {
@@ -57,7 +57,7 @@ bool mmu_high_hw_translate(vaddr_t address, bool write,
 
 void mmu_high_hw_fatal(const char *reason) {
   // These are kernel invariant failures, never recoverable EL0 traps.
-  console_printf("TTBR1 experiment fatal: %s\n", reason);
+  console_printf("TTBR1 kernel mapping fatal: %s\n", reason);
   uint64_t pc;
   __asm__ volatile("adr %0, ." : "=r"(pc));
   exception_panic(4, 0, pc, 0, 5);

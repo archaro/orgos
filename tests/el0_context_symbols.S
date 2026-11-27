@@ -2,13 +2,13 @@
 // in a separate object so native PC-relative relocations are resolved by
 // the linker, as they are for the real kernel's linker-defined symbols.
 .global __el0_stack_bottom
-.set __el0_stack_bottom, 0x101000
+.set __el0_stack_bottom, 0x1b4000
 .global __el0_stack_top
-.set __el0_stack_top, 0x102000
+.set __el0_stack_top, 0x1b5000
 .global __el0_stack1_bottom
-.set __el0_stack1_bottom, 0x102000
+.set __el0_stack1_bottom, 0x1b5000
 .global __el0_stack1_top
-.set __el0_stack1_top, 0x103000
+.set __el0_stack1_top, 0x1b6000
 .global el0_context_program
 .set el0_context_program, 0x100000
 .global el0_context_fault_program

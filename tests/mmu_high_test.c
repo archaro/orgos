@@ -44,19 +44,21 @@ static char output[8192];
 static size_t written;
 static unsigned int register_reads;
 static unsigned int execution_requests;
+static bool persistent;
 bool mmu_high_test(mmu_high_test_result_t *r) {
   execution_requests++;
   *r = (mmu_high_test_result_t){.passed = true, .validated = true,
     .activated = true, .restored = true, .masks_restored = true,
     .physical_verified = true, .observed_physical = 0x8100c, .status = "PASS",
     .high = {.result = 42, .observed_pc = MMU_TTBR1_BASE + 0x8100c}};
+  r->persistent = r->already_active = r->preserved = persistent;
   return true;
 }
 const mmu_address_space_t *mmu_high_address_space(void) { return &spaces[1]; }
 void mmu_get_info(mmu_info_t *info) {
   register_reads++;
-  *info = (mmu_info_t){.ttbr0 = 0x190000, .ttbr1 = 0,
-    .mair = MMU_MAIR_DEVICE_NC_WB, .tcr = MMU_TCR_4K_36BIT,
+  *info = (mmu_info_t){.ttbr0 = 0x190000, .ttbr1 = persistent ? spaces[1].root_physical : 0,
+    .mair = MMU_MAIR_DEVICE_NC_WB, .tcr = persistent ? MMU_TCR_DUAL_4K : MMU_TCR_4K_36BIT,
     .sctlr = 0x81005};
 }
 void console_printf(const char *fmt, ...) {
@@ -249,6 +251,22 @@ int main(void) {
   assert(strstr(output, "Higher-half execution test: PASS"));
   assert(strstr(output, "Calculation: 42 (expected 42)"));
   assert(strstr(output, "Translation environment: RESTORED"));
-  puts("Higher-half inactive geometry, policy and inspection: PASS");
+  persistent = true;
+  spaces[1].state = MMU_SPACE_ACTIVE;
+  written = 0;
+  cmd_kmap("");
+  assert(strstr(output, "State: ACTIVE; persistent"));
+  assert(strstr(output, "Live TTBR1 walks: ENABLED"));
+  assert(strstr(output, "Live hierarchy matches: YES"));
+  assert(strstr(output, "Samples: PASS"));
+  assert(strstr(output, "Live regime unchanged: YES"));
+  assert(execution_requests == 1);
+  written = 0;
+  cmd_kmap("test");
+  assert(strstr(output, "Mode: PERSISTENT (already enabled)"));
+  assert(strstr(output, "Higher-half execution test: PASS"));
+  assert(strstr(output, "PRESERVED (TTBR1 remains enabled)"));
+  assert(execution_requests == 2);
+  puts("Higher-half geometry, policy and active/inactive inspection: PASS");
   return 0;
 }

@@ -3,11 +3,14 @@
 #include <stdio.h>
 #include <string.h>
 #include "mmu_high_test.h"
+#include "mmu_activation.h"
 
-static uint64_t pages[2][11][512] __attribute__((aligned(4096)));
-static mmu_table_ref_t tables[2][11];
-static mmu_address_space_t spaces[2];
+static uint64_t pages[4][13][512] __attribute__((aligned(4096)));
+static mmu_table_ref_t tables[4][13];
+static mmu_address_space_t spaces[4];
 static mmu_high_test_control_t control;
+static mmu_activation_t lower;
+static unsigned int root_writes;
 static mmu_high_hw_state_t hw;
 static mmu_high_test_result_t result;
 static uint64_t daif;
@@ -104,7 +107,9 @@ void mmu_high_call(vaddr_t entry, mmu_high_probe_result_t *out) {
     assert(hw.tcr == MMU_TCR_DUAL_4K && hw.ttbr1 == control.root);
     assert(control.higher->state == MMU_SPACE_ACTIVE);
   } else {
-    assert(operation_count == 0 && hw.tcr == MMU_TCR_4K_36BIT);
+    assert(hw.ttbr0 == control.kernel_root);
+    assert(control.persistent ? hw.tcr == MMU_TCR_DUAL_4K :
+        operation_count == 0 && hw.tcr == MMU_TCR_4K_36BIT);
   }
   calls[high]++;
   *out = (mmu_high_probe_result_t){.result = 42,
@@ -134,21 +139,45 @@ __attribute__((noreturn)) void mmu_high_hw_fatal(const char *reason) {
   longjmp(fatal_return, 1);
 }
 
+uint64_t mmu_activation_lock(void) { return mmu_high_hw_lock(); }
+void mmu_activation_unlock(uint64_t saved) { mmu_high_hw_unlock(saved); }
+bool mmu_activation_hw_matches(paddr_t root) {
+  return hw.ttbr0 == root && mmu_high_persistent_matches(&control, &hw);
+}
+void mmu_replace_ttbr0(paddr_t root) {
+  assert(locked && daif == 0x3c0);
+  hw.ttbr0 = root;
+  root_writes++;
+  if (mutation == 4)
+    hw.ttbr1 ^= 4096;
+  if (mutation == 5)
+    hw.tcr ^= 1ULL << 23;
+}
+__attribute__((noreturn)) void mmu_activation_fatal(void) {
+  mmu_high_hw_fatal("TTBR0 post-write regime mismatch");
+}
+
 static void reset(void) {
   // A fresh fixture models a cold boot after any deliberately fatal test.
   memset(spaces, 0, sizeof(spaces));
   memset(&control, 0, sizeof(control));
-  for (unsigned int s = 0; s < 2; s++) {
-    for (unsigned int t = 0; t < 11; t++)
+  for (unsigned int s = 0; s < 4; s++) {
+    for (unsigned int t = 0; t < (s < 2 ? 11U : 13U); t++)
       tables[s][t] = (mmu_table_ref_t){pages[s][t],
-        0x100000 + (s * 11 + t) * 4096, t == 0 ? 1 : t == 10 ? 3 : 2};
-    if (s)
+        0x100000 + (s * 13 + t) * 4096,
+        t == 0 ? 1 : (t == 10 || t == 12) ? 3 : 2};
+    if (s == 1)
       assert(mmu_high_build(&spaces[s], tables[s], &memory, &layout));
+    else if (s >= 2)
+      assert(mmu_context_build(&spaces[s], tables[s], &memory,
+                               &layout, s - 2));
     else {
       uint64_t mapped;
       assert(mmu_boot_build(&spaces[s], tables[s], &memory, &layout, &mapped));
     }
   }
+  lower = (mmu_activation_t){0};
+  root_writes = 0;
   operation_count = locks = unlocks = calls[0] = calls[1] = 0;
   bad_probe = bad_baseline = mutation = restore_error = 0;
   bad_unlock = bad_high_read = bad_high_write = false;
@@ -202,6 +231,114 @@ static void expect_fatal(void) {
     assert(!"invalid architecture state returned to foreground");
   }
   assert(fatal_reason && locked && daif == 0x3c0);
+}
+
+static void persistent(void) {
+  reset();
+  assert(mmu_high_enable(&control));
+  assert(control.persistent && spaces[1].state == MMU_SPACE_ACTIVE);
+  assert(hw.tcr == MMU_TCR_DUAL_4K && hw.ttbr1 == control.root);
+  assert(hw.ttbr0 == control.kernel_root && daif == 0x340 && !locked);
+  assert(operation_count == 8); // Exact enable half of the H2.6e sequence.
+  const mmu_high_operation_t enable[] = {
+    MMU_HIGH_DSB, MMU_HIGH_WRITE_TTBR1, MMU_HIGH_ISB, MMU_HIGH_WRITE_TCR,
+    MMU_HIGH_ISB, MMU_HIGH_TLBI, MMU_HIGH_DSB, MMU_HIGH_ISB
+  };
+  for (unsigned int i = 0; i < 8; i++)
+    assert(operations[i].op == enable[i]);
+  assert(operations[1].value == control.root);
+  assert(operations[3].value == MMU_TCR_DUAL_4K);
+  assert(mmu_high_persistent_matches(&control, &hw));
+
+  // The live upper object cannot be edited or reinitialised by any
+  // inactive construction API. Compare all pages, including empty slots.
+  static uint64_t saved[13][512];
+  memcpy(saved, pages[1], sizeof(saved));
+  mmu_mapping_attrs_t attrs = {2, 0, 3, true, true, true};
+  assert(!mmu_space_map(&spaces[1], MMU_TTBR1_BASE + 0x200000000ULL,
+                        0x200000000ULL, 4096, MMU_DESC_PAGE, attrs));
+  assert(!mmu_space_link_table(&spaces[1], MMU_TTBR1_BASE, 1,
+                               tables[1][1].physical));
+  assert(!mmu_space_seal(&spaces[1]));
+  assert(!mmu_high_build(&spaces[1], tables[1], &memory, &layout));
+  assert(!mmu_space_init(&spaces[1], MMU_GEOMETRY_TTBR1_4K_39BIT,
+                          tables[1], 11, control.root));
+  assert(memcmp(saved, pages[1], sizeof(saved)) == 0);
+
+  assert(mmu_activation_init(&lower, &spaces[0], &spaces[2], &spaces[3],
+                              &layout));
+  assert(!mmu_activation_select(&lower, &spaces[1]));
+  operation_count = 0;
+  for (unsigned int n = 0; n < 16; n++) {
+    daif = (uint64_t)n << 6;
+    assert(mmu_high_enable(&control)); // Idempotent, no register writes.
+    assert(mmu_high_test_run(&control, &result));
+    assert(result.persistent && result.already_active && result.preserved);
+    assert(!result.restored && operation_count == 0);
+    assert(result.physical_verified && result.high.result == 42);
+    assert(result.before.ttbr1 == result.after.ttbr1);
+    assert(result.before.tcr == result.after.tcr);
+    assert(daif == (uint64_t)n << 6 && !locked);
+    for (unsigned int ctx = 2; ctx < 4; ctx++) {
+      assert(mmu_activation_select(&lower, &spaces[ctx]));
+      assert(hw.ttbr1 == control.root && hw.tcr == MMU_TCR_DUAL_4K);
+      mmu_descriptor_info_t stack;
+      assert(mmu_space_inspect(&spaces[ctx], EL0_STACK_VA, &stack));
+      assert(stack.physical_address == layout.el0_stack[ctx - 2].start);
+      assert(stack.access_permissions == 1 && stack.pxn && stack.uxn);
+      assert(mmu_high_persistent_matches(&control, &hw));
+      assert(mmu_activation_select(&lower, &spaces[0]));
+      assert(hw.ttbr0 == control.kernel_root);
+      assert(hw.ttbr1 == control.root && hw.tcr == MMU_TCR_DUAL_4K);
+    }
+  }
+  assert(root_writes == 64 && operation_count == 0);
+  // An incompatible live upper environment rejects before any root write.
+  hw.ttbr1 ^= 4096;
+  assert(!mmu_activation_select(&lower, &spaces[2]));
+  assert(!mmu_high_test_run(&control, &result));
+  assert(!mmu_high_enable(&control));
+  assert(root_writes == 64 && operation_count == 0 && !locked);
+  hw.ttbr1 ^= 4096;
+  hw.tcr ^= 1ULL << 23;
+  assert(!mmu_activation_select(&lower, &spaces[2]));
+  assert(!mmu_high_test_run(&control, &result));
+  hw.tcr ^= 1ULL << 23;
+  pages[1][10][0x82] ^= 1ULL << 6;
+  assert(!mmu_activation_select(&lower, &spaces[2]));
+  assert(!mmu_high_test_run(&control, &result));
+  pages[1][10][0x82] ^= 1ULL << 6;
+  assert(root_writes == 64 && operation_count == 0 && !locked);
+  bad_probe = 1;
+  assert(!mmu_high_test_run(&control, &result));
+  assert(result.preserved && result.masks_restored && operation_count == 0);
+  assert(hw.ttbr1 == control.root && hw.tcr == MMU_TCR_DUAL_4K);
+
+  // An invalid boot precondition has no architectural writes.
+  reset(); spaces[1].state = MMU_SPACE_BUILDING;
+  assert(!mmu_high_enable(&control) && operation_count == 0 && !locked);
+  reset(); bad_high_read = true;
+  fatal_expected = true;
+  if (!setjmp(fatal_return)) {
+    (void)mmu_high_enable(&control);
+    assert(!"post-activation proof failure returned");
+  }
+  assert(locked && daif == 0x3c0 && operation_count == 8);
+  for (volatile unsigned int bad = 4; bad <= 5; bad++) {
+    reset();
+    assert(mmu_high_enable(&control));
+    assert(mmu_activation_init(&lower, &spaces[0], &spaces[2], &spaces[3],
+                                &layout));
+    mutation = bad;
+    fatal_expected = true;
+    if (!setjmp(fatal_return)) {
+      (void)mmu_activation_select(&lower, &spaces[2]);
+      assert(!"post-switch upper regime mismatch returned");
+    }
+    assert(locked && daif == 0x3c0 && root_writes == 1);
+    assert(lower.active == &spaces[0]); // Failed switch is never published.
+  }
+  puts("Persistent TTBR1 activation, probe and TTBR0 interleaving: PASS");
 }
 
 int main(void) {
@@ -303,5 +440,6 @@ int main(void) {
   assert(!mmu_high_test_admit(&control, &spaces[0], &spaces[1], &layout, bad));
   assert(!control.admitted && operation_count == 0 && locks == 0);
   puts("Temporary TTBR1 controller and simulated execution: PASS");
+  persistent();
   return 0;
 }

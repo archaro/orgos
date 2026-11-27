@@ -11,7 +11,8 @@ static mmu_address_space_t spaces[3];
 static mmu_activation_t control;
 static paddr_t hardware_root;
 static uint64_t hardware_mair = MMU_MAIR_DEVICE_NC_WB;
-static uint64_t hardware_tcr = MMU_TCR_4K_36BIT;
+static uint64_t hardware_tcr = MMU_TCR_DUAL_4K;
+static paddr_t hardware_ttbr1 = 0x140000;
 static bool enabled = true, locked;
 static uint64_t daif = 0x80;
 static unsigned int writes;
@@ -42,12 +43,17 @@ void mmu_activation_unlock(uint64_t saved) {
 bool mmu_activation_hw_matches(paddr_t root) {
   return enabled && hardware_root == root &&
       hardware_mair == MMU_MAIR_DEVICE_NC_WB &&
-      hardware_tcr == MMU_TCR_4K_36BIT;
+      hardware_tcr == MMU_TCR_DUAL_4K && hardware_ttbr1 == 0x140000;
 }
 void mmu_replace_ttbr0(paddr_t root) {
   assert(locked && daif == 0x3c0);
   hardware_root = root;
   writes++;
+}
+
+__attribute__((noreturn)) void mmu_activation_fatal(void) {
+  assert(!"unexpected post-switch mismatch");
+  __builtin_trap();
 }
 
 static void build(void) {
@@ -300,6 +306,7 @@ int main(void) {
     unsigned int s = 1U + n % 2;
     assert(mmu_activation_select(&control, &spaces[s]));
     assert(hardware_root == spaces[s].root_physical);
+    assert(hardware_ttbr1 == 0x140000 && hardware_tcr == MMU_TCR_DUAL_4K);
     assert(control.active == &spaces[s]);
     assert(spaces[0].state == MMU_SPACE_SEALED);
     assert(spaces[s].state == MMU_SPACE_ACTIVE && daif == 0x80 && !locked);

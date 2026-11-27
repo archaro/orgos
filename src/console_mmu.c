@@ -41,6 +41,8 @@ static void run_high_test(void) {
   bool pass = mmu_high_test(&r);
   console_printf("Higher-half execution test: %s\n", pass ? "PASS" : "FAIL");
   console_printf("  Status: %s\n", r.status);
+  console_printf("  Mode: %s\n", r.persistent ?
+      "PERSISTENT (already enabled)" : "TEMPORARY (H2.6e)");
   console_printf("  Hierarchy validation: %s\n", r.validated ? "PASS" : "FAIL");
   hex_value("Original TCR_EL1", r.before.tcr);
   hex_value("Original TTBR0_EL1", r.before.ttbr0);
@@ -65,12 +67,17 @@ static void run_high_test(void) {
     hex_value("Probe SP", r.high.observed_sp);
     hex_value("Low return PC", r.high.low_return);
     hex_value("Register/stack failures", r.high.failures);
-    hex_value("Restored TCR_EL1", r.after.tcr);
-    hex_value("Restored TTBR0_EL1", r.after.ttbr0);
-    hex_value("Restored TTBR1_EL1", r.after.ttbr1);
+    hex_value(r.persistent ? "Final TCR_EL1" : "Restored TCR_EL1",
+               r.after.tcr);
+    hex_value(r.persistent ? "Final TTBR0_EL1" : "Restored TTBR0_EL1",
+               r.after.ttbr0);
+    hex_value(r.persistent ? "Final TTBR1_EL1" : "Restored TTBR1_EL1",
+               r.after.ttbr1);
   }
   console_printf("  Translation environment: %s\n", !r.activated ?
-      "NOT CHANGED" : r.restored ? "RESTORED" : "NOT RESTORED");
+      "NOT CHANGED" : r.persistent ?
+      (r.preserved ? "PRESERVED (TTBR1 remains enabled)" : "NOT PRESERVED") :
+      (r.restored ? "RESTORED" : "NOT RESTORED"));
   hex_value("Original DAIF", r.original_daif);
   hex_value("Final DAIF", r.final_daif);
   console_printf("  Exception masks restored: %s\n",
@@ -90,24 +97,31 @@ void cmd_kmap(const char *args) {
     return;
   }
   const mmu_address_space_t *space = mmu_high_address_space();
-  if (!space || space->state != MMU_SPACE_SEALED ||
+  if (!space || (space->state != MMU_SPACE_SEALED &&
+                 space->state != MMU_SPACE_ACTIVE) ||
       space->geometry.region != MMU_REGION_TTBR1) {
-    console_puts("Inactive kernel hierarchy unavailable.\n");
+    console_puts("Kernel higher-half hierarchy unavailable.\n");
     return;
   }
   mmu_info_t before, after;
   mmu_get_info(&before);
-  console_puts("Inactive TTBR1 kernel hierarchy (software inspection only)\n");
-  console_puts("  State: SEALED; not activated\n");
+  console_puts("TTBR1 kernel hierarchy (software inspection only)\n");
+  bool active = space->state == MMU_SPACE_ACTIVE;
+  console_puts(active ? "  State: ACTIVE; persistent\n" :
+                       "  State: SEALED; not activated\n");
   console_puts("  Geometry: upper VA=39 PA=36 granule=4KiB start=L1\n");
   hex_value("Higher-half base", MMU_TTBR1_BASE);
-  hex_value("Proposed root PA", space->root_physical);
-  hex_value("Proposed TCR (not live)", space->tcr);
+  hex_value("Hierarchy root PA", space->root_physical);
+  hex_value("Required dual TCR", space->tcr);
   hex_value("Live TCR_EL1", before.tcr);
   hex_value("Live TTBR0_EL1", before.ttbr0);
   hex_value("Live TTBR1_EL1", before.ttbr1);
   console_printf("  Live TTBR1 walks: %s\n",
       (before.tcr & (1ULL << 23)) ? "DISABLED" : "ENABLED");
+  if (active)
+    console_printf("  Live hierarchy matches: %s\n",
+        before.ttbr1 == space->root_physical && before.tcr == space->tcr &&
+        before.mair == space->mair ? "YES" : "NO");
   bool ok = true;
   ok &= sample(space, "Kernel text", (uintptr_t)__text_start, 2, false, 2);
   ok &= sample(space, "Exception vectors", (uintptr_t)exception_vectors,

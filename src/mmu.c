@@ -265,7 +265,8 @@ bool mmu_inspect(uint64_t address, mmu_descriptor_info_t *info) {
 
 bool mmu_init(const physmem_map_t *memory) {
   if (mmu_enabled())
-    return true;
+    return environments.active == &kernel_space &&
+        mmu_activation_hw_matches(kernel_space.root_physical);
 
   if (!memory || memory->bank_count == 0 ||
       memory->bank_count > FDT_MAX_MEMORY_BANKS)
@@ -315,6 +316,10 @@ bool mmu_init(const physmem_map_t *memory) {
   if (!mmu_enabled())
     return false;
   kernel_space.state = MMU_SPACE_ACTIVE;
+  // Tables, low stack/code and VBAR are ready; IRQ delivery is still masked.
+  // This is the sole boot transition into the persistent dual regime.
+  if (!mmu_high_enable(&high_experiment))
+    return false;
   return mmu_activation_init(&environments, &kernel_space, &context_spaces[0],
                               &context_spaces[1], &kernel_layout);
 }
@@ -337,22 +342,10 @@ paddr_t mmu_current_root(void) {
 }
 
 bool mmu_activation_hw_matches(paddr_t root) {
-  mmu_info_t info;
-  mmu_get_info(&info);
-  const uint64_t required = 1ULL | 4ULL | (1ULL << 12) | (1ULL << 19);
-  uint64_t sp, pc, vectors;
-  __asm__ volatile("mov %0, sp\nadr %1, .\nmrs %2, vbar_el1"
-                   : "=r"(sp), "=r"(pc), "=r"(vectors));
-  // This experiment admits only the linked kernel's EL1 stack and code.
-  // Compatibility validation covers every page of this image, including
-  // all static data/tables; check the actual execution anchors as well.
-  return info.ttbr0 == root && info.mair == MMU_MAIR_DEVICE_NC_WB &&
-      info.tcr == MMU_TCR_4K_36BIT && (info.sctlr & required) == required &&
-      sp >= (uintptr_t)__stack_bottom && sp <= (uintptr_t)__stack_top &&
-      !(sp & 15U) && pc >= (uintptr_t)__text_start &&
-      pc < (uintptr_t)__text_end && !(vectors & 2047U) &&
-      vectors >= (uintptr_t)__text_start &&
-      vectors <= (uintptr_t)__text_end - 2048U;
+  mmu_high_hw_state_t state;
+  mmu_high_hw_read(&state);
+  return state.ttbr0 == root &&
+      mmu_high_persistent_matches(&high_experiment, &state);
 }
 
 const mmu_address_space_t *mmu_kernel_address_space(void) {
@@ -402,9 +395,14 @@ bool mmu_translate_user(uint64_t address, bool write,
 }
 
 const mmu_address_space_t *mmu_high_address_space(void) {
-  return high_space.state == MMU_SPACE_SEALED ? &high_space : NULL;
+  return high_space.state == MMU_SPACE_SEALED ||
+      high_space.state == MMU_SPACE_ACTIVE ? &high_space : NULL;
 }
 
 bool mmu_high_test(mmu_high_test_result_t *result) {
   return mmu_high_test_run(&high_experiment, result);
+}
+
+void mmu_activation_fatal(void) {
+  mmu_high_hw_fatal("TTBR0 switch changed the translation environment");
 }

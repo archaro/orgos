@@ -25,44 +25,20 @@ volatile uint64_t el0_test_kernel_canary = EL0_TEST_KERNEL_CANARY;
 static jmp_buf panic_return;
 static uint64_t panic_args[5];
 
-static mmu_address_space_t test_spaces[3] = {
-  {.root_physical = 0x170000}, {.root_physical = 0x180000},
-  {.root_physical = 0x190000}
-};
-static paddr_t selected_root = 0x170000;
-static bool activation_failed;
-const mmu_address_space_t *mmu_kernel_address_space(void) {
-  return &test_spaces[0];
-}
-const mmu_address_space_t *mmu_context_address_space(unsigned int id) {
-  return id < 2 ? &test_spaces[id + 1] : NULL;
-}
-paddr_t mmu_current_root(void) { return selected_root; }
-bool mmu_activate_address_space(const mmu_address_space_t *space) {
-  assert(space == &test_spaces[1] || space == &test_spaces[2]);
-  assert(selected_root == test_spaces[0].root_physical);
-  if (activation_failed)
-    return false;
-  selected_root = space->root_physical;
-  return true;
-}
-bool mmu_restore_kernel_space(void) {
-  selected_root = test_spaces[0].root_physical;
-  return true;
-}
+#include "el0_context_mmu_fixture.h"
 
 static unsigned int bad_probe;
-static paddr_t current_backing(void) {
-  assert(selected_root != test_spaces[0].root_physical);
-  return selected_root == test_spaces[1].root_physical ? 0x101000 : 0x102000;
-}
 bool mmu_translate_user(uint64_t va, bool write, mmu_translation_t *out) {
   if (bad_probe == 7)
     return false;
   bool stack = va >= EL0_STACK_VA && va < EL0_STACK_TOP;
+  mmu_descriptor_info_t mapping;
+  assert(mmu_space_inspect(lower_owner.active, va, &mapping));
+  bool fault = mapping.kind == MMU_DESC_UNMAPPED ||
+      !(mapping.access_permissions & 1U) || (write && mapping.read_only);
   *out = (mmu_translation_t){.virtual_address = va,
-    .fault = !stack, .fault_status = stack ? 0 : 0xf,
-    .physical_address = stack ? current_backing() + va - EL0_STACK_VA : 0};
+    .fault = fault, .fault_status = fault ? 0xf : 0,
+    .physical_address = fault ? 0 : mapping.physical_address};
   if (bad_probe == 1 && stack)
     out->physical_address += 4096;
   if (bad_probe == 2 && stack && write)
@@ -76,11 +52,8 @@ bool mmu_translate_user(uint64_t va, bool write, mmu_translation_t *out) {
   return true;
 }
 bool mmu_inspect(uint64_t va, mmu_descriptor_info_t *out) {
-  bool stack = va == EL0_STACK_VA;
-  *out = (mmu_descriptor_info_t){.kind = MMU_DESC_PAGE,
-    .physical_address = stack ? current_backing() : va,
-    .access_permissions = stack ? 1 : 0, .pxn = true, .uxn = true,
-    .access_flag = true, .attr_index = 2, .leaf_descriptor = 3ULL << 8};
+  if (!mmu_space_inspect(lower_owner.active, va, out))
+    return false;
   if (bad_probe == 4)
     out->uxn = false;
   return true;
@@ -154,7 +127,7 @@ static void expect_panic(exception_frame_t frame) {
 static exception_frame_t yield_frame(void) {
   return (exception_frame_t){
     .vector = 8, .spsr = 0xa0000340U,
-    .elr = 0x100080U, .sp = 0x101ed0U, .sp_el0 = 0x101ed0U,
+    .elr = 0x100080U, .sp = 0x1b4ed0U, .sp_el0 = 0x1b4ed0U,
     .esr = (0x15ULL << 26) | (1ULL << 25) | EL0_CONTEXT_YIELD_SVC,
   };
 }
@@ -192,7 +165,7 @@ uint64_t el0_context_switch(void) {
   uintptr_t top = EL0_STACK_TOP;
   uintptr_t sp = top - EL0_CONTEXT_STACK_BYTES;
   uint64_t *stack = (uint64_t *)(uintptr_t)(
-      0x102000U + id * 4096U - EL0_CONTEXT_STACK_BYTES);
+      0x1b5000U + id * 4096U - EL0_CONTEXT_STACK_BYTES);
   if (ctx->info.resumptions == 1U) {
     assert(frame.elr == ((ctx->info.cross_stack_test || ctx->info.own_alias_test) ? 0x100020U :
         ctx->info.fault_test ? 0x100010U : 0x100000U));
@@ -228,7 +201,7 @@ uint64_t el0_context_switch(void) {
       frame.elr = 0x100100U;
     } else {
       bool alias = ctx->info.cross_stack_test || ctx->info.own_alias_test;
-      uintptr_t target = alias ? 0x101000U +
+      uintptr_t target = alias ? 0x1b4000U +
           (ctx->info.cross_stack_test ? 1U - id : id) * 4096U :
           (uintptr_t)&el0_test_kernel_canary;
       if (alias)
@@ -319,7 +292,7 @@ static void check_contained_fault(unsigned int id, exception_frame_t frame,
                                   bool far_valid) {
   assert(el0_context_reset(id));
   assert(el0_context_start(id));
-  void *page = (void *)(uintptr_t)(0x101000U + id * 4096U);
+  void *page = (void *)(uintptr_t)(0x1b4000U + id * 4096U);
   assert(mprotect(page, 4096U, PROT_NONE) == 0);
   inject_arbitrary_fault = true;
   arbitrary_fault = frame;
@@ -354,7 +327,7 @@ static void check_operation(unsigned int id, unsigned int operation,
                             bool fault) {
   el0_slot_t other = contexts[1U - id];
   unsigned char page[4096];
-  void *other_page = (void *)(uintptr_t)(0x101000U + (1U - id) * 4096U);
+  void *other_page = (void *)(uintptr_t)(0x1b4000U + (1U - id) * 4096U);
   memcpy(page, other_page, sizeof(page));
   if (operation == 0U)
     assert(fault ? el0_context_start_fault_test(id) : el0_context_start(id));
@@ -391,7 +364,7 @@ static void run_two_context_tests(void) {
       if (counts[slot]) {
         assert(result.address_space_ok && result.stack_mapping.valid);
         assert(result.virtual_stack == EL0_STACK_VA);
-        assert(result.physical_stack == 0x101000U + slot * 4096U);
+        assert(result.physical_stack == 0x1b4000U + slot * 4096U);
         assert(result.stack_mapping.read_physical == result.physical_stack);
         assert(result.stack_mapping.write_physical == result.physical_stack);
         assert(result.entered_root == test_spaces[slot + 1].root_physical);
@@ -481,7 +454,7 @@ static void run_two_context_tests(void) {
   check_operation(0, 1, false);
   el0_slot_t peer = contexts[0];
   unsigned char peer_page[4096];
-  memcpy(peer_page, (void *)0x101000U, sizeof(peer_page));
+  memcpy(peer_page, (void *)0x1b4000U, sizeof(peer_page));
   exception_frame_t arbitrary = yield_frame();
   arbitrary.elr = 0xfffff000U;
   arbitrary.sp = arbitrary.sp_el0 = 3;
@@ -489,7 +462,7 @@ static void run_two_context_tests(void) {
   arbitrary.far = arbitrary.elr;
   check_contained_fault(1, arbitrary, true);
   assert(memcmp(&peer, &contexts[0], sizeof(peer)) == 0);
-  assert(memcmp(peer_page, (void *)0x101000U, sizeof(peer_page)) == 0);
+  assert(memcmp(peer_page, (void *)0x1b4000U, sizeof(peer_page)) == 0);
   for (unsigned int n = 0; n < 5; n++)
     check_operation(0, 1, false);
   assert(contexts[0].info.passed);
@@ -498,7 +471,7 @@ static void run_two_context_tests(void) {
   el0_slot_t before[2];
   memcpy(before, contexts, sizeof(before));
   unsigned char pages[8192];
-  memcpy(pages, (void *)0x101000U, sizeof(pages));
+  memcpy(pages, (void *)0x1b4000U, sizeof(pages));
   const unsigned int invalid[] = {2U, 3U, UINT32_MAX};
   for (unsigned int n = 0; n < sizeof(invalid) / sizeof(invalid[0]); n++) {
     unsigned int id = invalid[n];
@@ -518,7 +491,7 @@ static void run_two_context_tests(void) {
     assert(strstr(output, "Invalid EL0") || strstr(output, "Usage:"));
   }
   assert(memcmp(before, contexts, sizeof(before)) == 0);
-  assert(memcmp(pages, (void *)0x101000U, sizeof(pages)) == 0);
+  assert(memcmp(pages, (void *)0x1b4000U, sizeof(pages)) == 0);
 
   // A mistaken cross-slot frame restoration must fail preservation checks.
   check_operation(0, 2, false);
@@ -563,10 +536,11 @@ static void run_two_context_tests(void) {
 }
 
 int main(void) {
-  void *stack_page = mmap((void *)0x101000U, 8192U,
+  mmu_fixture_init();
+  void *stack_page = mmap((void *)0x1b4000U, 8192U,
       PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS |
       MAP_FIXED_NOREPLACE, -1, 0);
-  assert(stack_page == (void *)0x101000U);
+  assert(stack_page == (void *)0x1b4000U);
   assert(!el0_context_resume(0) && !el0_context_owns_stack(0));
   expect_panic(yield_frame());
   el0_context_get_info(0, NULL);
@@ -815,6 +789,18 @@ int main(void) {
   assert(memcmp(&untouched, &contexts[0], sizeof(untouched)) == 0);
   assert(switches == old_switches && selected_root == test_spaces[0].root_physical);
 
+  // Wrong live TTBR1/TCR is rejected by the real controller before entry.
+  unsigned int roots_before = lower_writes;
+  live.ttbr1 ^= 4096;
+  assert(!el0_context_resume(0));
+  live.ttbr1 ^= 4096;
+  live.tcr ^= 1ULL << 23;
+  assert(!el0_context_resume(0));
+  live.tcr ^= 1ULL << 23;
+  assert(lower_writes == roots_before && !mmu_locked);
+  assert(memcmp(&untouched, &contexts[0], sizeof(untouched)) == 0);
+  assert(switches == old_switches);
+
   // Both cross-stack faults preserve the peer, including every stack byte,
   // while repeated root selections carry the peer through to normal exit.
   for (unsigned int bad = 0; bad < 2; bad++) {
@@ -875,7 +861,7 @@ int main(void) {
     assert(contexts[id].info.own_alias_test);
     assert(el0_context_resume(id) && el0_context_resume(id));
     assert(contexts[id].info.fault_test_passed);
-    assert(contexts[id].saved.far == 0x101000U + id * 4096U);
+    assert(contexts[id].saved.far == 0x1b4000U + id * 4096U);
     command(id ? "status 1" : "status 0");
     assert(strstr(output, "EL0 physical-alias test: PASS"));
   }
@@ -891,6 +877,7 @@ int main(void) {
   bad_probe = 0;
   run_two_context_tests();
   assert(munmap(stack_page, 8192U) == 0);
-  puts("EL0 context tests: PASS");
+  mmu_fixture_check();
+  puts("EL0 context tests: PASS (persistent TTBR1, real MMU controllers)");
   return 0;
 }

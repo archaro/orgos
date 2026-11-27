@@ -22,10 +22,10 @@ static bool executable(const mmu_address_space_t *space, vaddr_t va,
 
 static bool profile_valid(const mmu_address_space_t *kernel,
     const mmu_address_space_t *high, const mmu_boot_layout_t *layout,
-    mmu_high_code_t code) {
+    mmu_high_code_t code, mmu_space_state_t state) {
   if (!kernel || !high || !layout || !code_valid(code, layout) ||
       !mmu_boot_compatible(kernel, kernel, layout, -1) ||
-      high->state != MMU_SPACE_SEALED || !high->tables ||
+      high->state != state || !high->tables ||
       high->table_count != MMU_BOOT_TABLE_COUNT ||
       high->geometry.region != MMU_REGION_TTBR1 ||
       high->geometry.va_bits != 39U || high->geometry.pa_bits != 36U ||
@@ -82,7 +82,7 @@ bool mmu_high_test_admit(mmu_high_test_control_t *control,
     const mmu_address_space_t *kernel, mmu_address_space_t *higher,
     const mmu_boot_layout_t *layout, mmu_high_code_t code) {
   if (!control || control->admitted || control->busy ||
-      !profile_valid(kernel, higher, layout, code))
+      !profile_valid(kernel, higher, layout, code, MMU_SPACE_SEALED))
     return false;
   // Caller supplies exclusive static controller storage, disjoint from
   // all registered pages/metadata. No table is edited by this copy.
@@ -115,7 +115,8 @@ static bool unchanged(const mmu_high_test_control_t *c) {
         memcmp(ref->entries, c->snapshot[t], 4096) != 0)
       return false;
   }
-  return profile_valid(c->kernel, high, &c->layout, c->code);
+  return profile_valid(c->kernel, high, &c->layout, c->code,
+      c->persistent ? MMU_SPACE_ACTIVE : MMU_SPACE_SEALED);
 }
 
 static bool translation(vaddr_t va, paddr_t pa, bool write, bool denied) {
@@ -125,17 +126,33 @@ static bool translation(vaddr_t va, paddr_t pa, bool write, bool denied) {
        !result.fault && result.physical_address == pa);
 }
 
+static bool anchors_valid(const mmu_high_test_control_t *c,
+                           const mmu_high_hw_state_t *s) {
+  const uint64_t required = 1ULL | 4ULL | (1ULL << 12) | (1ULL << 19);
+  return s->mair == MMU_MAIR_DEVICE_NC_WB &&
+      (s->sctlr & required) == required && s->current_el == 4U &&
+      s->spsel == 1U && s->pc >= c->layout.text.start &&
+      s->pc < c->layout.text.end && s->sp > c->layout.stack.start &&
+      s->sp <= c->layout.stack.end && !(s->sp & 15U) &&
+      !(s->vbar & 2047U) && s->vbar >= c->layout.text.start &&
+      s->vbar <= c->layout.text.end - 2048U;
+}
+
+bool mmu_high_persistent_matches(const mmu_high_test_control_t *c,
+    const mmu_high_hw_state_t *s) {
+  return c && s && c->admitted && c->persistent && !c->busy &&
+      s->ttbr1 == c->root && s->tcr == MMU_TCR_DUAL_4K &&
+      s->sctlr == c->live_sctlr && s->vbar == c->live_vbar &&
+      anchors_valid(c, s) && unchanged(c);
+}
+
 static bool environment_valid(const mmu_high_test_control_t *c,
                                const mmu_high_hw_state_t *s) {
-  const uint64_t required = 1ULL | 4ULL | (1ULL << 12) | (1ULL << 19);
-  if (s->ttbr0 != c->kernel_root || s->tcr != MMU_TCR_4K_36BIT ||
-      s->mair != MMU_MAIR_DEVICE_NC_WB || (s->sctlr & required) != required ||
-      s->current_el != 4U || s->spsel != 1U ||
-      s->pc < c->layout.text.start || s->pc >= c->layout.text.end ||
-      s->sp < c->layout.stack.start || s->sp > c->layout.stack.end ||
-      (s->sp & 15U) || (s->vbar & 2047U) ||
-      s->vbar < c->layout.text.start || s->vbar > c->layout.text.end - 2048U ||
-      c->kernel->state != MMU_SPACE_ACTIVE)
+  uint64_t tcr = c->persistent ? MMU_TCR_DUAL_4K : MMU_TCR_4K_36BIT;
+  if (s->ttbr0 != c->kernel_root || s->tcr != tcr ||
+      !anchors_valid(c, s) || c->kernel->state != MMU_SPACE_ACTIVE ||
+      (c->persistent && (s->ttbr1 != c->root ||
+        s->sctlr != c->live_sctlr || s->vbar != c->live_vbar)))
     return false;
   if (!translation(s->vbar, s->vbar, false, false) ||
       !translation(s->sp - 16U, s->sp - 16U, true, false) ||
@@ -176,14 +193,16 @@ static void flush(void) {
   mmu_high_hw_operation(MMU_HIGH_ISB, 0);
 }
 
-bool mmu_high_test_run(mmu_high_test_control_t *c,
-                       mmu_high_test_result_t *r) {
+static bool run(mmu_high_test_control_t *c, mmu_high_test_result_t *r,
+                bool keep_enabled) {
   if (!r)
     return false;
   *r = (mmu_high_test_result_t){.status = "Precondition rejected"};
   if (!c || !c->admitted || c->busy)
     return false;
   c->busy = true;
+  r->persistent = keep_enabled || c->persistent;
+  r->already_active = c->persistent;
   r->root = c->root;
   r->expected_physical = c->code.site;
   r->high_entry = MMU_TTBR1_BASE + c->code.entry;
@@ -206,14 +225,16 @@ bool mmu_high_test_run(mmu_high_test_control_t *c,
   }
   uint64_t enabled_tcr = (r->before.tcr & ~MMU_HIGH_T1_FIELDS) |
       (c->higher->tcr & MMU_HIGH_T1_FIELDS);
-  // Root first with EPD1 still set. The ISBs establish each change before
-  // flushing; only low C/stack/vector mappings are used during transition.
-  mmu_high_hw_operation(MMU_HIGH_DSB, 0);
-  mmu_high_hw_operation(MMU_HIGH_WRITE_TTBR1, c->root);
-  mmu_high_hw_operation(MMU_HIGH_ISB, 0);
-  mmu_high_hw_operation(MMU_HIGH_WRITE_TCR, enabled_tcr);
-  mmu_high_hw_operation(MMU_HIGH_ISB, 0);
-  flush();
+  if (!c->persistent) {
+    // Root first with EPD1 still set. The ISBs establish each change before
+    // flushing; only low C/stack/vector mappings are used during transition.
+    mmu_high_hw_operation(MMU_HIGH_DSB, 0);
+    mmu_high_hw_operation(MMU_HIGH_WRITE_TTBR1, c->root);
+    mmu_high_hw_operation(MMU_HIGH_ISB, 0);
+    mmu_high_hw_operation(MMU_HIGH_WRITE_TCR, enabled_tcr);
+    mmu_high_hw_operation(MMU_HIGH_ISB, 0);
+    flush();
+  }
   r->activated = true;
   c->higher->state = MMU_SPACE_ACTIVE;
   mmu_high_hw_read(&r->enabled);
@@ -247,6 +268,24 @@ bool mmu_high_test_run(mmu_high_test_control_t *c,
         probe_valid(c, &r->high, r->high_site);
     r->status = r->passed ? "PASS" : "Probe evidence mismatch";
   }
+  if (r->persistent) {
+    // After a boot-time register change, failed proof is a kernel failure.
+    // An established regime can reject bad diagnostic evidence only after
+    // the low environment and unchanged dual configuration are verified.
+    if (!r->already_active && !r->passed)
+      mmu_high_hw_fatal("Persistent higher-half activation proof failed");
+    mmu_high_hw_read(&r->after);
+    if (!same_low(&r->before, &r->after) ||
+        r->after.ttbr1 != c->root || r->after.tcr != enabled_tcr ||
+        r->after.pc < c->layout.text.start ||
+        r->after.pc >= c->layout.text.end)
+      mmu_high_hw_fatal("Persistent translation environment changed");
+    c->live_sctlr = r->before.sctlr;
+    c->live_vbar = r->before.vbar;
+    c->persistent = true;
+    r->preserved = true;
+    goto done;
+  }
   // Disable walks and retire upper translations before restoring the old,
   // possibly unused/opaque TTBR1 value. TTBR0, MAIR, SCTLR and VBAR stay put.
   mmu_high_hw_operation(MMU_HIGH_DSB, 0);
@@ -278,4 +317,14 @@ done:
   r->masks_restored = true;
   c->busy = false;
   return r->passed;
+}
+
+bool mmu_high_test_run(mmu_high_test_control_t *control,
+                       mmu_high_test_result_t *result) {
+  return run(control, result, false);
+}
+
+bool mmu_high_enable(mmu_high_test_control_t *control) {
+  mmu_high_test_result_t result;
+  return run(control, &result, true);
 }
