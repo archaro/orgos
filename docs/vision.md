@@ -243,6 +243,7 @@ system.
 Potential work includes:
 
 - Execution contexts and scheduling.
+- Establish a fixed-address higher-half kernel and a working process/address-space model. Executables may initially use fixed virtual addresses.
 - Privilege levels and protected address spaces.
 - IPC and service discovery.
 - Resource handles and capabilities.
@@ -303,6 +304,7 @@ musical instruments.
 
 Potential developments include:
 
+- Introduce position-independent executables, relocation support and optional address-space randomization, once the executable-loading and process-management foundations are established.
 - Multiple independent applications.
 - Broader graphics and input capabilities.
 - General-purpose storage services.
