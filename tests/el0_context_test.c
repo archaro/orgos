@@ -140,7 +140,7 @@ uint64_t el0_context_switch(void) {
   unsigned int id = (unsigned int)(ctx - contexts);
   el0_slot_t other_before = contexts[1U - id];
   exception_frame_t kernel = {
-    .sp = 0x180000U, .sp_el0 = 0xdeadbeefU,
+    .sp = live.sp, .sp_el0 = 0xdeadbeefU,
     .elr = 0x80004U,
     // Show that each kernel return restores its own masks while the EL0
     // context retains the masks established on its initial entry.

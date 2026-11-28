@@ -175,6 +175,9 @@ static void permanent_vectors(void) {
   assert(control.vectors_high && report.permanent && vector_count == 2);
   assert(hw.vbar == MMU_TTBR1_BASE + vectors.vectors);
   assert(mmu_high_persistent_matches(&control, &hw));
+  control.stack_phase = MMU_STACK_HIGH;
+  hw.sp += MMU_TTBR1_BASE;
+  assert(mmu_high_persistent_matches(&control, &hw));
   vector_count = 0;
   for (unsigned int n = 0; n < 16; n++) {
     daif = (uint64_t)n << 6;
@@ -206,6 +209,9 @@ static void permanent_vectors(void) {
   assert(mmu_vectors_irq_read_owner(&control, &irq));
   assert(irq.paths[0].verified && irq.paths[0].handler_completed);
   assert(irq.paths[0].physical == vectors.irq_sites[0]);
+  assert(irq.paths[0].state.sp > MMU_TTBR1_BASE);
+  assert(irq.paths[0].handler_stack_physical ==
+         irq.paths[0].state.sp - 16U - MMU_TTBR1_BASE);
   assert(!irq.paths[1].observed);
   deliver_irq(0, GIC_IRQ_PCIE_MSI); // Unarmed path still dispatches normally.
   assert(quiesces == 1 && irq_pcie_msi_hardware_count() == 1);

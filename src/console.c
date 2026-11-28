@@ -259,7 +259,7 @@ static const console_command_t commands[] = {
   { "el0ctx", cmd_el0ctx, "Start, resume or inspect EL0 contexts 0 and 1" },
   { "fdt", cmd_fdt, "Inspect firmware Device Tree, memory and DMA" },
   { "physmem", cmd_physmem, "Display physical RAM and reservations" },
-  { "kmap", cmd_kmap, "Inspect mappings, vectors and diagnostic stack" },
+  { "kmap", cmd_kmap, "Inspect mappings, vectors and permanent stack" },
   { "cache", cmd_cache, "Display CPU cache configuration" },
   { "pci", cmd_pci, "Inspect PCIe controller and DMA configuration" },
   { "page", cmd_page, "Inspect physical page statistics and run tests" },

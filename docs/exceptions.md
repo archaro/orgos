@@ -1,3 +1,46 @@
+# Exception stacks after H2.6f5
+
+Normal execution, EL1 exceptions and EL0 kernel continuations now use the
+high alias of the same linker-reserved 16 KiB EL1 stack. High vectors
+remain permanent; ordinary instructions and global pointers remain low.
+The earlier stage descriptions below are historical and their low-stack
+and temporary-stack runtime assumptions are superseded here.
+
+The boot-only handoff is one-way: validated EL1h with DAIF masked, fresh
+high SP, cleared FP/LR and a branch to a non-returning low continuation.
+There is no frame copying, low return chain or post-switch rollback.
+BOOT_LOW, TRANSITION and HIGH are explicit owner states; ordinary runtime
+guards reject TRANSITION and, after commit, reject every low or unrelated
+high SP. Physical translation and exact translation-register/VBAR contracts
+remain enforced.
+
+Exception assembly still allocates/restores the same 304-byte frame with
+SP-relative accesses and returns with ERET. Frame layout and recoverable
+fault authorization are unchanged. An interrupted EL1 SP is high; an
+interrupted EL0 SP remains a user virtual address. The actual kernel
+handler SP and saved kernel continuation use the permanent high stack
+across either context's TTBR0 switches. Unexpected faults remain fatal.
+
+`kmap vectors test` reports the actual C-handler SP and translated PA of
+SP-16. The genuine IRQ recorder captures actual handler SP with its frame;
+foreground validation requires exact high bounds and the same hardware
+translation relation. The IRQ hot path performs no new page-table walk.
+The test does not infer stack use from the installed upper root.
+
+`kmap stack` inspects live high SP and its translation. `kmap stack test`
+now performs nested calls on that permanent stack, rather than switching
+back to low SP. The old temporary-stack controller is retained only as a
+historical native regression; its production buffer binding is removed.
+
+See [the current stack contract and cold-boot procedure](higher-half-kernel.md)
+for the full transition, state/translation checks, sync and real IRQ
+expectations, EL0 fault regressions and device tests. Host simulation and
+image compilation pass; physical H2.6f5 verification remains for the user.
+
+---
+
+## Historical stages through H2.6f4
+
 # Higher-half mappings and controlled exception entry
 
 OrgOS now enables its existing higher-half hierarchy during MMU startup

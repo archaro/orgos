@@ -11,8 +11,8 @@ typedef struct {
   bool validated, switched, observed, restored, persistent, masks_restored;
   bool passed, permanent, already_active;
   const char *status;
-  vaddr_t high_vbar, expected_pc, observed_pc, continuation, entry_sp;
-  paddr_t vector_physical, expected_physical, observed_physical;
+  vaddr_t high_vbar, expected_pc, observed_pc, continuation, entry_sp, handler_sp;
+  paddr_t vector_physical, expected_physical, observed_physical, handler_stack_physical;
   uint64_t vector, esr, spsr, sp_el0, failures;
   uint64_t original_daif, final_daif;
   mmu_high_hw_state_t before, installed, after;
@@ -33,7 +33,7 @@ bool mmu_vectors_inspect(mmu_vectors_result_t *result);
 typedef struct {
   bool observed, verified, handler_completed;
   vaddr_t pc, expected_pc;
-  paddr_t physical;
+  paddr_t physical, handler_stack_physical;
   uint32_t source;
   uint64_t count_before, count_after;
   exception_frame_t frame;

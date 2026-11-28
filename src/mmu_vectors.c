@@ -78,7 +78,8 @@ static bool preflight(const mmu_high_test_control_t *c,
   }
   mmu_translation_t stack;
   return mmu_high_hw_translate(s->sp - 16U, true, &stack) &&
-      !stack.fault && stack.physical_address == s->sp - 16U;
+      !stack.fault && stack.physical_address ==
+          mmu_el1_stack_physical(c, s->sp - 16U);
 }
 
 // During vector selection retain every other pinned invariant. Handler
@@ -92,8 +93,8 @@ static bool phase_valid(const mmu_high_test_control_t *c,
       s->mair == b->mair && s->sctlr == b->sctlr && s->vbar == vbar &&
       s->current_el == b->current_el && s->spsel == b->spsel &&
       in_text(c, s->pc) && !(s->sp & 15U) &&
-      (handler ? s->sp > c->layout.stack.start &&
-         s->sp <= c->layout.stack.end && s->sp_el0 == VECTORS_TEST_SP_EL0 :
+      (handler ? mmu_el1_stack_contains(c, s->sp) &&
+          s->sp_el0 == VECTORS_TEST_SP_EL0 :
        s->sp == b->sp && s->sp_el0 == b->sp_el0);
 }
 
@@ -106,17 +107,19 @@ void exception_sync_entry(exception_frame_t *frame, vaddr_t pc) {
   const mmu_vector_code_t *code = armed.code;
   mmu_high_hw_state_t state;
   mmu_high_hw_read(&state);
-  mmu_translation_t mapping;
+  mmu_translation_t mapping, handler_stack;
   if (r->observed || frame->vector != 4U ||
       frame->esr != ((0x15ULL << 26) | (1ULL << 25) | EXCEPTION_TEST_SVC) ||
       (frame->spsr & 0xf00003ffULL) != 0xa00003c5ULL ||
       frame->elr != code->continuation || pc != r->expected_pc ||
       frame->sp_el0 != VECTORS_TEST_SP_EL0 || (frame->sp & 15U) ||
-      frame->sp <= armed.owner->layout.stack.start ||
-      frame->sp > armed.owner->layout.stack.end ||
+      !mmu_el1_stack_contains(armed.owner, frame->sp) ||
       !phase_valid(armed.owner, r, &state, r->high_vbar, true) ||
       !mmu_high_hw_translate(pc, false, &mapping) || mapping.fault ||
-      mapping.physical_address != code->observed_site)
+      mapping.physical_address != code->observed_site ||
+      !mmu_high_hw_translate(state.sp - 16U, true, &handler_stack) ||
+      handler_stack.fault || handler_stack.physical_address !=
+          mmu_el1_stack_physical(armed.owner, state.sp - 16U))
     exception_panic(frame->vector, frame->esr, frame->elr,
                      frame->far, frame->spsr);
   r->observed = true;
@@ -127,6 +130,8 @@ void exception_sync_entry(exception_frame_t *frame, vaddr_t pc) {
   r->spsr = frame->spsr;
   r->continuation = frame->elr;
   r->entry_sp = frame->sp;
+  r->handler_sp = state.sp;
+  r->handler_stack_physical = handler_stack.physical_address;
   r->sp_el0 = frame->sp_el0;
   exception_frame_t before = *frame;
   exception_dispatch(frame);

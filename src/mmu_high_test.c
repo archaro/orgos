@@ -126,6 +126,19 @@ static bool translation(vaddr_t va, paddr_t pa, bool write, bool denied) {
        !result.fault && result.physical_address == pa);
 }
 
+bool mmu_el1_stack_contains(const mmu_high_test_control_t *c, vaddr_t sp) {
+  if (!c || (c->stack_phase != MMU_STACK_BOOT_LOW &&
+             c->stack_phase != MMU_STACK_HIGH))
+    return false;
+  vaddr_t offset = c->stack_phase == MMU_STACK_HIGH ? MMU_TTBR1_BASE : 0;
+  return sp > offset + c->layout.stack.start &&
+      sp <= offset + c->layout.stack.end && !(sp & 15U);
+}
+paddr_t mmu_el1_stack_physical(const mmu_high_test_control_t *c,
+    vaddr_t address) {
+  return c->stack_phase == MMU_STACK_HIGH ? address - MMU_TTBR1_BASE : address;
+}
+
 static bool anchors_valid(const mmu_high_test_control_t *c,
                            const mmu_high_hw_state_t *s) {
   const uint64_t required = 1ULL | 4ULL | (1ULL << 12) | (1ULL << 19);
@@ -138,8 +151,7 @@ static bool anchors_valid(const mmu_high_test_control_t *c,
   return s->mair == MMU_MAIR_DEVICE_NC_WB &&
       (s->sctlr & required) == required && s->current_el == 4U &&
       s->spsel == 1U && s->pc >= c->layout.text.start &&
-      s->pc < c->layout.text.end && s->sp > c->layout.stack.start &&
-      s->sp <= c->layout.stack.end && !(s->sp & 15U) &&
+      s->pc < c->layout.text.end && mmu_el1_stack_contains(c, s->sp) &&
       !(vectors & 2047U) && vectors >= c->layout.text.start &&
       vectors <= c->layout.text.end - 2048U;
 }
@@ -162,7 +174,8 @@ static bool environment_valid(const mmu_high_test_control_t *c,
     return false;
   if (!translation(s->vbar, c->vectors_high ? c->vectors.vectors : s->vbar,
                    false, false) ||
-      !translation(s->sp - 16U, s->sp - 16U, true, false) ||
+      !translation(s->sp - 16U, mmu_el1_stack_physical(c, s->sp - 16U),
+                   true, false) ||
       !translation(c->code.entry, c->code.entry, false, false) ||
       !translation(c->code.entry, 0, true, true))
     return false;
@@ -189,8 +202,7 @@ static bool probe_valid(const mmu_high_test_control_t *c,
   return probe->result == 42U && probe->observed_pc == expected_pc &&
       !probe->failures && probe->before_sp == probe->after_sp &&
       probe->observed_sp == probe->before_sp && !(probe->before_sp & 15U) &&
-      probe->before_sp >= c->layout.stack.start &&
-      probe->before_sp < c->layout.stack.end &&
+      mmu_el1_stack_contains(c, probe->before_sp) &&
       probe->low_return == c->code.low_return;
 }
 

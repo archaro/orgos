@@ -44,13 +44,11 @@ static char output[8192];
 static size_t written;
 static unsigned int register_reads;
 static unsigned int execution_requests, vector_requests, stack_requests;
-bool mmu_stack_test(mmu_stack_result_t *r) {
-  stack_requests++;
-  *r = (mmu_stack_result_t){.status = "PASS", .passed = true,
-    .validated = true, .executed = true, .translated = true,
-    .canaries = true, .contents = true, .low_intact = true,
-    .restored = true, .registers_preserved = true, .masks_restored = true,
-    .probe = {.result = 42}};
+bool mmu_kernel_stack_report(bool execute, mmu_kernel_stack_report_t *r) {
+  stack_requests += execute;
+  *r = (mmu_kernel_stack_report_t){.valid = true,
+    .phase = MMU_STACK_HIGH, .executed = execute, .translated = true,
+    .preserved = true, .execution = {.result = 42}};
   return true;
 }
 bool mmu_vectors_inspect(mmu_vectors_result_t *r) {
@@ -317,16 +315,17 @@ int main(void) {
   assert(strstr(output, "IRQ observation ARMED"));
   written = 0;
   cmd_kmap("stack");
-  assert(strstr(output, "Usage: kmap stack test") && stack_requests == 0);
+  assert(strstr(output, "Permanent EL1 stack inspection: PASS") &&
+      stack_requests == 0);
   written = 0;
   cmd_kmap("stack test extra");
-  assert(strstr(output, "Usage: kmap stack test") && stack_requests == 0);
+  assert(strstr(output, "Usage: kmap stack [test]") && stack_requests == 0);
   written = 0;
   cmd_kmap("stack test");
-  assert(strstr(output, "Higher-half stack test: PASS"));
+  assert(strstr(output, "Permanent EL1 stack test: PASS"));
   assert(strstr(output, "Nested result: 42 (expected 42)"));
-  assert(strstr(output, "Boundary canaries: OK"));
-  assert(strstr(output, "Low stack restored: YES") && stack_requests == 1);
+  assert(strstr(output, "State: HIGH"));
+  assert(strstr(output, "Permanent SP/registers retained: YES") && stack_requests == 1);
   puts("Higher-half geometry, policy and active/inactive inspection: PASS");
   return 0;
 }

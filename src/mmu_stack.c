@@ -136,7 +136,8 @@ bool mmu_stack_run(mmu_high_test_control_t *c,
   if (!r)
     return false;
   *r = (mmu_stack_result_t){.status = "Precondition rejected"};
-  if (!c || !s || !code || c->busy)
+  if (!c || !s || !code || c->busy ||
+      c->stack_phase != MMU_STACK_BOOT_LOW)
     return false;
   r->original_daif = mmu_high_hw_lock();
   mmu_high_hw_read(&r->before);

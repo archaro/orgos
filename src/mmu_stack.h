@@ -79,7 +79,8 @@ typedef struct {
 bool mmu_stack_run(mmu_high_test_control_t *owner,
     const mmu_stack_storage_t *storage, const mmu_stack_code_t *code,
     mmu_stack_result_t *result);
-bool mmu_stack_test(mmu_stack_result_t *result);
+// The old runtime binding is retired; this controller is a historical
+// regression and explicitly rejects the permanent HIGH phase.
 // Private assembly boundary; callable only with validated diagnostic data.
 void mmu_stack_call(vaddr_t high_top, mmu_stack_probe_t *probe,
     uint64_t *witness, vaddr_t normal_top);

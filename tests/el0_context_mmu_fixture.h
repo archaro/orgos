@@ -6,6 +6,7 @@
 #include "mmu_activation.h"
 #include "mmu_high_test.h"
 #include "mmu_vectors.h"
+#include "mmu_kernel_stack.h"
 
 static uint64_t mmu_pages[4][13][512] __attribute__((aligned(4096)));
 static mmu_table_ref_t mmu_refs[4][13];
@@ -15,7 +16,7 @@ static mmu_high_test_control_t upper_owner;
 static mmu_high_hw_state_t live;
 #define selected_root live.ttbr0
 static bool activation_failed, mmu_locked;
-static uint64_t live_daif = 0x340;
+static uint64_t live_daif = 0x3c0;
 static unsigned int upper_writes, lower_writes, vector_writes;
 static const mmu_boot_layout_t mmu_layout = {
   .kernel = {0x80000, 0x1b6000}, .text = {0x80000, 0x100000},
@@ -51,7 +52,7 @@ void mmu_high_hw_operation(mmu_high_operation_t op, uint64_t value) {
   }
 }
 bool mmu_high_hw_translate(vaddr_t va, bool write, mmu_translation_t *out) {
-  assert(mmu_locked);
+  assert(mmu_locked || live_daif == 0x3c0);
   for (unsigned int t = 0; t < 11; t++) {
     vaddr_t cpu = (uintptr_t)mmu_refs[3][t].entries;
     if (va >= cpu && va - cpu < 4096) {
@@ -89,8 +90,12 @@ __attribute__((noreturn)) void mmu_high_hw_fatal(const char *reason) {
 uint64_t mmu_activation_lock(void) { return mmu_high_hw_lock(); }
 void mmu_activation_unlock(uint64_t saved) { mmu_high_hw_unlock(saved); }
 bool mmu_activation_hw_matches(paddr_t root) {
+  mmu_translation_t stack;
   return !activation_failed && selected_root == root &&
-      mmu_high_persistent_matches(&upper_owner, &live);
+      mmu_high_persistent_matches(&upper_owner, &live) &&
+      mmu_high_hw_translate(live.sp - 16U, true, &stack) && !stack.fault &&
+      stack.physical_address ==
+          mmu_el1_stack_physical(&upper_owner, live.sp - 16U);
 }
 void mmu_replace_ttbr0(paddr_t root) {
   assert(mmu_locked && live_daif == 0x3c0);
@@ -113,8 +118,12 @@ bool mmu_activate_address_space(const mmu_address_space_t *space) {
   return mmu_activation_select(&lower_owner, (mmu_address_space_t *)space);
 }
 bool mmu_restore_kernel_space(void) {
-  if (lower_owner.active == &test_spaces[0])
-    return mmu_activation_hw_matches(test_spaces[0].root_physical);
+  if (lower_owner.active == &test_spaces[0]) {
+    uint64_t saved = mmu_activation_lock();
+    bool ok = mmu_activation_hw_matches(test_spaces[0].root_physical);
+    mmu_activation_unlock(saved);
+    return ok;
+  }
   return mmu_activation_select(&lower_owner, &test_spaces[0]);
 }
 
@@ -134,6 +143,18 @@ uint64_t mmu_vectors_hw_trigger(void) {
   exception_sync_entry(&frame, MMU_TTBR1_BASE + 0x810a0);
   live.sp_el0 = saved;
   return 0;
+}
+
+static jmp_buf boot_stack_branch;
+__attribute__((noreturn))
+void mmu_kernel_stack_jump(vaddr_t top, void (*entry)(void)) {
+  assert(upper_owner.stack_phase == MMU_STACK_TRANSITION && mmu_locked);
+  live.sp = top - 64;
+  live.pc = (uintptr_t)entry;
+  longjmp(boot_stack_branch, 1); // Native simulation, not a CPU SP change.
+}
+void mmu_kernel_stack_call(mmu_kernel_stack_execution_t *result) {
+  *result = (mmu_kernel_stack_execution_t){live.sp - 64, live.sp - 96, 42, 0};
 }
 
 static void mmu_fixture_init(void) {
@@ -170,9 +191,15 @@ static void mmu_fixture_init(void) {
   assert(mmu_vectors_install(&upper_owner, &code, &vectors));
   assert(mmu_activation_init(&lower_owner, &test_spaces[0], &test_spaces[1],
                               &test_spaces[2], &mmu_layout));
+  if (!setjmp(boot_stack_branch))
+    mmu_kernel_stack_enter_owner(&upper_owner, (void (*)(void))0x86000);
+  mmu_kernel_stack_complete_owner(&upper_owner);
+  assert(upper_owner.stack_phase == MMU_STACK_HIGH);
+  mmu_high_hw_unlock(0x340); // Model GIC/UART setup and normal IRQ unmasking.
 }
 
 static void mmu_fixture_check(void) {
+  assert(upper_owner.stack_phase == MMU_STACK_HIGH);
   assert(vector_writes == 1 && upper_owner.vectors_high);
   assert(upper_writes == 2); // No later diagnostic/switch writes TCR/TTBR1.
   assert(lower_writes > 0 && !mmu_locked && live_daif == 0x340);

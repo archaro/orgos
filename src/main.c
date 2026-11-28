@@ -9,6 +9,7 @@
 #include "gic.h"
 #include "irq.h"
 #include "mmu.h"
+#include "mmu_kernel_stack.h"
 #include "page.h"
 #include "pcie.h"
 #include "xhci.h"
@@ -315,6 +316,8 @@ static bool boot_usb_start(void) {
   return true;
 }
 
+__attribute__((noreturn)) static void kernel_main_high(void);
+
 void main(void) {
   uint32_t clock_hz;
   bool clock_ok;
@@ -400,6 +403,15 @@ void main(void) {
   if (!memory_ok || !mmu_init(physmem_get_map()))
     boot_halt("memory information or MMU");
   console_puts("OK (persistent TTBR1/high vectors; kernel executes low).\n");
+
+  // All remaining boot state is in existing static subsystem storage.
+  // This call cannot return; no automatic object or low frame survives.
+  mmu_kernel_stack_enter(kernel_main_high);
+}
+
+static void kernel_main_high(void) {
+  mmu_kernel_stack_complete();
+  console_puts("Permanent high EL1 stack: ACTIVE (same 16 KiB backing).\n");
 
   // Now we have the physical memory map and the MMU is configured,
   // it is time to initialise the physical page allocator.

@@ -35,12 +35,17 @@ typedef struct {
   vaddr_t irq_sites[2]; // EL1h vector 5, lower-AArch64 vector 9.
 } mmu_vector_code_t;
 
+typedef enum {
+  MMU_STACK_BOOT_LOW, MMU_STACK_TRANSITION, MMU_STACK_HIGH
+} mmu_stack_phase_t;
+
 // One static higher-half owner, shared by boot activation and diagnostics.
 // The 44 KiB exact snapshot belongs in BSS, never on the 16 KiB EL1 stack.
 // Supply a zero-initialised, exclusive controller disjoint from the table
 // pages and metadata. All referenced objects must outlive the controller.
 typedef struct {
   bool admitted, busy, persistent, vectors_high;
+  mmu_stack_phase_t stack_phase;
   mmu_vector_code_t vectors;
   uint64_t live_sctlr, live_vbar;
   const mmu_address_space_t *kernel;
@@ -67,6 +72,10 @@ bool mmu_high_enable(mmu_high_test_control_t *control);
 // Accepts a context TTBR0; the lower controller validates that root.
 bool mmu_high_persistent_matches(const mmu_high_test_control_t *control,
     const mmu_high_hw_state_t *state);
+// Stack bounds follow one explicit boot phase, never a permissive union.
+bool mmu_el1_stack_contains(const mmu_high_test_control_t *owner, vaddr_t sp);
+paddr_t mmu_el1_stack_physical(const mmu_high_test_control_t *owner,
+    vaddr_t address);
 // Runtime wrapper bound to the one statically owned hierarchy.
 bool mmu_high_test(mmu_high_test_result_t *result);
 

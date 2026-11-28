@@ -6,7 +6,7 @@
 #include "mmu_high.h"
 #include "mmu_high_test.h"
 #include "mmu_vectors.h"
-#include "mmu_stack.h"
+#include "mmu_kernel_stack.h"
 #include "irq.h"
 #include "mmu_activation.h"
 #include "cache.h"
@@ -268,9 +268,13 @@ bool mmu_inspect(uint64_t address, mmu_descriptor_info_t *info) {
 }
 
 bool mmu_init(const physmem_map_t *memory) {
-  if (mmu_enabled())
-    return environments.active == &kernel_space &&
+  if (mmu_enabled()) {
+    uint64_t daif = mmu_activation_lock();
+    bool valid = environments.active == &kernel_space &&
         mmu_activation_hw_matches(kernel_space.root_physical);
+    mmu_activation_unlock(daif);
+    return valid;
+  }
 
   if (!memory || memory->bank_count == 0 ||
       memory->bank_count > FDT_MAX_MEMORY_BANKS)
@@ -352,8 +356,12 @@ paddr_t mmu_current_root(void) {
 bool mmu_activation_hw_matches(paddr_t root) {
   mmu_high_hw_state_t state;
   mmu_high_hw_read(&state);
+  mmu_translation_t stack;
   return state.ttbr0 == root &&
-      mmu_high_persistent_matches(&high_experiment, &state);
+      mmu_high_persistent_matches(&high_experiment, &state) &&
+      mmu_high_hw_translate(state.sp - 16U, true, &stack) && !stack.fault &&
+      stack.physical_address ==
+          mmu_el1_stack_physical(&high_experiment, state.sp - 16U);
 }
 
 const mmu_address_space_t *mmu_kernel_address_space(void) {
@@ -374,8 +382,12 @@ bool mmu_activate_address_space(const mmu_address_space_t *space) {
 }
 
 bool mmu_restore_kernel_space(void) {
-  if (environments.active == &kernel_space)
-    return mmu_activation_hw_matches(kernel_space.root_physical);
+  if (environments.active == &kernel_space) {
+    uint64_t daif = mmu_activation_lock();
+    bool valid = mmu_activation_hw_matches(kernel_space.root_physical);
+    mmu_activation_unlock(daif);
+    return valid;
+  }
   return mmu_activate_address_space(&kernel_space);
 }
 
@@ -456,21 +468,12 @@ bool mmu_vectors_irq_read(mmu_vector_irq_result_t *result) {
   return mmu_vectors_irq_read_owner(&high_experiment, result);
 }
 
-// Five statically reserved BSS pages: one diagnostic backing page and a
-// four-page exact witness of the active original stack. Never allocated
-// by page/DMA APIs; the existing image reservation covers both objects.
-static uint64_t diagnostic_stack[STACK_PAGE_BYTES / 8U]
-    __attribute__((aligned(4096)));
-static uint64_t stack_witness[STACK_WITNESS_BYTES / 8U]
-    __attribute__((aligned(4096)));
-
-bool mmu_stack_test(mmu_stack_result_t *result) {
-  extern char mmu_stack_code_end[];
-  extern char mmu_stack_wrapper_return[], mmu_stack_nested_return[];
-  const mmu_stack_storage_t storage = {diagnostic_stack, stack_witness,
-    (uintptr_t)diagnostic_stack, (uintptr_t)stack_witness};
-  const mmu_stack_code_t code = {(uintptr_t)mmu_stack_call,
-    (uintptr_t)mmu_stack_code_end, (uintptr_t)mmu_stack_wrapper_return,
-    (uintptr_t)mmu_stack_nested_return};
-  return mmu_stack_run(&high_experiment, &storage, &code, result);
+void mmu_kernel_stack_enter(void (*continuation)(void)) {
+  mmu_kernel_stack_enter_owner(&high_experiment, continuation);
+}
+void mmu_kernel_stack_complete(void) {
+  mmu_kernel_stack_complete_owner(&high_experiment);
+}
+bool mmu_kernel_stack_report(bool execute, mmu_kernel_stack_report_t *r) {
+  return mmu_kernel_stack_report_owner(&high_experiment, execute, r);
 }

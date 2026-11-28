@@ -97,7 +97,7 @@ bool mmu_vectors_irq_read_owner(mmu_high_test_control_t *c,
       if (!r->observed)
         continue;
       const mmu_high_hw_state_t *s = &r->state;
-      mmu_translation_t mapping;
+      mmu_translation_t mapping, handler_stack;
       r->verified = r->handler_completed &&
           r->frame.vector == (i ? 9U : 5U) &&
           (r->frame.spsr & 0x3fU) == (i ? 0U : 5U) &&
@@ -107,8 +107,7 @@ bool mmu_vectors_irq_read_owner(mmu_high_test_control_t *c,
              r->frame.sp >= EL0_STACK_VA && r->frame.sp <= EL0_STACK_TOP &&
              r->frame.elr >= c->layout.el0_text.start &&
              r->frame.elr < c->layout.el0_text.end :
-           r->frame.sp > c->layout.stack.start &&
-             r->frame.sp <= c->layout.stack.end &&
+           mmu_el1_stack_contains(c, r->frame.sp) &&
              r->frame.elr >= c->layout.text.start &&
              r->frame.elr < c->layout.text.end) &&
           r->pc == MMU_TTBR1_BASE + c->vectors.irq_sites[i] &&
@@ -119,11 +118,16 @@ bool mmu_vectors_irq_read_owner(mmu_high_test_control_t *c,
           s->sctlr == state.sctlr && root_valid(c, s->ttbr0) &&
           s->pc >= c->layout.text.start && s->pc < c->layout.text.end &&
           s->current_el == 4U && s->spsel == 1U && !(s->sp & 15U) &&
-          s->sp > c->layout.stack.start && s->sp <= c->layout.stack.end &&
+          mmu_el1_stack_contains(c, s->sp) &&
           mmu_high_hw_translate(r->pc, false, &mapping) && !mapping.fault &&
-          mapping.physical_address == c->vectors.irq_sites[i];
+          mapping.physical_address == c->vectors.irq_sites[i] &&
+          mmu_high_hw_translate(s->sp - 16U, true, &handler_stack) &&
+          !handler_stack.fault && handler_stack.physical_address ==
+              mmu_el1_stack_physical(c, s->sp - 16U);
       if (r->verified)
         r->physical = mapping.physical_address;
+      if (r->verified)
+        r->handler_stack_physical = handler_stack.physical_address;
     }
   }
   mmu_high_hw_unlock(daif);
