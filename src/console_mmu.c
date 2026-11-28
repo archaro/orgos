@@ -5,6 +5,7 @@
 #include "mmu_high.h"
 #include "mmu_high_test.h"
 #include "mmu_vectors.h"
+#include "mmu_stack.h"
 
 extern char __text_start[], __rodata_start[], __data_start[], __bss_start[];
 extern char __stack_bottom[], exception_vectors[];
@@ -175,7 +176,64 @@ static void show_irq_vectors(void) {
   }
 }
 
+static void run_stack_test(void) {
+  mmu_stack_result_t r;
+  bool pass = mmu_stack_test(&r);
+  console_printf("Higher-half stack test: %s\n", pass ? "PASS" : "FAIL");
+  console_printf("  Status: %s\n", r.status);
+  console_printf("  Software/hardware preflight: %s\n",
+      r.validated ? "PASS" : "FAIL");
+  hex_value("Original low SP", r.before.sp);
+  hex_value("Stack physical base", r.physical);
+  hex_value("Stack high base", r.high_base);
+  hex_value("Usable high top", r.high_top);
+  if (r.executed) {
+    hex_value("Installed high SP", r.probe.high_top);
+    hex_value("Observed outer SP", r.probe.observed_sp);
+    hex_value("Lowest observed SP", r.probe.lowest_sp);
+    if (r.translated) {
+      hex_value("Observed outer PA", r.observed_physical);
+      hex_value("Lowest observed PA", r.lowest_physical);
+    } else {
+      console_puts("  Execution translations: NOT VERIFIED\n");
+    }
+    console_printf("  Nested result: %llu (expected 42)\n",
+        (unsigned long long)r.probe.result);
+    hex_value("Local failures", r.probe.local_failures);
+    hex_value("Callee register failures", r.probe.callee_failures);
+    console_printf("  Boundary canaries: %s\n", r.canaries ? "OK" : "FAIL");
+    console_printf("  Complete page contents: %s\n", r.contents ? "OK" : "FAIL");
+    console_printf("  Original stack witness: %s (%llu bytes)\n",
+        r.low_intact ? "IDENTICAL" : "FAIL",
+        (unsigned long long)r.probe.copy_bytes);
+    hex_value("Low return PC", r.probe.low_return);
+    hex_value("Final low SP", r.after.sp);
+    hex_value("Original TTBR0_EL1", r.before.ttbr0);
+    hex_value("Final TTBR0_EL1", r.after.ttbr0);
+    hex_value("Original TTBR1_EL1", r.before.ttbr1);
+    hex_value("Final TTBR1_EL1", r.after.ttbr1);
+    hex_value("Original TCR_EL1", r.before.tcr);
+    hex_value("Final TCR_EL1", r.after.tcr);
+    hex_value("Original VBAR_EL1", r.before.vbar);
+    hex_value("Final VBAR_EL1", r.after.vbar);
+    console_printf("  Low stack restored: %s\n", r.restored ? "YES" : "NO");
+    console_printf("  Translation registers/VBAR preserved: %s\n",
+        r.registers_preserved ? "YES" : "NO");
+  }
+  hex_value("Original DAIF", r.original_daif);
+  hex_value("Final DAIF", r.final_daif);
+  console_printf("  Exception masks restored: %s\n",
+      r.masks_restored ? "YES" : "NO");
+}
+
 void cmd_kmap(const char *args) {
+  if (console_arg_word(&args, "stack")) {
+    if (console_arg_word(&args, "test") && console_arg_end(args))
+      run_stack_test();
+    else
+      console_puts("Usage: kmap stack test\n");
+    return;
+  }
   if (console_arg_word(&args, "vectors")) {
     if (console_arg_end(args))
       inspect_vectors();
@@ -191,18 +249,18 @@ void cmd_kmap(const char *args) {
       else
         console_puts("Usage: kmap vectors irq [arm]\n");
     } else
-      console_puts("Usage: kmap [test | vectors [test | irq [arm]]]\n");
+      console_puts("Usage: kmap [test | stack test | vectors [test | irq [arm]]]\n");
     return;
   }
   if (console_arg_word(&args, "test")) {
     if (console_arg_end(args))
       run_high_test();
     else
-      console_puts("Usage: kmap [test | vectors [test | irq [arm]]]\n");
+      console_puts("Usage: kmap [test | stack test | vectors [test | irq [arm]]]\n");
     return;
   }
   if (!console_arg_end(args)) {
-    console_puts("Usage: kmap [test | vectors [test | irq [arm]]]\n");
+    console_puts("Usage: kmap [test | stack test | vectors [test | irq [arm]]]\n");
     return;
   }
   const mmu_address_space_t *space = mmu_high_address_space();

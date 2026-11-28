@@ -43,7 +43,16 @@ __asm__(".global high_test_text_start\n.set high_test_text_start, 0x80000\n"
 static char output[8192];
 static size_t written;
 static unsigned int register_reads;
-static unsigned int execution_requests, vector_requests;
+static unsigned int execution_requests, vector_requests, stack_requests;
+bool mmu_stack_test(mmu_stack_result_t *r) {
+  stack_requests++;
+  *r = (mmu_stack_result_t){.status = "PASS", .passed = true,
+    .validated = true, .executed = true, .translated = true,
+    .canaries = true, .contents = true, .low_intact = true,
+    .restored = true, .registers_preserved = true, .masks_restored = true,
+    .probe = {.result = 42}};
+  return true;
+}
 bool mmu_vectors_inspect(mmu_vectors_result_t *r) {
   *r = (mmu_vectors_result_t){.permanent = true};
   return true;
@@ -306,6 +315,18 @@ int main(void) {
   written = 0;
   cmd_kmap("vectors irq arm");
   assert(strstr(output, "IRQ observation ARMED"));
+  written = 0;
+  cmd_kmap("stack");
+  assert(strstr(output, "Usage: kmap stack test") && stack_requests == 0);
+  written = 0;
+  cmd_kmap("stack test extra");
+  assert(strstr(output, "Usage: kmap stack test") && stack_requests == 0);
+  written = 0;
+  cmd_kmap("stack test");
+  assert(strstr(output, "Higher-half stack test: PASS"));
+  assert(strstr(output, "Nested result: 42 (expected 42)"));
+  assert(strstr(output, "Boundary canaries: OK"));
+  assert(strstr(output, "Low stack restored: YES") && stack_requests == 1);
   puts("Higher-half geometry, policy and active/inactive inspection: PASS");
   return 0;
 }

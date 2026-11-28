@@ -6,6 +6,7 @@
 #include "mmu_high.h"
 #include "mmu_high_test.h"
 #include "mmu_vectors.h"
+#include "mmu_stack.h"
 #include "irq.h"
 #include "mmu_activation.h"
 #include "cache.h"
@@ -453,4 +454,23 @@ bool mmu_vectors_irq_arm(void) {
 }
 bool mmu_vectors_irq_read(mmu_vector_irq_result_t *result) {
   return mmu_vectors_irq_read_owner(&high_experiment, result);
+}
+
+// Five statically reserved BSS pages: one diagnostic backing page and a
+// four-page exact witness of the active original stack. Never allocated
+// by page/DMA APIs; the existing image reservation covers both objects.
+static uint64_t diagnostic_stack[STACK_PAGE_BYTES / 8U]
+    __attribute__((aligned(4096)));
+static uint64_t stack_witness[STACK_WITNESS_BYTES / 8U]
+    __attribute__((aligned(4096)));
+
+bool mmu_stack_test(mmu_stack_result_t *result) {
+  extern char mmu_stack_code_end[];
+  extern char mmu_stack_wrapper_return[], mmu_stack_nested_return[];
+  const mmu_stack_storage_t storage = {diagnostic_stack, stack_witness,
+    (uintptr_t)diagnostic_stack, (uintptr_t)stack_witness};
+  const mmu_stack_code_t code = {(uintptr_t)mmu_stack_call,
+    (uintptr_t)mmu_stack_code_end, (uintptr_t)mmu_stack_wrapper_return,
+    (uintptr_t)mmu_stack_nested_return};
+  return mmu_stack_run(&high_experiment, &storage, &code, result);
 }
