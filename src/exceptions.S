@@ -5,7 +5,7 @@
 .extern exception_panic
 .extern exception_dispatch
 .extern exception_sync_entry
-.extern irq_dispatch
+.extern exception_irq_entry
 .global exception_vectors
 
 // The frame stubs may run at either alias. Calls into ordinary C always
@@ -76,7 +76,10 @@ exception_sync_observed:
 
 irq_entry:
   SAVE_FRAME 5
-  LOW_CALL irq_dispatch
+.global exception_irq_el1_observed
+exception_irq_el1_observed:
+  adr x1, exception_irq_el1_observed
+  LOW_CALL exception_irq_entry
   b exception_return
 
 lower_sync_entry:
@@ -86,7 +89,10 @@ lower_sync_entry:
 
 lower_irq_entry:
   SAVE_FRAME 9, 1
-  LOW_CALL irq_dispatch
+.global exception_irq_el0_observed
+exception_irq_el0_observed:
+  adr x1, exception_irq_el0_observed
+  LOW_CALL exception_irq_entry
 
 // Recoverable paths restore PC/status from their own frame, not relying
 // on system registers surviving the C handler. Do not unmask in handlers.

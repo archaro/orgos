@@ -90,9 +90,10 @@ static void run_vector_test(void) {
   bool pass = mmu_vectors_test(&r);
   console_printf("Higher-half vector test: %s\n", pass ? "PASS" : "FAIL");
   console_printf("  Status: %s\n", r.status);
+  console_printf("  Mode: %s\n", r.permanent ? "PERMANENT" : "TEMPORARY H2.6f2");
   console_printf("  Mapping validation: %s\n", r.validated ? "PASS" : "FAIL");
   hex_value("Original VBAR_EL1", r.before.vbar);
-  hex_value("Temporary VBAR_EL1", r.high_vbar);
+  hex_value("Required high VBAR_EL1", r.high_vbar);
   hex_value("Installed VBAR_EL1", r.installed.vbar);
   hex_value("Vector table PA", r.vector_physical);
   hex_value("Expected entry VA", r.expected_pc);
@@ -117,7 +118,8 @@ static void run_vector_test(void) {
   hex_value("Final TTBR1_EL1", r.after.ttbr1);
   hex_value("Original TCR_EL1", r.before.tcr);
   hex_value("Final TCR_EL1", r.after.tcr);
-  console_printf("  Low vectors restored: %s\n", r.restored ? "YES" : "NO");
+  console_printf("  Vector configuration preserved: %s\n",
+      r.restored ? "YES" : "NO");
   console_printf("  Persistent TTBR1: %s\n",
       r.persistent ? "PRESERVED (ENABLED)" : "NOT VERIFIED");
   hex_value("Original DAIF", r.original_daif);
@@ -126,23 +128,81 @@ static void run_vector_test(void) {
       r.masks_restored ? "YES" : "NO");
 }
 
+static void inspect_vectors(void) {
+  mmu_vectors_result_t r;
+  bool valid = mmu_vectors_inspect(&r);
+  console_printf("Permanent higher-half vectors: %s\n",
+      valid && r.permanent ? "ACTIVE" : "INVALID");
+  hex_value("Vector table PA", r.vector_physical);
+  hex_value("Required VBAR_EL1", r.high_vbar);
+  hex_value("Live VBAR_EL1", r.before.vbar);
+  hex_value("Live TTBR0_EL1", r.before.ttbr0);
+  hex_value("Live TTBR1_EL1", r.before.ttbr1);
+  hex_value("Live TCR_EL1", r.before.tcr);
+  console_puts("  Inspection validates mappings; no exception was triggered.\n");
+}
+
+static void show_irq_vectors(void) {
+  mmu_vector_irq_result_t r;
+  if (!mmu_vectors_irq_read(&r)) {
+    console_puts("Higher-half IRQ observations: INVALID VECTOR REGIME\n");
+    return;
+  }
+  console_puts("Higher-half IRQ observations (armed hardware entry)\n");
+  for (unsigned int i = 0; i < 2; i++) {
+    const mmu_vector_irq_record_t *p = &r.paths[i];
+    console_printf("  %s IRQ: %s\n", i ? "EL0" : "EL1h", !p->observed ?
+        "NOT OBSERVED" : p->verified ? "PASS" : "FAIL");
+    if (!p->observed)
+      continue;
+    hex_value("Observed entry VA", p->pc);
+    hex_value("Expected entry VA", p->expected_pc);
+    hex_value("Observed entry PA", p->physical);
+    console_printf("  Vector: %llu; GIC source: %u\n",
+        (unsigned long long)p->frame.vector, p->source);
+    hex_value("Interrupted SPSR", p->frame.spsr);
+    hex_value("Interrupted PC", p->frame.elr);
+    hex_value("Interrupted SP", p->frame.sp);
+    hex_value("Entry TTBR0_EL1", p->state.ttbr0);
+    hex_value("Entry TTBR1_EL1", p->state.ttbr1);
+    hex_value("Entry VBAR_EL1", p->state.vbar);
+    console_printf("  IRQ count: %llu -> %llu\n",
+        (unsigned long long)p->count_before,
+        (unsigned long long)p->count_after);
+    console_printf("  Handler/EOI completed: %s\n",
+        p->handler_completed ? "YES" : "NO");
+    console_puts("  Foreground resumed; common ERET restores the saved frame.\n");
+  }
+}
+
 void cmd_kmap(const char *args) {
   if (console_arg_word(&args, "vectors")) {
-    if (console_arg_word(&args, "test") && console_arg_end(args))
+    if (console_arg_end(args))
+      inspect_vectors();
+    else if (console_arg_word(&args, "test") && console_arg_end(args))
       run_vector_test();
-    else
-      console_puts("Usage: kmap [test | vectors test]\n");
+    else if (console_arg_word(&args, "irq")) {
+      if (console_arg_end(args))
+        show_irq_vectors();
+      else if (console_arg_word(&args, "arm") && console_arg_end(args))
+        console_puts(mmu_vectors_irq_arm() ?
+            "IRQ observation ARMED; type the next command to generate UART IRQ.\n" :
+            "Cannot arm IRQ observation: invalid vector regime.\n");
+      else
+        console_puts("Usage: kmap vectors irq [arm]\n");
+    } else
+      console_puts("Usage: kmap [test | vectors [test | irq [arm]]]\n");
     return;
   }
   if (console_arg_word(&args, "test")) {
     if (console_arg_end(args))
       run_high_test();
     else
-      console_puts("Usage: kmap [test | vectors test]\n");
+      console_puts("Usage: kmap [test | vectors [test | irq [arm]]]\n");
     return;
   }
   if (!console_arg_end(args)) {
-    console_puts("Usage: kmap [test | vectors test]\n");
+    console_puts("Usage: kmap [test | vectors [test | irq [arm]]]\n");
     return;
   }
   const mmu_address_space_t *space = mmu_high_address_space();

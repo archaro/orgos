@@ -23,7 +23,7 @@ A largely complete MIDI API is found in `src/midi.h`. Building a MIDI applicatio
 into the kernel should just be a matter of including that file in the new
 application source, and modifying `main.c` appropriately.
 
-- [Higher-half mappings, execution and vector checks](docs/higher-half-kernel.md)
+- [Higher-half mappings, permanent vectors and IRQ checks](docs/higher-half-kernel.md)
 - [Address-space machinery and MMU validation](docs/address-spaces.md)
 - [Recoverable exceptions and EL1 trap test](docs/exceptions.md)
 - [First EL0 program and privilege-fault test](docs/el0-testing.md)

@@ -10,7 +10,7 @@
 #include "../src/el0_context.c"
 #include "../src/console_el0_context.c"
 
-const char exception_test_resume[1] = {0};
+extern const char exception_test_resume[];
 static bool mappings = true, legacy_active, reject_traps;
 static unsigned int switches;
 static int current_reg = -1, resumed_reg = -1;

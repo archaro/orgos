@@ -5,6 +5,7 @@
 // result establishes hardware MMU or higher-half instruction execution.
 #include "mmu_activation.h"
 #include "mmu_high_test.h"
+#include "mmu_vectors.h"
 
 static uint64_t mmu_pages[4][13][512] __attribute__((aligned(4096)));
 static mmu_table_ref_t mmu_refs[4][13];
@@ -15,7 +16,7 @@ static mmu_high_hw_state_t live;
 #define selected_root live.ttbr0
 static bool activation_failed, mmu_locked;
 static uint64_t live_daif = 0x340;
-static unsigned int upper_writes, lower_writes;
+static unsigned int upper_writes, lower_writes, vector_writes;
 static const mmu_boot_layout_t mmu_layout = {
   .kernel = {0x80000, 0x1b6000}, .text = {0x80000, 0x100000},
   .el0_text = {0x100000, 0x101000}, .rodata = {0x101000, 0x102000},
@@ -117,6 +118,24 @@ bool mmu_restore_kernel_space(void) {
   return mmu_activation_select(&lower_owner, &test_spaces[0]);
 }
 
+void mmu_vectors_hw_operation(mmu_vector_op_t op, uint64_t value) {
+  assert(mmu_locked && live_daif == 0x3c0);
+  if (op == MMU_VECTOR_WRITE_VBAR) {
+    live.vbar = value;
+    vector_writes++;
+  }
+}
+uint64_t mmu_vectors_hw_trigger(void) {
+  exception_frame_t frame = {.vector = 4, .esr = 0x56000021,
+    .spsr = 0xa00003c5, .elr = 0x84000, .sp = live.sp - 432,
+    .sp_el0 = VECTORS_TEST_SP_EL0};
+  uint64_t saved = live.sp_el0;
+  live.sp_el0 = VECTORS_TEST_SP_EL0;
+  exception_sync_entry(&frame, MMU_TTBR1_BASE + 0x810a0);
+  live.sp_el0 = saved;
+  return 0;
+}
+
 static void mmu_fixture_init(void) {
   const physmem_map_t memory = {.bank_count = 1, .banks = {{0, 0x8000000}}};
   for (unsigned int s = 0; s < 4; s++) {
@@ -145,11 +164,16 @@ static void mmu_fixture_init(void) {
     .mair = MMU_MAIR_DEVICE_NC_WB, .sctlr = 0x81005, .vbar = 0x80800,
     .sp = 0x1b3000, .pc = 0x81500, .current_el = 4, .spsel = 1};
   assert(mmu_high_enable(&upper_owner));
+  const mmu_vector_code_t code = {0x80800, 0x81800, 0x810a0, 0x84000,
+    {0x85000, 0x85100, 0x85200, 0x85300}, {0x81140, 0x81340}};
+  mmu_vectors_result_t vectors;
+  assert(mmu_vectors_install(&upper_owner, &code, &vectors));
   assert(mmu_activation_init(&lower_owner, &test_spaces[0], &test_spaces[1],
                               &test_spaces[2], &mmu_layout));
 }
 
 static void mmu_fixture_check(void) {
+  assert(vector_writes == 1 && upper_owner.vectors_high);
   assert(upper_writes == 2); // No later diagnostic/switch writes TCR/TTBR1.
   assert(lower_writes > 0 && !mmu_locked && live_daif == 0x340);
   assert(selected_root == test_spaces[0].root_physical);

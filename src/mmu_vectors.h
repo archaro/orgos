@@ -6,16 +6,10 @@
 #include "mmu_high_test.h"
 #include "exceptions.h"
 
-// Linker-derived, immutable bounds of the shared vector/entry assembly.
-// All C targets are absolute low addresses in the assembly literal pool.
-typedef struct {
-  vaddr_t vectors, end, observed_site, continuation;
-  vaddr_t handlers[4];
-} mmu_vector_code_t;
 
 typedef struct {
   bool validated, switched, observed, restored, persistent, masks_restored;
-  bool passed;
+  bool passed, permanent, already_active;
   const char *status;
   vaddr_t high_vbar, expected_pc, observed_pc, continuation, entry_sp;
   paddr_t vector_physical, expected_physical, observed_physical;
@@ -28,6 +22,33 @@ typedef struct {
 bool mmu_vectors_run(mmu_high_test_control_t *owner,
     const mmu_vector_code_t *code, mmu_vectors_result_t *result);
 bool mmu_vectors_test(mmu_vectors_result_t *result);
+bool mmu_vectors_install(mmu_high_test_control_t *owner,
+    const mmu_vector_code_t *code, mmu_vectors_result_t *result);
+bool mmu_vectors_validate(mmu_high_test_control_t *owner,
+    const mmu_high_hw_state_t *state);
+bool mmu_vectors_inspect(mmu_vectors_result_t *result);
+
+// Fixed one-shot evidence per IRQ path. Captured in IRQ, translated and
+// reported in foreground. No retained live frame pointers.
+typedef struct {
+  bool observed, verified, handler_completed;
+  vaddr_t pc, expected_pc;
+  paddr_t physical;
+  uint32_t source;
+  uint64_t count_before, count_after;
+  exception_frame_t frame;
+  mmu_high_hw_state_t state;
+} mmu_vector_irq_record_t;
+typedef struct {
+  bool valid;
+  mmu_vector_irq_record_t paths[2];
+} mmu_vector_irq_result_t;
+void exception_irq_entry(exception_frame_t *frame, vaddr_t observed_pc);
+bool mmu_vectors_irq_arm_owner(mmu_high_test_control_t *owner);
+bool mmu_vectors_irq_read_owner(mmu_high_test_control_t *owner,
+    mmu_vector_irq_result_t *result);
+bool mmu_vectors_irq_arm(void);
+bool mmu_vectors_irq_read(mmu_vector_irq_result_t *result);
 // Called from sync assembly only after SAVE_FRAME. Outside the armed test
 // it forwards unchanged to the existing exception dispatcher.
 void exception_sync_entry(exception_frame_t *frame, vaddr_t observed_pc);

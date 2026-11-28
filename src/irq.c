@@ -6,7 +6,6 @@
 #include "gic.h"
 #include "irq.h"
 #include "pcie.h"
-#include "console.h"
 
 static volatile uint64_t total_irqs;
 static volatile uint32_t pcie_msi_irqs;
@@ -34,7 +33,7 @@ uint32_t irq_pcie_msi_count(void) {
   return pcie_msi_irqs;
 }
 
-void irq_dispatch(exception_frame_t *frame) {
+uint32_t irq_dispatch_observed(exception_frame_t *frame) {
   (void)frame;
   // Read GICC_IAR to acknowledge the highest-priority
   // pending interrupt.
@@ -45,7 +44,7 @@ void irq_dispatch(exception_frame_t *frame) {
   // ID 1023 indicates a spurious interrupt:
   // there is nothing to acknowledge or finish.
   if (id == 1023U)
-    return;
+    return id;
 
   total_irqs++;
 
@@ -74,21 +73,15 @@ void irq_dispatch(exception_frame_t *frame) {
       break;
     }
     default:
-      // No handler owns this source. Mask exceptions before the polled
-      // UART diagnostic, then halt without clearing the source or EOI.
-      __asm__ volatile("msr daifset, #0xf" ::: "memory");
-      console_puts("\nUnexpected IRQ ");
-      console_putu32(id);
-      console_puts(" (IAR token 0x");
-      console_puthex(token, 8U);
-      console_puts("). System halted.\n");
-      __asm__ volatile("dsb sy" ::: "memory");
-      for (;;) {
-        __asm__ volatile("wfe");
-      }
+      irq_unexpected(id, token);
   }
 
   // Tell the GIC that we have finished servicing this interrupt.
   gic_end_irq(token);
+  return id;
+}
+
+void irq_dispatch(exception_frame_t *frame) {
+  (void)irq_dispatch_observed(frame);
 }
 

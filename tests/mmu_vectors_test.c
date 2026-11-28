@@ -1,5 +1,7 @@
 #include "mmu_high_fixture.h"
 #include "mmu_vectors.h"
+#include "irq.h"
+#include "gic.h"
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/wait.h>
@@ -38,7 +40,8 @@ void mmu_vectors_hw_operation(mmu_vector_op_t op, uint64_t value) {
   }
 }
 uint64_t mmu_vectors_hw_trigger(void) {
-  assert(vector_count == 2 && vector_ops[1] == MMU_VECTOR_ISB);
+  assert(control.vectors_high ? vector_count == 0 :
+      vector_count == 2 && vector_ops[1] == MMU_VECTOR_ISB);
   assert(hw.vbar == MMU_TTBR1_BASE + vectors.vectors);
   triggers++;
   if (bad_entry == 11)
@@ -86,7 +89,7 @@ static void vector_reset(void) {
   reset();
   assert(mmu_high_enable(&control));
   vectors = (mmu_vector_code_t){0x80800, 0x81800, 0x810a0, 0x84000,
-    {0x85000, 0x85100, 0x85200, 0x85300}};
+    {0x85000, 0x85100, 0x85200, 0x85300}, {0x81140, 0x81340}};
   vector_count = triggers = bad_entry = bad_transition = 0;
   operation_count = 0;
 }
@@ -112,6 +115,133 @@ static void fatal_case(unsigned int entry, unsigned int transition) {
     fatal_expected = true;
     if (!setjmp(fatal_return)) {
       (void)mmu_vectors_run(&control, &vectors, &report);
+      _exit(1);
+    }
+    assert(locked && daif == 0x3c0);
+    _exit(0);
+  }
+  int status;
+  assert(waitpid(child, &status, 0) == child);
+  assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+}
+
+static uint32_t iar = 1023, eoi, uart_calls, quiesces;
+static unsigned int bad_irq;
+static exception_frame_t *irq_live_frame;
+uint32_t gic_acknowledge(void) { return iar; }
+void gic_end_irq(uint32_t token) { eoi = token; }
+void uart_handle_irq(void) {
+  uart_calls++;
+  if (bad_irq == 3) irq_live_frame->x[16] ^= 1;
+  if (bad_irq == 4) hw.ttbr1 ^= 4096;
+}
+uint32_t pcie_msi_host_irq_quiesce(void) { quiesces++; return 1; }
+void gic_pcie_msi_test_finish(void) {}
+uint64_t timer_now_us(void) { return 1234; }
+__attribute__((noreturn)) void irq_unexpected(uint32_t id, uint32_t token) {
+  (void)id; (void)token;
+  mmu_high_hw_fatal("Unowned IRQ source");
+}
+const mmu_address_space_t *mmu_context_address_space(unsigned int id) {
+  return id < 2 ? &spaces[id + 2] : NULL;
+}
+
+static void deliver_irq(unsigned int path, uint32_t source) {
+  exception_frame_t frame = {.vector = path ? 9 : 5,
+    .spsr = path ? 0xa0000340 : 0x60000345,
+    .elr = path ? layout.el0_text.start : 0x84040,
+    .sp = path ? EL0_STACK_TOP - 32 : hw.sp - 64,
+    .sp_el0 = path ? EL0_STACK_TOP - 32 : hw.sp_el0};
+  for (unsigned int i = 0; i < 31; i++) frame.x[i] = 0x987654320000ULL + i;
+  if (bad_irq == 2) frame.spsr ^= 1;
+  irq_live_frame = &frame;
+  exception_frame_t before = frame;
+  uint64_t saved_daif = mmu_high_hw_lock(); // Model CPU IRQ entry masking.
+  uint64_t saved_sp_el0 = hw.sp_el0;
+  hw.sp_el0 = frame.sp_el0;
+  iar = source;
+  eoi = UINT32_MAX;
+  exception_irq_entry(&frame, MMU_TTBR1_BASE + vectors.irq_sites[path] +
+      (bad_irq == 1 ? 4 : 0));
+  assert(memcmp(&before, &frame, sizeof(frame)) == 0);
+  assert(source == 1023 ? eoi == UINT32_MAX : eoi == source);
+  hw.sp_el0 = saved_sp_el0;
+  mmu_high_hw_unlock(saved_daif); // Simulated return, not hardware ERET.
+}
+
+static void permanent_vectors(void) {
+  vector_reset();
+  assert(mmu_vectors_install(&control, &vectors, &report));
+  assert(control.vectors_high && report.permanent && vector_count == 2);
+  assert(hw.vbar == MMU_TTBR1_BASE + vectors.vectors);
+  assert(mmu_high_persistent_matches(&control, &hw));
+  vector_count = 0;
+  for (unsigned int n = 0; n < 16; n++) {
+    daif = (uint64_t)n << 6;
+    assert(mmu_vectors_install(&control, &vectors, &report));
+    assert(mmu_vectors_run(&control, &vectors, &report));
+    assert(report.permanent && report.already_active && report.observed);
+    assert(vector_count == 0 && daif == (uint64_t)n << 6);
+  }
+  daif = 0x340;
+  assert(mmu_activation_init(&lower, &spaces[0], &spaces[2], &spaces[3],
+                              &layout));
+  for (unsigned int n = 0; n < 8; n++) {
+    assert(mmu_activation_select(&lower, &spaces[2 + n % 2]));
+    assert(hw.vbar == control.live_vbar && hw.ttbr1 == control.root);
+    assert(mmu_activation_select(&lower, &spaces[0]));
+    assert(mmu_high_test_run(&control, &(mmu_high_test_result_t){0}));
+    // High leaf probe adds no VBAR/TCR writes under the permanent regime.
+    assert(vector_count == 0 && operation_count == 0);
+  }
+  mmu_vector_irq_result_t irq;
+  assert(mmu_vectors_irq_read_owner(&control, &irq));
+  assert(!irq.paths[0].observed && !irq.paths[1].observed);
+  assert(mmu_vectors_irq_arm_owner(&control));
+  deliver_irq(0, 1023);
+  assert(mmu_vectors_irq_read_owner(&control, &irq));
+  assert(!irq.paths[0].observed && !irq.paths[0].verified);
+  deliver_irq(0, GIC_IRQ_UART0 | 0x1000U);
+  assert(uart_calls == 1);
+  assert(mmu_vectors_irq_read_owner(&control, &irq));
+  assert(irq.paths[0].verified && irq.paths[0].handler_completed);
+  assert(irq.paths[0].physical == vectors.irq_sites[0]);
+  assert(!irq.paths[1].observed);
+  deliver_irq(0, GIC_IRQ_PCIE_MSI); // Unarmed path still dispatches normally.
+  assert(quiesces == 1 && irq_pcie_msi_hardware_count() == 1);
+  assert(mmu_activation_select(&lower, &spaces[2]));
+  deliver_irq(1, GIC_IRQ_UART0);
+  assert(mmu_activation_select(&lower, &spaces[0]));
+  assert(mmu_vectors_irq_read_owner(&control, &irq));
+  assert(irq.paths[1].verified && irq.paths[1].frame.vector == 9);
+  assert(irq.paths[1].state.ttbr0 == spaces[2].root_physical);
+  assert(irq.paths[1].physical == vectors.irq_sites[1]);
+  unavailable = MMU_TTBR1_BASE + vectors.irq_sites[0];
+  assert(mmu_vectors_irq_read_owner(&control, &irq));
+  assert(irq.paths[0].observed && !irq.paths[0].verified);
+  unavailable = UINT64_MAX;
+  bad_high_read = true;
+  assert(!mmu_vectors_irq_read_owner(&control, &irq));
+  bad_high_read = false;
+  hw.vbar = vectors.vectors; // Low VBAR is no longer an admissible regime.
+  assert(!mmu_vectors_irq_arm_owner(&control));
+  assert(!mmu_vectors_install(&control, &vectors, &report));
+  assert(vector_count == 0);
+  hw.vbar = MMU_TTBR1_BASE + vectors.vectors;
+  puts("Permanent vectors, TTBR0 switching and simulated EL1/EL0 IRQs: PASS");
+}
+
+static void irq_fatal_case(unsigned int bad) {
+  pid_t child = fork();
+  assert(child >= 0);
+  if (!child) {
+    vector_reset();
+    assert(mmu_vectors_install(&control, &vectors, &report));
+    assert(mmu_vectors_irq_arm_owner(&control));
+    bad_irq = bad;
+    fatal_expected = true;
+    if (!setjmp(fatal_return)) {
+      deliver_irq(0, GIC_IRQ_UART0);
       _exit(1);
     }
     assert(locked && daif == 0x3c0);
@@ -179,6 +309,8 @@ int main(void) {
     fatal_case(bad, 0);
   for (unsigned int bad = 1; bad <= 4; bad++)
     fatal_case(0, bad);
+  permanent_vectors();
+  for (unsigned int bad = 1; bad <= 4; bad++) irq_fatal_case(bad);
   puts("Higher-vector transition, observation, preservation "
        "and rejection: PASS");
   return 0;

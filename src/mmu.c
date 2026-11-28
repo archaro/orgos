@@ -111,6 +111,7 @@ static uint64_t high_pages[MMU_BOOT_TABLE_COUNT][MMU_TABLE_ENTRIES]
 static mmu_table_ref_t high_tables[MMU_BOOT_TABLE_COUNT];
 static mmu_address_space_t high_space;
 static mmu_high_test_control_t high_experiment;
+static mmu_vector_code_t vector_manifest(void);
 extern char mmu_high_probe[], mmu_high_probe_site[], mmu_high_probe_end[];
 extern char mmu_high_call_return[];
 
@@ -322,6 +323,10 @@ bool mmu_init(const physmem_map_t *memory) {
   // This is the sole boot transition into the persistent dual regime.
   if (!mmu_high_enable(&high_experiment))
     return false;
+  mmu_vectors_result_t vectors;
+  mmu_vector_code_t code = vector_manifest();
+  if (!mmu_vectors_install(&high_experiment, &code, &vectors))
+    return false;
   return mmu_activation_init(&environments, &kernel_space, &context_spaces[0],
                               &context_spaces[1], &kernel_layout);
 }
@@ -409,17 +414,43 @@ void mmu_activation_fatal(void) {
   mmu_high_hw_fatal("TTBR0 switch changed the translation environment");
 }
 
-bool mmu_vectors_test(mmu_vectors_result_t *result) {
+static mmu_vector_code_t vector_manifest(void) {
   extern char exception_vectors[], exception_vector_code_end[];
   extern char exception_sync_observed[], exception_test_resume[];
-  const mmu_vector_code_t code = {
+  extern char exception_irq_el1_observed[], exception_irq_el0_observed[];
+  return (mmu_vector_code_t){
     .vectors = (uintptr_t)exception_vectors,
     .end = (uintptr_t)exception_vector_code_end,
     .observed_site = (uintptr_t)exception_sync_observed,
     .continuation = (uintptr_t)exception_test_resume,
     .handlers = {(uintptr_t)exception_sync_entry,
       (uintptr_t)exception_dispatch, (uintptr_t)exception_panic,
-      (uintptr_t)irq_dispatch}
+      (uintptr_t)exception_irq_entry},
+    .irq_sites = {(uintptr_t)exception_irq_el1_observed,
+      (uintptr_t)exception_irq_el0_observed}
   };
+}
+
+bool mmu_vectors_test(mmu_vectors_result_t *result) {
+  mmu_vector_code_t code = vector_manifest();
   return mmu_vectors_run(&high_experiment, &code, result);
+}
+bool mmu_vectors_inspect(mmu_vectors_result_t *result) {
+  if (!result)
+    return false;
+  *result = (mmu_vectors_result_t){0};
+  uint64_t daif = mmu_high_hw_lock();
+  mmu_high_hw_read(&result->before);
+  result->passed = mmu_vectors_validate(&high_experiment, &result->before);
+  result->high_vbar = high_experiment.live_vbar;
+  result->vector_physical = high_experiment.vectors.vectors;
+  result->permanent = high_experiment.vectors_high;
+  mmu_high_hw_unlock(daif);
+  return result->passed;
+}
+bool mmu_vectors_irq_arm(void) {
+  return mmu_vectors_irq_arm_owner(&high_experiment);
+}
+bool mmu_vectors_irq_read(mmu_vector_irq_result_t *result) {
+  return mmu_vectors_irq_read_owner(&high_experiment, result);
 }

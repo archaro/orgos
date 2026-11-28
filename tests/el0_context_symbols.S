@@ -26,3 +26,6 @@
 .global el0_context_program_end
 .set el0_context_program_end, 0x100104
 .section .note.GNU-stack,"",%progbits
+
+.global exception_test_resume
+.set exception_test_resume, 0x84000

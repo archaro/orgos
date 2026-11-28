@@ -44,6 +44,15 @@ static char output[8192];
 static size_t written;
 static unsigned int register_reads;
 static unsigned int execution_requests, vector_requests;
+bool mmu_vectors_inspect(mmu_vectors_result_t *r) {
+  *r = (mmu_vectors_result_t){.permanent = true};
+  return true;
+}
+bool mmu_vectors_irq_arm(void) { return true; }
+bool mmu_vectors_irq_read(mmu_vector_irq_result_t *r) {
+  *r = (mmu_vector_irq_result_t){.valid = true};
+  return true;
+}
 bool mmu_vectors_test(mmu_vectors_result_t *r) {
   vector_requests++;
   *r = (mmu_vectors_result_t){.status = "PASS", .passed = true,
@@ -280,14 +289,23 @@ int main(void) {
   assert(strstr(output, "Usage: kmap") && vector_requests == 0);
   written = 0;
   cmd_kmap("vectors");
-  assert(strstr(output, "Usage: kmap") && vector_requests == 0);
+  assert(strstr(output, "Permanent higher-half vectors: ACTIVE") &&
+      vector_requests == 0);
   written = 0;
   cmd_kmap("vectors test");
   assert(strstr(output, "Higher-half vector test: PASS"));
   assert(strstr(output, "Exception vector: 4"));
-  assert(strstr(output, "Low vectors restored: YES"));
+  assert(strstr(output, "Vector configuration preserved: YES"));
   assert(strstr(output, "Persistent TTBR1: PRESERVED (ENABLED)"));
   assert(vector_requests == 1 && execution_requests == 2);
+  written = 0;
+  cmd_kmap("vectors irq");
+  assert(strstr(output, "EL1h IRQ: NOT OBSERVED"));
+  assert(strstr(output, "EL0 IRQ: NOT OBSERVED"));
+  assert(!strstr(output, "IRQ: PASS"));
+  written = 0;
+  cmd_kmap("vectors irq arm");
+  assert(strstr(output, "IRQ observation ARMED"));
   puts("Higher-half geometry, policy and active/inactive inspection: PASS");
   return 0;
 }

@@ -39,7 +39,9 @@ static bool preflight(const mmu_high_test_control_t *c,
     const mmu_vector_code_t *code, const mmu_high_hw_state_t *s) {
   if (!mmu_high_persistent_matches(c, s) ||
       c->kernel->state != MMU_SPACE_ACTIVE || s->ttbr0 != c->kernel_root ||
-      s->vbar != code->vectors || (code->vectors & 2047U) ||
+      s->vbar != (c->vectors_high ?
+        MMU_TTBR1_BASE + code->vectors : code->vectors) ||
+      (code->vectors & 2047U) ||
       !in_text(c, code->vectors) || code->end <= code->vectors + 2048U ||
       code->end - code->vectors > 16384U ||
       code->end > c->layout.text.end ||
@@ -47,6 +49,14 @@ static bool preflight(const mmu_high_test_control_t *c,
       code->observed_site > code->end - 4U ||
       ((code->observed_site | code->continuation | code->end) & 3U) ||
       !in_text(c, code->continuation))
+    return false;
+  for (unsigned int i = 0; i < 2; i++) {
+    if ((code->irq_sites[i] & 3U) ||
+        code->irq_sites[i] < code->vectors + 2048U ||
+        code->irq_sites[i] > code->end - 4U)
+      return false;
+  }
+  if (c->vectors_high && memcmp(code, &c->vectors, sizeof(*code)))
     return false;
   // Whole table, entry/return stubs and literal pool, at both aliases.
   // Check both ends of every intersected page, including partial pages.
@@ -71,9 +81,9 @@ static bool preflight(const mmu_high_test_control_t *c,
       !stack.fault && stack.physical_address == s->sp - 16U;
 }
 
-// While VBAR is temporarily high, retain every other pinned invariant.
-// Handler SP is deeper on the same low stack and SP_EL0 holds the sentinel.
-// The persistent owner's normal low-VBAR rule is never relaxed.
+// During vector selection retain every other pinned invariant. Handler
+// SP is deeper on the same low stack and SP_EL0 holds the sentinel. The
+// normal owner advances to its exact high-VBAR contract only after proof.
 static bool phase_valid(const mmu_high_test_control_t *c,
     const mmu_vectors_result_t *r, const mmu_high_hw_state_t *s,
     vaddr_t vbar, bool handler) {
@@ -124,13 +134,15 @@ void exception_sync_entry(exception_frame_t *frame, vaddr_t pc) {
     mmu_high_hw_fatal("Higher-vector dispatcher changed the saved frame");
 }
 
-bool mmu_vectors_run(mmu_high_test_control_t *c,
-    const mmu_vector_code_t *code, mmu_vectors_result_t *r) {
+static bool run(mmu_high_test_control_t *c,
+    const mmu_vector_code_t *code, mmu_vectors_result_t *r, bool keep) {
   if (!r)
     return false;
   *r = (mmu_vectors_result_t){.status = "Precondition rejected"};
   if (!c || !code || c->busy || armed.result)
     return false;
+  r->permanent = keep || c->vectors_high;
+  r->already_active = c->vectors_high;
   r->high_vbar = MMU_TTBR1_BASE + code->vectors;
   r->expected_pc = MMU_TTBR1_BASE + code->observed_site;
   r->vector_physical = code->vectors;
@@ -148,8 +160,10 @@ bool mmu_vectors_run(mmu_high_test_control_t *c,
   armed.result = r;
   // VBAR is a context change, not a PTE replacement. No TLBI or cache
   // maintenance: MSR + ISB makes the immutable vector alias selectable.
-  mmu_vectors_hw_operation(MMU_VECTOR_WRITE_VBAR, r->high_vbar);
-  mmu_vectors_hw_operation(MMU_VECTOR_ISB, 0);
+  if (!c->vectors_high) {
+    mmu_vectors_hw_operation(MMU_VECTOR_WRITE_VBAR, r->high_vbar);
+    mmu_vectors_hw_operation(MMU_VECTOR_ISB, 0);
+  }
   r->switched = true;
   mmu_high_hw_read(&r->installed);
   if (!phase_valid(c, r, &r->installed, r->high_vbar, false))
@@ -160,11 +174,19 @@ bool mmu_vectors_run(mmu_high_test_control_t *c,
   if (!r->observed || r->failures ||
       !phase_valid(c, r, &returned, r->high_vbar, false))
     mmu_high_hw_fatal("Higher-vector exception return failed");
-  mmu_vectors_hw_operation(MMU_VECTOR_WRITE_VBAR, r->before.vbar);
-  mmu_vectors_hw_operation(MMU_VECTOR_ISB, 0);
+  if (!r->permanent) {
+    mmu_vectors_hw_operation(MMU_VECTOR_WRITE_VBAR, r->before.vbar);
+    mmu_vectors_hw_operation(MMU_VECTOR_ISB, 0);
+  }
   mmu_high_hw_read(&r->after);
-  if (!phase_valid(c, r, &r->after, r->before.vbar, false))
-    mmu_high_hw_fatal("Low VBAR restoration failed");
+  if (!phase_valid(c, r, &r->after,
+          r->permanent ? r->high_vbar : r->before.vbar, false))
+    mmu_high_hw_fatal("Required VBAR configuration was not retained");
+  if (r->permanent) {
+    c->vectors = *code;
+    c->live_vbar = r->high_vbar;
+    c->vectors_high = true;
+  }
   armed.result = NULL;
   armed.owner = NULL;
   armed.code = NULL;
@@ -182,4 +204,19 @@ done:
   }
   r->masks_restored = true;
   return r->passed;
+}
+
+
+bool mmu_vectors_run(mmu_high_test_control_t *owner,
+    const mmu_vector_code_t *code, mmu_vectors_result_t *result) {
+  return run(owner, code, result, false);
+}
+bool mmu_vectors_install(mmu_high_test_control_t *owner,
+    const mmu_vector_code_t *code, mmu_vectors_result_t *result) {
+  return run(owner, code, result, true);
+}
+bool mmu_vectors_validate(mmu_high_test_control_t *owner,
+    const mmu_high_hw_state_t *state) {
+  return owner && owner->vectors_high &&
+      preflight(owner, &owner->vectors, state);
 }

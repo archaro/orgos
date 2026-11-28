@@ -399,7 +399,7 @@ void main(void) {
   console_puts("Initialising MMU... ");
   if (!memory_ok || !mmu_init(physmem_get_map()))
     boot_halt("memory information or MMU");
-  console_puts("OK (persistent TTBR1; kernel executes low).\n");
+  console_puts("OK (persistent TTBR1/high vectors; kernel executes low).\n");
 
   // Now we have the physical memory map and the MMU is configured,
   // it is time to initialise the physical page allocator.
@@ -409,7 +409,7 @@ void main(void) {
   console_puts("OK.\n");
 
   // Initialise interrupt delivery.
-  // VBAR_EL1 was installed by boot.S.
+  // High VBAR_EL1 was validated/installed during mmu_init.
   // The CPU's IRQ mask is still set.
   gic_init();
 

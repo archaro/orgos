@@ -28,12 +28,20 @@ typedef struct {
   mmu_high_probe_result_t low, high;
 } mmu_high_test_result_t;
 
+// Immutable vector manifest, pinned by the same persistent upper owner.
+typedef struct {
+  vaddr_t vectors, end, observed_site, continuation;
+  vaddr_t handlers[4];
+  vaddr_t irq_sites[2]; // EL1h vector 5, lower-AArch64 vector 9.
+} mmu_vector_code_t;
+
 // One static higher-half owner, shared by boot activation and diagnostics.
 // The 44 KiB exact snapshot belongs in BSS, never on the 16 KiB EL1 stack.
 // Supply a zero-initialised, exclusive controller disjoint from the table
 // pages and metadata. All referenced objects must outlive the controller.
 typedef struct {
-  bool admitted, busy, persistent;
+  bool admitted, busy, persistent, vectors_high;
+  mmu_vector_code_t vectors;
   uint64_t live_sctlr, live_vbar;
   const mmu_address_space_t *kernel;
   mmu_address_space_t *higher;

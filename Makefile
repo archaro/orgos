@@ -74,6 +74,7 @@ clean:
 check: | $(OBJ_DIR)
 	$(HOSTCC) $(HOSTCFLAGS) -fno-pie -no-pie -iquote $(SRC_DIR) \
 		tests/mmu_vectors_test.c $(SRC_DIR)/mmu_vectors.c \
+		$(SRC_DIR)/mmu_vectors_irq.c $(SRC_DIR)/irq.c \
 		$(SRC_DIR)/exception_dispatch.c $(SRC_DIR)/mmu_high_test.c \
 		$(SRC_DIR)/mmu_activation.c $(SRC_DIR)/mmu_tables.c \
 		$(SRC_DIR)/mmu_boot.c -o $(OBJ_DIR)/mmu_vectors_test
@@ -99,6 +100,7 @@ check: | $(OBJ_DIR)
 	$(OBJ_DIR)/mmu_tables_test
 	$(HOSTCC) $(HOSTCFLAGS) -fno-pie -no-pie -iquote $(SRC_DIR) \
 		tests/el0_context_test.c tests/el0_context_symbols.S \
+		$(SRC_DIR)/mmu_vectors.c \
 		$(SRC_DIR)/mmu_high_test.c $(SRC_DIR)/mmu_activation.c \
 		$(SRC_DIR)/mmu_tables.c $(SRC_DIR)/mmu_boot.c \
 		$(SRC_DIR)/el0_stack.c \

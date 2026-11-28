@@ -105,7 +105,7 @@ shared privileged upper range; see the address-space and virtual-stack
 guides for the implemented isolation and its limits.
 
 
-## H2.6f2: one synchronous entry through high vectors
+## Historical H2.6f2: one synchronous entry through high vectors
 
 `kmap vectors test` temporarily installs the existing table's higher-half
 alias in VBAR_EL1, reuses the known EL1 SVC 0x21/site, and restores the
@@ -151,3 +151,58 @@ pending until the documented Pi test passes. IRQ, FIQ and SError are masked
 throughout this experiment; later low-vector IRQ/USB/MIDI regressions do
 not prove higher-half IRQ entry. Permanent high vectors require separate
 live IRQ/lower-EL/nested-exception review and compatible activation guards.
+
+
+## H2.6f3: permanent vectors and real IRQ recording
+
+The current boot installs validated high VBAR after persistent TTBR1 is
+ready and before interrupt delivery is enabled. The same upper owner pins
+that exact vector address; TTBR0 selection and all ordinary diagnostics
+preserve it. `kmap vectors` inspects the current configuration and
+`kmap vectors test` reuses the controlled EL1 SVC without any VBAR write.
+The former temporary mode remains a host regression fixture only.
+
+Both IRQ entry stubs capture their actual PC using ADR after SAVE_FRAME:
+vector 5 for EL1h and vector 9 for lower AArch64. A low C observer forwards
+unarmed interrupts to the original dispatcher. An explicit
+`kmap vectors irq arm` enables one fixed record per path. The source-
+returning dispatch adapter retains the existing void dispatch interface,
+IAR read, handler selection and complete-token EOI. Source 1023 stays
+spurious and cannot satisfy an observation. Unexpected-source masked halt
+is preserved in a separately testable hardware boundary.
+
+Armed records retain the actual PC, full frame, saved mode/continuation,
+architectural state, acknowledged GIC source and before/after IRQ counts.
+The observer verifies that dispatch changed neither frame nor critical
+state. No printing or AT translation occurs inside IRQ entry. Foreground
+`kmap vectors irq` copies under saved DAIF and verifies each observed high
+instruction's hardware translation, vector/mode, admitted TTBR0 and the
+permanent VBAR/root/TCR. Missing observations never report PASS.
+
+The handler-completed flag means handler and EOI completed before ERET.
+Continued foreground reporting is the operational return evidence; it is
+not a fabricated post-ERET register snapshot. Common assembly still
+restores x0-x30, SP_EL0, ELR and SPSR without changes to the 304-byte frame.
+IRQ acknowledgement, priorities, routing and driver interfaces remain
+unchanged. No IRQ scheduling, new timer source or special EL0 unmask is
+introduced. Transition critical sections still mask asynchronous entry.
+
+Real UART receive IRQ 153 provides the repeatable Pi source: arm, wait for
+the prompt, then type a new query. Send lines separately, since already-
+buffered characters may not produce a new IRQ after arming. Source 180
+observations belong to the existing MSI/GIC procedures and must retain
+their distinction between software-pending GIC and physical MSI events.
+
+EL0 inherits the caller's initial mask; a normal console dispatch may
+allow IRQs, but short slices may receive none. Physical EL0 IRQ coverage
+requires an actual vector-9 record under a context TTBR0 and successful
+subsequent context checks. EL1 IRQs between resumptions prove only EL1
+coverage. Host tests simulate both paths with production controllers and
+IRQ dispatch, covering frame/state preservation, spurious rejection,
+source accounting, full-token EOI and fatal corrupt evidence. Physical
+EL1/EL0 IRQ verification and USB/MIDI delivery remain pending for H2.6f3.
+
+See the [current higher-half Pi procedure](higher-half-kernel.md) for
+commands and numeric acceptance criteria. A future stack migration must
+review IRQ/nested/fatal entry and both trusted continuations and activation
+bounds; all current C handlers and stack accesses remain low.

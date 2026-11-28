@@ -129,13 +129,19 @@ static bool translation(vaddr_t va, paddr_t pa, bool write, bool denied) {
 static bool anchors_valid(const mmu_high_test_control_t *c,
                            const mmu_high_hw_state_t *s) {
   const uint64_t required = 1ULL | 4ULL | (1ULL << 12) | (1ULL << 19);
+  vaddr_t vectors = s->vbar;
+  if (c->vectors_high) {
+    if (vectors != MMU_TTBR1_BASE + c->vectors.vectors)
+      return false;
+    vectors = c->vectors.vectors;
+  }
   return s->mair == MMU_MAIR_DEVICE_NC_WB &&
       (s->sctlr & required) == required && s->current_el == 4U &&
       s->spsel == 1U && s->pc >= c->layout.text.start &&
       s->pc < c->layout.text.end && s->sp > c->layout.stack.start &&
       s->sp <= c->layout.stack.end && !(s->sp & 15U) &&
-      !(s->vbar & 2047U) && s->vbar >= c->layout.text.start &&
-      s->vbar <= c->layout.text.end - 2048U;
+      !(vectors & 2047U) && vectors >= c->layout.text.start &&
+      vectors <= c->layout.text.end - 2048U;
 }
 
 bool mmu_high_persistent_matches(const mmu_high_test_control_t *c,
@@ -154,7 +160,8 @@ static bool environment_valid(const mmu_high_test_control_t *c,
       (c->persistent && (s->ttbr1 != c->root ||
         s->sctlr != c->live_sctlr || s->vbar != c->live_vbar)))
     return false;
-  if (!translation(s->vbar, s->vbar, false, false) ||
+  if (!translation(s->vbar, c->vectors_high ? c->vectors.vectors : s->vbar,
+                   false, false) ||
       !translation(s->sp - 16U, s->sp - 16U, true, false) ||
       !translation(c->code.entry, c->code.entry, false, false) ||
       !translation(c->code.entry, 0, true, true))
