@@ -53,11 +53,15 @@ LDFLAGS := -T link.ld
 
 all: $(TARGET)
 
-$(TARGET): $(ELF)
+$(TARGET): $(ELF) tools/check_c_island.py
+	python3 tools/check_c_island.py "$(CROSS)" $(ELF) $(OBJ_DIR)/mmu_c_island.o
 	$(OBJCOPY) -O binary $< $@
 
 $(ELF): $(OBJS) link.ld
 	$(LD) $(LDFLAGS) $(OBJS) -o $@
+
+# Keep this diagnostic inspectable without changing global code generation.
+$(OBJ_DIR)/mmu_c_island.o: CFLAGS += -fno-optimize-sibling-calls -fno-jump-tables
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(OBJ_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -72,6 +76,16 @@ clean:
 	rm -rf $(OBJ_DIR) $(TARGET)
 
 check: | $(OBJ_DIR)
+	$(HOSTCC) $(HOSTCFLAGS) -iquote $(SRC_DIR) \
+		tests/mmu_c_test.c $(SRC_DIR)/mmu_c_test.c \
+		$(SRC_DIR)/mmu_high_test.c $(SRC_DIR)/mmu_activation.c \
+		$(SRC_DIR)/mmu_tables.c $(SRC_DIR)/mmu_boot.c \
+		-o $(OBJ_DIR)/mmu_c_test
+	$(OBJ_DIR)/mmu_c_test
+	$(HOSTCC) $(HOSTCFLAGS) -fno-optimize-sibling-calls -iquote $(SRC_DIR) \
+		tests/mmu_c_island_test.c $(SRC_DIR)/mmu_c_island.c \
+		-o $(OBJ_DIR)/mmu_c_island_test
+	$(OBJ_DIR)/mmu_c_island_test
 	$(HOSTCC) $(HOSTCFLAGS) -iquote $(SRC_DIR) \
 		tests/mmu_kernel_stack_test.c $(SRC_DIR)/mmu_kernel_stack.c \
 		$(SRC_DIR)/mmu_high_test.c $(SRC_DIR)/mmu_activation.c \

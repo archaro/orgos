@@ -7,6 +7,7 @@
 #include "mmu_high_test.h"
 #include "mmu_vectors.h"
 #include "mmu_kernel_stack.h"
+#include "mmu_c_test.h"
 #include "irq.h"
 #include "mmu_activation.h"
 #include "cache.h"
@@ -476,4 +477,27 @@ void mmu_kernel_stack_complete(void) {
 }
 bool mmu_kernel_stack_report(bool execute, mmu_kernel_stack_report_t *r) {
   return mmu_kernel_stack_report_owner(&high_experiment, execute, r);
+}
+
+// Exclusive experiment data. C accesses explicit high aliases; low code
+// initializes/checks their original aliases. No executable page is writable.
+static const uint64_t c_inputs[3] = {MMU_C_GUARD_BEFORE, 6, 7};
+static volatile mmu_c_storage_t c_output;
+
+bool mmu_c_test(mmu_c_result_t *result) {
+  extern char __c_island_start[], __c_island_end[];
+  extern char mmu_c_middle[], mmu_c_leaf[], mmu_c_call_return[];
+  extern char mmu_c_outer_site[], mmu_c_middle_site[], mmu_c_leaf_site[];
+  mmu_c_manifest_t code = {
+    .start = (uintptr_t)__c_island_start,
+    .end = (uintptr_t)__c_island_end, .entry = (uintptr_t)mmu_c_outer,
+    .site = {(uintptr_t)mmu_c_outer_site, (uintptr_t)mmu_c_middle_site,
+      (uintptr_t)mmu_c_leaf_site},
+    .function = {{(uintptr_t)mmu_c_outer, (uintptr_t)__c_island_end},
+      {(uintptr_t)mmu_c_middle, (uintptr_t)mmu_c_outer},
+      {(uintptr_t)mmu_c_leaf, (uintptr_t)mmu_c_middle}},
+    .low_return = (uintptr_t)mmu_c_call_return,
+    .ro = (uintptr_t)c_inputs, .rw = (uintptr_t)&c_output
+  };
+  return mmu_c_run(&high_experiment, &code, c_inputs, &c_output, result);
 }

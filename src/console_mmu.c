@@ -6,6 +6,7 @@
 #include "mmu_high_test.h"
 #include "mmu_vectors.h"
 #include "mmu_kernel_stack.h"
+#include "mmu_c_test.h"
 
 extern char __text_start[], __rodata_start[], __data_start[], __bss_start[];
 extern char __stack_bottom[], exception_vectors[];
@@ -217,7 +218,55 @@ static void report_stack(bool execute) {
     console_puts("  Mapping/live-SP inspection; no nested test triggered.\n");
 }
 
+static void run_c_test(void) {
+  mmu_c_result_t r;
+  bool pass = mmu_c_test(&r);
+  console_printf("Higher-half C execution test: %s\n", pass ? "PASS" : "FAIL");
+  console_printf("  Status: %s\n", r.status);
+  hex_value("High C entry", r.high_entry);
+  if (r.validated)
+    hex_value("Expected entry PA", r.high_entry - MMU_TTBR1_BASE);
+  if (r.executed) {
+    const char *names[] = {"Outer", "Middle", "Leaf"};
+    for (unsigned int i = 0; i < 3; i++) {
+      console_printf("  %s compiled C function\n", names[i]);
+      hex_value("Observed PC", r.evidence.pc[i]);
+      hex_value("Expected code PA", r.expected_code_pa[i]);
+      hex_value("Verified hardware code PA", r.code_pa[i]);
+      hex_value("Observed SP", r.evidence.sp[i]);
+      hex_value("Verified hardware SP PA", r.stack_pa[i]);
+      hex_value("Observed automatic object", r.evidence.local[i]);
+      hex_value("Verified hardware object PA", r.local_pa[i]);
+    }
+    hex_value("Middle observed caller LR", r.evidence.caller[0]);
+    hex_value("Leaf observed caller LR", r.evidence.caller[1]);
+    hex_value("Observed RO read address", r.evidence.ro_address);
+    hex_value("Verified hardware RO PA", r.ro_pa);
+    hex_value("Observed RW write address", r.evidence.rw_address);
+    hex_value("Verified hardware RW PA", r.rw_pa);
+    hex_value("Observed low return", r.call.low_return);
+    console_printf("  Calculation: %llu (expected 42)\n",
+        (unsigned long long)r.call.result);
+  }
+  console_printf("  Internal call chain: %s\n",
+      r.chain_verified ? "OK" : "FAIL");
+  console_printf("  Data and guards: %s\n", r.data_verified ? "OK" : "FAIL");
+  console_printf("  AAPCS64 registers/SP and NZCV: %s\n",
+      r.registers_preserved ? "PRESERVED" : "NOT VERIFIED");
+  console_printf("  Translation registers/high VBAR: %s\n",
+      r.preserved ? "PRESERVED" : "NOT VERIFIED");
+  hex_value("Original DAIF", r.original_daif);
+  hex_value("Final DAIF", r.final_daif);
+}
+
 void cmd_kmap(const char *args) {
+  if (console_arg_word(&args, "code")) {
+    if (console_arg_word(&args, "test") && console_arg_end(args))
+      run_c_test();
+    else
+      console_puts("Usage: kmap code test\n");
+    return;
+  }
   if (console_arg_word(&args, "stack")) {
     if (console_arg_end(args))
       report_stack(false);
@@ -242,18 +291,21 @@ void cmd_kmap(const char *args) {
       else
         console_puts("Usage: kmap vectors irq [arm]\n");
     } else
-      console_puts("Usage: kmap [test | stack [test] | vectors [test | irq [arm]]]\n");
+      console_puts("Usage: kmap [code test | test | stack [test] | "
+                   "vectors [test | irq [arm]]]\n");
     return;
   }
   if (console_arg_word(&args, "test")) {
     if (console_arg_end(args))
       run_high_test();
     else
-      console_puts("Usage: kmap [test | stack [test] | vectors [test | irq [arm]]]\n");
+      console_puts("Usage: kmap [code test | test | stack [test] | "
+                   "vectors [test | irq [arm]]]\n");
     return;
   }
   if (!console_arg_end(args)) {
-    console_puts("Usage: kmap [test | stack [test] | vectors [test | irq [arm]]]\n");
+    console_puts("Usage: kmap [code test | test | stack [test] | "
+                   "vectors [test | irq [arm]]]\n");
     return;
   }
   const mmu_address_space_t *space = mmu_high_address_space();

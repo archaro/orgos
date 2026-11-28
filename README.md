@@ -23,7 +23,7 @@ A largely complete MIDI API is found in `src/midi.h`. Building a MIDI applicatio
 into the kernel should just be a matter of including that file in the new
 application source, and modifying `main.c` appropriately.
 
-- [Higher-half mappings, vectors, IRQ and permanent EL1 stack](docs/higher-half-kernel.md)
+- [Higher-half C execution, vectors and permanent EL1 stack](docs/higher-half-kernel.md)
 - [Address-space machinery and MMU validation](docs/address-spaces.md)
 - [Recoverable exceptions and EL1 trap test](docs/exceptions.md)
 - [First EL0 program and privilege-fault test](docs/el0-testing.md)
@@ -35,15 +35,16 @@ application source, and modifying `main.c` appropriately.
 - [Implemented MIDI architecture and ownership](docs/midi-architecture.md)
 - [Host tests, receive verifier and physical test procedure](docs/midi-testing.md)
 
-Build the Pi image with an AArch64 GNU toolchain and run host regressions with a
-native GNU17 C compiler:
+Build the Pi image with an AArch64 GNU toolchain and Python 3 (standard
+library only); run host regressions with a native GNU17 C compiler:
 
 ```sh
 make check
 make
 ```
 
-`make` produces `kernel8.img`. The default cross-toolchain prefix is
+`make` audits the bounded C island instructions/relocations before
+producing `kernel8.img`. The default cross-toolchain prefix is
 `aarch64-linux-gnu-`; `CROSS`, `HOSTCC` and `HOSTCFLAGS` can be overridden. See
 the testing guide for what these checks establish and what still needs
 hardware.

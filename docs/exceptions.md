@@ -1,5 +1,11 @@
 # Exception stacks after H2.6f5
 
+H2.6f6 adds `kmap code test`, a masked, bounded high-C execution island.
+It neither deliberately traps nor changes the exception contract, vectors
+or stack. Its compiler-generated C frames use the permanent high stack;
+unexpected exceptions still enter the existing high vectors and remain
+fatal. See [the C execution contract](higher-half-kernel.md) for validation.
+
 Normal execution, EL1 exceptions and EL0 kernel continuations now use the
 high alias of the same linker-reserved 16 KiB EL1 stack. High vectors
 remain permanent; ordinary instructions and global pointers remain low.

@@ -35,6 +35,10 @@ SECTIONS
   {
     __text_start = .;
     KEEP(*(.text.boot))
+    . = ALIGN(16);
+    __c_island_start = .;
+    KEEP(*(.h2_c.text))
+    __c_island_end = .;
     *(.text .text.*)
     . = ALIGN(4096);
     __text_end = .;
@@ -109,6 +113,9 @@ SECTIONS
    * Fail at link time if the kernel grows
    * beyond that region.
    */
+  ASSERT(__c_island_end > __c_island_start &&
+         __c_island_end - __c_island_start <= 2048,
+         "C execution island exceeds its bounded region")
   ASSERT(__kernel_end <= 0x200000, "Kernel exceeds initial L3 mapping")
 
   /DISCARD/ :

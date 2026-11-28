@@ -68,6 +68,15 @@ bool mmu_vectors_test(mmu_vectors_result_t *r) {
     .esr = 0x56000021};
   return true;
 }
+static unsigned int code_requests;
+bool mmu_c_test(mmu_c_result_t *r) {
+  code_requests++;
+  *r = (mmu_c_result_t){.status = "PASS", .passed = true,
+    .validated = true, .executed = true, .preserved = true,
+    .chain_verified = true, .data_verified = true,
+    .registers_preserved = true, .call = {.result = 42}};
+  return true;
+}
 static bool persistent;
 bool mmu_high_test(mmu_high_test_result_t *r) {
   execution_requests++;
@@ -326,6 +335,19 @@ int main(void) {
   assert(strstr(output, "Nested result: 42 (expected 42)"));
   assert(strstr(output, "State: HIGH"));
   assert(strstr(output, "Permanent SP/registers retained: YES") && stack_requests == 1);
+  written = 0;
+  cmd_kmap("code test extra");
+  assert(strstr(output, "Usage: kmap code test") && code_requests == 0);
+  written = 0;
+  cmd_kmap("code");
+  assert(strstr(output, "Usage: kmap code test") && code_requests == 0);
+  written = 0;
+  cmd_kmap("code test");
+  assert(strstr(output, "Higher-half C execution test: PASS"));
+  assert(strstr(output, "Calculation: 42 (expected 42)"));
+  assert(strstr(output, "Internal call chain: OK"));
+  assert(strstr(output, "Translation registers/high VBAR: PRESERVED"));
+  assert(code_requests == 1);
   puts("Higher-half geometry, policy and active/inactive inspection: PASS");
   return 0;
 }
