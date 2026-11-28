@@ -43,7 +43,15 @@ __asm__(".global high_test_text_start\n.set high_test_text_start, 0x80000\n"
 static char output[8192];
 static size_t written;
 static unsigned int register_reads;
-static unsigned int execution_requests;
+static unsigned int execution_requests, vector_requests;
+bool mmu_vectors_test(mmu_vectors_result_t *r) {
+  vector_requests++;
+  *r = (mmu_vectors_result_t){.status = "PASS", .passed = true,
+    .validated = true, .observed = true, .restored = true,
+    .persistent = true, .masks_restored = true, .vector = 4,
+    .esr = 0x56000021};
+  return true;
+}
 static bool persistent;
 bool mmu_high_test(mmu_high_test_result_t *r) {
   execution_requests++;
@@ -267,6 +275,19 @@ int main(void) {
   assert(strstr(output, "Higher-half execution test: PASS"));
   assert(strstr(output, "PRESERVED (TTBR1 remains enabled)"));
   assert(execution_requests == 2);
+  written = 0;
+  cmd_kmap("vectors test extra");
+  assert(strstr(output, "Usage: kmap") && vector_requests == 0);
+  written = 0;
+  cmd_kmap("vectors");
+  assert(strstr(output, "Usage: kmap") && vector_requests == 0);
+  written = 0;
+  cmd_kmap("vectors test");
+  assert(strstr(output, "Higher-half vector test: PASS"));
+  assert(strstr(output, "Exception vector: 4"));
+  assert(strstr(output, "Low vectors restored: YES"));
+  assert(strstr(output, "Persistent TTBR1: PRESERVED (ENABLED)"));
+  assert(vector_requests == 1 && execution_requests == 2);
   puts("Higher-half geometry, policy and active/inactive inspection: PASS");
   return 0;
 }

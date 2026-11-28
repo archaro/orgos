@@ -98,5 +98,56 @@ short lifetime; no persistent context stores a kernel continuation pointer.
 The active slot and borrowed kernel return pointer exist only during one
 explicit resume transition and are cleared before foreground execution
 continues. Shared return assembly restores a copied context on resume.
-There are no general resume-after-abort cases. The two contexts share an
-address space; separate stack storage does not imply mutual isolation.
+There are no general resume-after-abort cases. The two contexts now use
+independent TTBR0 hierarchies with a common stack VA and distinct physical
+backings. Persistent TTBR1 supplies a
+shared privileged upper range; see the address-space and virtual-stack
+guides for the implemented isolation and its limits.
+
+
+## H2.6f2: one synchronous entry through high vectors
+
+`kmap vectors test` temporarily installs the existing table's higher-half
+alias in VBAR_EL1, reuses the known EL1 SVC 0x21/site, and restores the
+original low VBAR before restoring DAIF. TTBR1 remains persistently active;
+normal kernel execution and the 16 KiB EL1 stack remain low. The complete
+[implementation and Pi procedure](higher-half-kernel.md) distinguish this
+bounded experiment from permanent vectors or higher-half IRQ verification.
+
+The frame layout and SAVE_FRAME/ERET contract above are unchanged. After
+all registers have been saved, the sync stub obtains its actual executing
+VA with ADR and passes it as a second argument to a low C observer. The
+observer records it only while this diagnostic is armed. Otherwise it
+forwards the untouched frame to the original dispatcher.
+
+Entry assembly uses literal-loaded, absolute LOW C targets and BLR rather
+than relative BL. This prevents high assembly from accidentally entering
+C at the high alias, where linker-symbol comparisons could disagree with
+the saved low ELR. The literal pool is part of the validated RO/RX extent;
+relative table/return branches preserve the alias. Linker assertions check
+2 KiB table alignment and sixteen 128-byte slots. Low IRQ/lower-EL entry
+continues calling the same C handlers and common return path.
+
+The armed observer requires one exact vector-4 SVC, EL1h, expected flags
+and masks, fixed low continuation and actual high ADR site. It verifies
+hardware translation of that observed address and the live temporary VBAR
+and preserved translation regime. Unexpected entry evidence is fatal.
+The existing dispatcher leaves the full saved frame unchanged; ERET
+returns low. The original register test plus an additional SP_EL0 sentinel
+check must report zero mismatches. Bits 0..33 retain their existing meaning;
+bit 34 identifies an SP_EL0 mismatch. The launcher restores the caller's
+original SP_EL0, and the controller verifies final architectural state.
+
+No arbitrary exception is made recoverable. Precondition rejection makes
+no VBAR write; failure after transition is fatal, with asynchronous
+exceptions masked. The normal persistent-owner rule still requires low
+VBAR; it is not widened to accept a new permanent vector regime. The busy
+interval excludes other MMU operations until verified low VBAR restoration.
+
+Host tests cover controller ordering, all DAIF masks, exact evidence and
+rejection/fatal paths. Cross-build and linked assembly audit cover branch,
+literal, ADR and return encodings. Physical high synchronous entry remains
+pending until the documented Pi test passes. IRQ, FIQ and SError are masked
+throughout this experiment; later low-vector IRQ/USB/MIDI regressions do
+not prove higher-half IRQ entry. Permanent high vectors require separate
+live IRQ/lower-EL/nested-exception review and compatible activation guards.

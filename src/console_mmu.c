@@ -4,6 +4,7 @@
 #include "mmu.h"
 #include "mmu_high.h"
 #include "mmu_high_test.h"
+#include "mmu_vectors.h"
 
 extern char __text_start[], __rodata_start[], __data_start[], __bss_start[];
 extern char __stack_bottom[], exception_vectors[];
@@ -84,16 +85,64 @@ static void run_high_test(void) {
       r.masks_restored ? "YES" : "NO");
 }
 
+static void run_vector_test(void) {
+  mmu_vectors_result_t r;
+  bool pass = mmu_vectors_test(&r);
+  console_printf("Higher-half vector test: %s\n", pass ? "PASS" : "FAIL");
+  console_printf("  Status: %s\n", r.status);
+  console_printf("  Mapping validation: %s\n", r.validated ? "PASS" : "FAIL");
+  hex_value("Original VBAR_EL1", r.before.vbar);
+  hex_value("Temporary VBAR_EL1", r.high_vbar);
+  hex_value("Installed VBAR_EL1", r.installed.vbar);
+  hex_value("Vector table PA", r.vector_physical);
+  hex_value("Expected entry VA", r.expected_pc);
+  hex_value("Expected entry PA", r.expected_physical);
+  if (r.observed) {
+    hex_value("Observed entry VA", r.observed_pc);
+    hex_value("Observed entry PA", r.observed_physical);
+    console_printf("  Exception vector: %llu\n", (unsigned long long)r.vector);
+    hex_value("ESR_EL1", r.esr);
+    hex_value("SPSR_EL1", r.spsr);
+    hex_value("Low continuation", r.continuation);
+    hex_value("Interrupted SP", r.entry_sp);
+    hex_value("SP_EL0 test seed", r.sp_el0);
+    hex_value("Context failures", r.failures);
+  } else {
+    console_puts("  Exception entry: NOT OBSERVED\n");
+  }
+  hex_value("Final VBAR_EL1", r.after.vbar);
+  hex_value("Original TTBR0_EL1", r.before.ttbr0);
+  hex_value("Final TTBR0_EL1", r.after.ttbr0);
+  hex_value("Original TTBR1_EL1", r.before.ttbr1);
+  hex_value("Final TTBR1_EL1", r.after.ttbr1);
+  hex_value("Original TCR_EL1", r.before.tcr);
+  hex_value("Final TCR_EL1", r.after.tcr);
+  console_printf("  Low vectors restored: %s\n", r.restored ? "YES" : "NO");
+  console_printf("  Persistent TTBR1: %s\n",
+      r.persistent ? "PRESERVED (ENABLED)" : "NOT VERIFIED");
+  hex_value("Original DAIF", r.original_daif);
+  hex_value("Final DAIF", r.final_daif);
+  console_printf("  Exception masks restored: %s\n",
+      r.masks_restored ? "YES" : "NO");
+}
+
 void cmd_kmap(const char *args) {
+  if (console_arg_word(&args, "vectors")) {
+    if (console_arg_word(&args, "test") && console_arg_end(args))
+      run_vector_test();
+    else
+      console_puts("Usage: kmap [test | vectors test]\n");
+    return;
+  }
   if (console_arg_word(&args, "test")) {
     if (console_arg_end(args))
       run_high_test();
     else
-      console_puts("Usage: kmap [test]\n");
+      console_puts("Usage: kmap [test | vectors test]\n");
     return;
   }
   if (!console_arg_end(args)) {
-    console_puts("Usage: kmap [test]\n");
+    console_puts("Usage: kmap [test | vectors test]\n");
     return;
   }
   const mmu_address_space_t *space = mmu_high_address_space();

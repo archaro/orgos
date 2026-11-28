@@ -72,6 +72,12 @@ clean:
 	rm -rf $(OBJ_DIR) $(TARGET)
 
 check: | $(OBJ_DIR)
+	$(HOSTCC) $(HOSTCFLAGS) -fno-pie -no-pie -iquote $(SRC_DIR) \
+		tests/mmu_vectors_test.c $(SRC_DIR)/mmu_vectors.c \
+		$(SRC_DIR)/exception_dispatch.c $(SRC_DIR)/mmu_high_test.c \
+		$(SRC_DIR)/mmu_activation.c $(SRC_DIR)/mmu_tables.c \
+		$(SRC_DIR)/mmu_boot.c -o $(OBJ_DIR)/mmu_vectors_test
+	$(OBJ_DIR)/mmu_vectors_test
 	$(HOSTCC) $(HOSTCFLAGS) -iquote $(SRC_DIR) \
 		tests/mmu_high_execution_test.c $(SRC_DIR)/mmu_high_test.c \
 		$(SRC_DIR)/mmu_activation.c \

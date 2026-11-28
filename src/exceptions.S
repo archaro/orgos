@@ -4,8 +4,17 @@
 .section ".text.exceptions", "ax"
 .extern exception_panic
 .extern exception_dispatch
+.extern exception_sync_entry
 .extern irq_dispatch
 .global exception_vectors
+
+// The frame stubs may run at either alias. Calls into ordinary C always
+// use linker-resolved LOW addresses from immutable nearby literals. A BL
+// would retain the high offset and enter C with unintended high pointers.
+.macro LOW_CALL target
+  ldr x16, =\target
+  blr x16
+.endm
 
 // Fatal vectors retain the existing diagnostic path.
 .macro PANIC_VECTOR number
@@ -41,12 +50,15 @@ exception_vectors:
   PANIC_VECTOR 14
   PANIC_VECTOR 15
 
+.global exception_vector_table_end
+exception_vector_table_end:
+
 exception_entry:
   mrs x1, esr_el1
   mrs x2, elr_el1
   mrs x3, far_el1
   mrs x4, spsr_el1
-  bl exception_panic
+  LOW_CALL exception_panic
 1:
   wfe
   b 1b
@@ -55,22 +67,26 @@ exception_entry:
 
 sync_entry:
   SAVE_FRAME 4
-  bl exception_dispatch
+.global exception_sync_observed
+exception_sync_observed:
+  // x1 is safe scratch only after the common frame saved every GPR.
+  adr x1, exception_sync_observed
+  LOW_CALL exception_sync_entry
   b exception_return
 
 irq_entry:
   SAVE_FRAME 5
-  bl irq_dispatch
+  LOW_CALL irq_dispatch
   b exception_return
 
 lower_sync_entry:
   SAVE_FRAME 8, 1
-  bl exception_dispatch
+  LOW_CALL exception_dispatch
   b exception_return
 
 lower_irq_entry:
   SAVE_FRAME 9, 1
-  bl irq_dispatch
+  LOW_CALL irq_dispatch
 
 // Recoverable paths restore PC/status from their own frame, not relying
 // on system registers surviving the C handler. Do not unmask in handlers.
@@ -101,3 +117,10 @@ exception_return:
   ldr x30, [sp, #EXCEPTION_FRAME_X30]
   add sp, sp, #EXCEPTION_FRAME_SIZE
   eret
+
+// Literal pool contains absolute LOW C targets, accessed PC-relatively
+// at either alias. Keep it inside the validated RO/RX assembly extent.
+.balign 8
+.ltorg
+.global exception_vector_code_end
+exception_vector_code_end:

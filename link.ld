@@ -94,6 +94,11 @@ SECTIONS
   . = ALIGN(4096);
   __kernel_end = .;
 
+  ASSERT((exception_vectors & 2047) == 0,
+         "Exception vectors require 2 KiB alignment")
+  ASSERT(exception_vector_table_end - exception_vectors == 2048,
+         "Exception table must contain sixteen 128-byte slots")
+
   ASSERT(__el0_text_end - __el0_text_start == 4096,
          "EL0 diagnostic must occupy exactly one code page")
 

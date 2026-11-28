@@ -5,6 +5,8 @@
 #include "mmu_boot.h"
 #include "mmu_high.h"
 #include "mmu_high_test.h"
+#include "mmu_vectors.h"
+#include "irq.h"
 #include "mmu_activation.h"
 #include "cache.h"
 
@@ -405,4 +407,19 @@ bool mmu_high_test(mmu_high_test_result_t *result) {
 
 void mmu_activation_fatal(void) {
   mmu_high_hw_fatal("TTBR0 switch changed the translation environment");
+}
+
+bool mmu_vectors_test(mmu_vectors_result_t *result) {
+  extern char exception_vectors[], exception_vector_code_end[];
+  extern char exception_sync_observed[], exception_test_resume[];
+  const mmu_vector_code_t code = {
+    .vectors = (uintptr_t)exception_vectors,
+    .end = (uintptr_t)exception_vector_code_end,
+    .observed_site = (uintptr_t)exception_sync_observed,
+    .continuation = (uintptr_t)exception_test_resume,
+    .handlers = {(uintptr_t)exception_sync_entry,
+      (uintptr_t)exception_dispatch, (uintptr_t)exception_panic,
+      (uintptr_t)irq_dispatch}
+  };
+  return mmu_vectors_run(&high_experiment, &code, result);
 }
